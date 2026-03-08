@@ -192,62 +192,277 @@
 **Context:** The Meadow F7 board has two chips — STM32F777 (main MCU) and ESP32 (coprocessor). They communicate via SPI2 with GPIO handshaking. The ESP32 provides WiFi, BLE, mesh networking, NTP, and file system services through the ESPCP protocol.
 
 ### Background: ESPCP Communication Architecture
-- **Bus:** SPI2 (STM32 side), with GPIO handshaking (CS: PI0, Ready: PI10, Reset: PF7, Boot: PI10)
-- **Protocol:** Custom request-response, 27-byte headers, CRC8/CRC32, max 4092-byte SPI frames
-- **UART5:** Secondary channel for ESP32 debug/monitor output
-- **Threading:** STM32 runs ESPCP thread (outgoing), event handler thread (incoming), UART monitor thread
-- **Key source:** `Meadow.OS/espcp/espcp_coprocessor.c`, `espcp_message.h`, `espcp_shared_enums.h`
-- **Build flag:** `CONFIG_MEADOW_ESPCP_MANAGER` (currently `not set` in defconfig — safe for Phase 1A-1C)
 
-### Approach Options
+**Physical connections (on-board ESP32):**
+- **SPI2** @ 0x40003800 — primary data bus
+- **CS:** PI0 (active-low chip select)
+- **Ready:** PI10 (ESP32 → STM32, goes high when ESP32 is ready to receive)
+- **Reset:** PF7 (STM32 → ESP32, open-drain output)
+- **Boot:** PI10 (shared with Ready; STM32 → ESP32, open-drain)
+- **UART5** — secondary channel for ESP32 debug/monitor output
 
-**Option A: ESPCP Stub on STM32 Side (Recommended first step)**
-- Create a virtual SPI peripheral in Renode that responds to ESPCP messages
-- Implement minimal responses: WiFi status, socket API stubs, system info
-- No actual ESP32 firmware needed
-- Pros: Simplest, tests STM32 ESPCP code paths without real ESP32
-- Cons: Can't test actual ESP32 firmware or WiFi/BLE behavior
+**ESPCP Protocol (v1):**
+- **Header:** 27 bytes — protocol version (1B), CRC8 (1B), message_type (1B), interface (1B), function (4B), status_code (4B), message_id (4B), packet_offset (2B), packet_length (2B), payload_length (4B), CRC32 (4B)
+- **Max SPI frame:** 4092 bytes (ESP32 silicon bug limits this)
+- **SPI overhead:** 4 bytes padding (last 4 bytes discarded — ESP32 silicon bug workaround)
+- **Max packet payload:** 4061 bytes (4092 - 27 header - 4 overhead)
+- **Max message payload:** 8192 bytes (larger payloads split across multiple packets)
+- **Message direction:** ID < 0x80000000 = ESP32→STM32; ID >= 0x80000000 = STM32→ESP32
 
-**Option B: Dual-Machine Emulation (Full fidelity)**
-- Renode supports multi-machine setups with virtual SPI/GPIO connections
-- Run STM32F7 machine + ESP32 machine, connected via virtual SPI bus
-- Load actual ESP32 firmware (from `../Meadow.OS/esp32/` build)
-- Pros: Tests real inter-chip communication, real ESP32 firmware
-- Cons: Requires ESP32 platform file, ESP32 firmware build, complex setup
+**Message types:**
+- `0x00` ACK, `0x01` NAK, `0x02` Reset, `0x04` Event
+- `0x10` Response, `0x20` Transport, `0x40` Header, `0x80` Data
 
-**Option C: Hybrid — Stub first, dual-machine later**
-- Start with Option A to unblock Meadow.OS networking tests
-- Graduate to Option B when ESP32 firmware testing is needed
+**Interfaces (uint8):**
+- `0` None, `1` WiFi, `2` Bluetooth, `3` Mesh, `4` System, `5` Transport, `6` Wired Ethernet
 
-### 4.1 — Enable ESPCP in Build
-- [ ] Update `build-emulator.sh` to set `CONFIG_MEADOW_ESPCP_MANAGER=y` via kconfig-tweak
-- [ ] Verify build still succeeds with ESPCP enabled
-- [ ] Identify what happens at boot when ESPCP initializes but no ESP32 responds
+**Key functions per interface:**
+- **System (4):** get_configuration, set_configuration_item, deep_sleep, get_battery_charge_level, file_system_*, logging_*, core_dump_*
+- **WiFi (1):** start/stop interface, connect/disconnect AP, scan, set_antenna, full socket API (socket, connect, bind, listen, accept, send, recv, poll, close, getaddrinfo, setsockopt, ioctl)
+- **Bluetooth (2):** start, stop, get_handles, server_data_set, client_write_request_event
+- **Transport (5):** response_ready, send_response, kill_nuttx_thread, reset_esp32
 
-### 4.2 — Create ESPCP SPI Stub Peripheral
-- [ ] Create a Renode Python or C# peripheral that sits on SPI2 (0x40003800)
-- [ ] Implement ESPCP message parsing (27-byte header, CRC validation)
-- [ ] Handle the SPI Ready handshake (PI10 GPIO)
-- [ ] Implement minimal responses for:
-  - System info / status queries
-  - WiFi interface start (return success)
-  - WiFi scan (return empty or mock results)
-  - Socket API stubs (return file descriptors, accept connections)
-- [ ] Wire into `meadow-f7.repl` and `.resc` scripts
+**STM32 threading model:**
+- ESPCP main thread — processes outgoing message queue
+- Event handler thread — processes incoming events from ESP32
+- UART monitor thread — captures ESP32 debug output via UART5
 
-### 4.3 — Test ESPCP Communication
-- [ ] Verify ESPCP thread starts and sends initialization messages
-- [ ] Confirm SPI handshake sequence works (Reset → Boot → Ready)
-- [ ] Test request-response cycle with stub responses
-- [ ] Verify no hangs or timeouts in ESPCP message queues
+**Startup sequence:**
+1. `espcp_init()` — create threads, message queues, buffers
+2. `espcp_enter_run_mode()` — configure GPIO, reset ESP32
+3. Wait for SPI Ready line (PI10) to go high
+4. Begin SPI request-response communication
 
-### 4.4 — Evaluate Dual-Machine Emulation (Future)
-- [ ] Research Renode's multi-machine SPI bridging capabilities
-- [ ] Determine if Renode has ESP32 or Xtensa platform support
-- [ ] If viable: create `platforms/meadow-esp32.repl` for the coprocessor
-- [ ] Create `.resc` script that wires both machines together via virtual SPI
-- [ ] Build ESP32 firmware from `../Meadow.OS/esp32/` and load into ESP32 machine
-- [ ] Test end-to-end: STM32 sends ESPCP message → SPI → ESP32 processes → responds
+**Key source files:**
+- `Meadow.OS/espcp/espcp_coprocessor.c` — SPI communication, startup, message send/receive
+- `Meadow.OS/espcp/espcp_message.h` — header structure, constants
+- `Meadow.OS/espcp/espcp_shared_enums.h` — all interface/function/status enums
+- `Meadow.OS/espcp/espcp_thread.c` — thread management
+- `Meadow.OS/espcp/doc/coprocessor.md` — architecture documentation
+
+**Build flag:** `CONFIG_MEADOW_ESPCP_MANAGER` (currently `not set` in defconfig — safe for Phase 1A-1C)
+
+---
+
+### Phase 4A: ESPCP SPI Stub Peripheral (C# in Renode)
+**Goal:** Create a Renode peripheral that acts as a virtual ESP32, responding to ESPCP messages on SPI2
+**Approach:** C# peripheral (not Python — Python peripherals only handle simple register reads/writes; we need the `ISPISlave` interface for proper SPI frame handling)
+
+#### 4A.1 — Stub Architecture Design
+The stub peripheral implements Renode's `ISPISlave` interface and sits on the STM32's SPI2 bus. It:
+1. Receives SPI frames from the STM32 ESPCP driver
+2. Parses the 27-byte ESPCP header
+3. Routes to interface-specific handlers based on `interface` + `function` fields
+4. Constructs response frames with appropriate headers and CRC
+5. Manages the Ready GPIO line to signal readiness
+
+```
+┌─────────────────────────────────────────────────┐
+│ STM32F7 (Renode Machine)                        │
+│                                                 │
+│  ┌──────────┐    SPI2     ┌──────────────────┐  │
+│  │ ESPCP    │◄──────────►│ EspcpStub        │  │
+│  │ Driver   │            │ (C# peripheral)  │  │
+│  └──────────┘            │                  │  │
+│       │                  │  Handles:        │  │
+│       │ GPIO             │  - System info   │  │
+│  PI10 (Ready) ◄──────── │  - WiFi stubs    │  │
+│  PF7  (Reset) ────────► │  - Socket API    │  │
+│  PI0  (CS)    ────────► │  - BLE stubs     │  │
+│                          └──────────────────┘  │
+└─────────────────────────────────────────────────┘
+```
+
+#### 4A.2 — Create ESPCP Stub C# Peripheral
+- [ ] Create `peripherals/EspcpStub.cs` implementing `ISPISlave`
+- [ ] Implement SPI frame receive/transmit (4092-byte frames)
+- [ ] Parse 27-byte ESPCP message header:
+  - Validate CRC8 (header) and CRC32 (payload)
+  - Extract interface, function, message_id, payload
+- [ ] Construct response frames:
+  - Set message_type = `0x10` (Response)
+  - Set status_code = `espcp_status_codes_completed_ok` (0)
+  - Calculate CRC8/CRC32
+  - Add 4-byte SPI overhead padding
+- [ ] Handle multi-packet messages (payload > 4061 bytes spans multiple SPI frames)
+
+#### 4A.3 — Implement Interface Handlers
+**Minimum viable set for boot + basic networking:**
+
+**System interface (4) — Required for boot:**
+- [ ] `get_configuration (0)` → return default config (device name, antenna, MAC addresses)
+- [ ] `set_configuration_item (1)` → ACK, store in memory
+- [ ] `logging_configuration (13)` → ACK
+- [ ] `get_battery_charge_level (3)` → return mock value (e.g., 100%)
+
+**Transport interface (5) — Required for handshake:**
+- [ ] `response_ready (0)` → signal that stub is ready
+- [ ] `reset_esp32 (3)` → ACK, re-initialize stub state
+
+**WiFi interface (1) — Required for networking:**
+- [ ] `start_wi_fi_interface (0)` → return success, fire `start_wi_fi_interface_event (34)`
+- [ ] `stop_wi_fi_interface (1)` → return success
+- [ ] `connect_to_default_access_point (3)` → return success, fire `network_connected_event (36)` with mock IP
+- [ ] `get_access_points (6)` → return empty list or mock AP
+- [ ] `socket (8)` → return mock file descriptor (incrementing int)
+- [ ] `connect (9)` → return success
+- [ ] `write (10)` / `send (19)` → ACK, discard data (or log it)
+- [ ] `read (13)` / `recv_from (16)` → return empty or mock data
+- [ ] `close (14)` → return success
+- [ ] `poll (17)` → return no events ready
+- [ ] `bind (20)`, `listen (21)`, `accept (22)` → return success/mock FD
+- [ ] `set_sock_opt (11)` / `get_sock_opt (12)` → ACK/return defaults
+- [ ] `get_addr_info (27)` → return mock address resolution
+
+**Bluetooth interface (2) — Stub only:**
+- [ ] `start (0)` → return success
+- [ ] `stop (1)` → return success
+
+#### 4A.4 — Wire Stub into Platform
+- [ ] Add to `meadow-f7.repl`:
+  ```
+  espcpStub: SPI.EspcpStub @ spi2
+      -> gpioPortI@10  // Ready signal to PI10
+  ```
+- [ ] Handle GPIO connections in `.resc`:
+  ```
+  # Wire ESP32 reset line
+  gpioPortF.7 -> espcpStub@0  // Reset from PF7
+  # Wire CS line
+  gpioPortI.0 -> espcpStub@1  // CS from PI0
+  ```
+- [ ] Update `build-emulator.sh` to set `CONFIG_MEADOW_ESPCP_MANAGER=y`
+
+#### 4A.5 — Test ESPCP Stub
+- [ ] Verify ESPCP init sequence: reset ESP32 → wait for Ready → send first message
+- [ ] Confirm system config exchange works
+- [ ] Test WiFi start → connect → socket create → send/recv cycle
+- [ ] Verify no timeouts or deadlocks in ESPCP message queues
+- [ ] Test graceful handling of unsupported functions (return `espcp_status_codes_not_implemented`)
+- [ ] Add Renode logging for all ESPCP messages (useful for debugging)
+
+#### 4A.6 — Network Bridge to Host (Stretch)
+- [ ] Investigate bridging mock socket calls to real host networking
+- [ ] If viable: `socket()` in stub creates a real host socket, `send()`/`recv()` proxy to it
+- [ ] This would allow Meadow.OS to make real network connections from emulation
+- [ ] Requires Renode host integration (may need C# peripheral with System.Net.Sockets)
+
+---
+
+### Phase 4B: Dual-Machine Emulation (Full Fidelity)
+**Goal:** Run both STM32F7 and ESP32 as separate Renode machines connected via virtual SPI
+**Priority:** Future — for testing real ESP32 firmware and full inter-chip protocol
+
+#### Background: Renode Multi-Machine Capabilities
+Renode supports multiple machines in a single simulation with inter-machine connections:
+- **UART:** `emulation CreateUARTHub "hub"` + `connector Connect` — buffered, deterministic
+- **GPIO:** `emulation CreateGPIOConnector "gpio-con"` — unidirectional boolean signals (max 2 machines per connector; bidirectional needs 2 connectors)
+- **SPI:** No built-in SPI hub/connector documented — may need custom bridge peripheral or C# connector
+- **Xtensa CPU:** Renode has basic Xtensa support (`xtensa-sample-controller.repl`) but no full ESP32 platform
+
+#### 4B.1 — Investigate Renode SPI Inter-Machine Support
+- [ ] Check if Renode has an SPI equivalent of `CreateUARTHub`
+- [ ] If not: design a C# bridge peripheral that sits on both machines' SPI buses
+  - Machine A (STM32): SPI master sends frame → bridge captures
+  - Bridge forwards frame to Machine B (ESP32): SPI slave receives
+  - ESP32 processes, responds → bridge forwards back to STM32
+- [ ] Evaluate timing/synchronization: SPI is synchronous, Renode time domains may need coordination
+- [ ] Check Renode community/issues for prior art on SPI multi-machine setups
+
+#### 4B.2 — Create ESP32 Platform Description
+- [ ] Create `platforms/meadow-esp32.repl` based on Renode's `xtensa-sample-controller.repl`
+- [ ] Adapt memory map for ESP32 (or ESP32-S3 if that's what Meadow uses):
+  - IRAM: 0x40000000
+  - DRAM: 0x3FFE0000 / 0x3FFC0000
+  - Flash: memory-mapped region
+  - SPI slave peripheral (ESPCP receiver side)
+- [ ] Add UART for debug output (connects to UART5 on STM32 side via UARTHub)
+- [ ] CPU: Xtensa with ESP32-appropriate configuration
+
+#### 4B.3 — Build ESP32 Firmware for Renode
+- [ ] Review `../Meadow.OS/esp32/` build system (ESP-IDF + CMake)
+- [ ] Determine if ESP32 firmware can be built for Renode's Xtensa model
+- [ ] Key challenge: ESP-IDF relies on hardware-specific peripherals (WiFi radio, etc.) that Renode won't have
+- [ ] May need to build a stripped-down ESP32 firmware that only runs the ESPCP SPI slave + mock WiFi responses
+- [ ] Alternative: use the stub approach (Phase 4A) for WiFi/BLE, only emulate the ESPCP transport layer in ESP32 firmware
+
+#### 4B.4 — Wire Machines Together
+- [ ] Create `scripts/meadow-full.resc`:
+  ```
+  # Create STM32F7 machine
+  mach create "stm32"
+  machine LoadPlatformDescription @platforms/meadow-f7.repl
+  sysbus LoadBinary @build/nuttx.bin 0x08000000
+  sysbus LoadBinary @build/nuttx_user.bin 0x08100000
+
+  # Create ESP32 machine
+  mach create "esp32"
+  machine LoadPlatformDescription @platforms/meadow-esp32.repl
+  sysbus LoadBinary @build/esp32/meadow-esp32.bin 0x40000000
+
+  # Connect UART (ESP32 debug → STM32 UART5 monitor)
+  emulation CreateUARTHub "espUartHub"
+  mach set "stm32"
+  connector Connect sysbus.uart5 espUartHub
+  mach set "esp32"
+  connector Connect sysbus.uart espUartHub
+
+  # Connect GPIO: Reset line (STM32 PF7 → ESP32 reset)
+  emulation CreateGPIOConnector "resetLine"
+  mach set "stm32"
+  connector Connect sysbus.gpioPortF resetLine
+  resetLine SelectSourcePin sysbus.gpioPortF 7
+  mach set "esp32"
+  connector Connect sysbus.resetController resetLine
+  resetLine SelectDestinationPin sysbus.resetController 0
+
+  # Connect GPIO: Ready line (ESP32 → STM32 PI10)
+  emulation CreateGPIOConnector "readyLine"
+  mach set "esp32"
+  connector Connect sysbus.readyGpio readyLine
+  readyLine SelectSourcePin sysbus.readyGpio 0
+  mach set "stm32"
+  connector Connect sysbus.gpioPortI readyLine
+  readyLine SelectDestinationPin sysbus.gpioPortI 10
+
+  # Connect SPI (requires custom bridge — see 4B.1)
+  # ... TBD based on SPI bridging investigation
+
+  # Start both machines
+  mach set "stm32"
+  showAnalyzer usart1
+  mach set "esp32"
+  showAnalyzer uart
+
+  start
+  ```
+
+#### 4B.5 — Validate End-to-End Communication
+- [ ] Verify startup: STM32 resets ESP32 → ESP32 boots → signals Ready → SPI handshake
+- [ ] Test ESPCP message round-trip: STM32 request → SPI → ESP32 processes → SPI → STM32 receives
+- [ ] Compare message traces with real hardware captures (if available)
+- [ ] Test WiFi init sequence end-to-end
+- [ ] Measure SPI timing accuracy and identify any synchronization issues
+
+#### 4B.6 — Network Passthrough (Stretch)
+- [ ] If ESP32 machine has mock WiFi: bridge to host networking via Renode's TAP/virtual network
+- [ ] Or: implement network passthrough at the ESPCP socket API level (same as 4A.6)
+
+---
+
+### Phase 4 Decision Matrix
+
+| Capability | Phase 4A (Stub) | Phase 4B (Dual-Machine) |
+|-----------|----------------|------------------------|
+| ESPCP boot handshake | ✅ Emulated in C# | ✅ Real ESP32 firmware |
+| WiFi connect/scan | ✅ Mock responses | ✅ Real (if ESP32 WiFi modeled) |
+| Socket API | ✅ Mock FDs, no real network | ✅ Real ESP32 stack |
+| BLE | ✅ Stub start/stop | ✅ Real (if BLE modeled) |
+| Test STM32 ESPCP code | ✅ Full coverage | ✅ Full coverage |
+| Test ESP32 firmware | ❌ Not running | ✅ Real firmware |
+| Setup complexity | Low-Medium | High |
+| Real network access | Possible via host bridge | Possible via Renode TAP |
+| Recommended for | Development, CI testing | Integration testing, firmware validation |
 
 ---
 
