@@ -186,17 +186,82 @@
 
 ---
 
-## Phase 4: Peripheral Parity (Ongoing)
+## Phase 4: ESP32 Coprocessor Emulation
+**Goal:** Emulate the ESP32 coprocessor so Meadow.OS has networking (WiFi/BLE)
+**Priority:** Required for full Meadow.OS functionality
+**Context:** The Meadow F7 board has two chips — STM32F777 (main MCU) and ESP32 (coprocessor). They communicate via SPI2 with GPIO handshaking. The ESP32 provides WiFi, BLE, mesh networking, NTP, and file system services through the ESPCP protocol.
+
+### Background: ESPCP Communication Architecture
+- **Bus:** SPI2 (STM32 side), with GPIO handshaking (CS: PI0, Ready: PI10, Reset: PF7, Boot: PI10)
+- **Protocol:** Custom request-response, 27-byte headers, CRC8/CRC32, max 4092-byte SPI frames
+- **UART5:** Secondary channel for ESP32 debug/monitor output
+- **Threading:** STM32 runs ESPCP thread (outgoing), event handler thread (incoming), UART monitor thread
+- **Key source:** `Meadow.OS/espcp/espcp_coprocessor.c`, `espcp_message.h`, `espcp_shared_enums.h`
+- **Build flag:** `CONFIG_MEADOW_ESPCP_MANAGER` (currently `not set` in defconfig — safe for Phase 1A-1C)
+
+### Approach Options
+
+**Option A: ESPCP Stub on STM32 Side (Recommended first step)**
+- Create a virtual SPI peripheral in Renode that responds to ESPCP messages
+- Implement minimal responses: WiFi status, socket API stubs, system info
+- No actual ESP32 firmware needed
+- Pros: Simplest, tests STM32 ESPCP code paths without real ESP32
+- Cons: Can't test actual ESP32 firmware or WiFi/BLE behavior
+
+**Option B: Dual-Machine Emulation (Full fidelity)**
+- Renode supports multi-machine setups with virtual SPI/GPIO connections
+- Run STM32F7 machine + ESP32 machine, connected via virtual SPI bus
+- Load actual ESP32 firmware (from `../Meadow.OS/esp32/` build)
+- Pros: Tests real inter-chip communication, real ESP32 firmware
+- Cons: Requires ESP32 platform file, ESP32 firmware build, complex setup
+
+**Option C: Hybrid — Stub first, dual-machine later**
+- Start with Option A to unblock Meadow.OS networking tests
+- Graduate to Option B when ESP32 firmware testing is needed
+
+### 4.1 — Enable ESPCP in Build
+- [ ] Update `build-emulator.sh` to set `CONFIG_MEADOW_ESPCP_MANAGER=y` via kconfig-tweak
+- [ ] Verify build still succeeds with ESPCP enabled
+- [ ] Identify what happens at boot when ESPCP initializes but no ESP32 responds
+
+### 4.2 — Create ESPCP SPI Stub Peripheral
+- [ ] Create a Renode Python or C# peripheral that sits on SPI2 (0x40003800)
+- [ ] Implement ESPCP message parsing (27-byte header, CRC validation)
+- [ ] Handle the SPI Ready handshake (PI10 GPIO)
+- [ ] Implement minimal responses for:
+  - System info / status queries
+  - WiFi interface start (return success)
+  - WiFi scan (return empty or mock results)
+  - Socket API stubs (return file descriptors, accept connections)
+- [ ] Wire into `meadow-f7.repl` and `.resc` scripts
+
+### 4.3 — Test ESPCP Communication
+- [ ] Verify ESPCP thread starts and sends initialization messages
+- [ ] Confirm SPI handshake sequence works (Reset → Boot → Ready)
+- [ ] Test request-response cycle with stub responses
+- [ ] Verify no hangs or timeouts in ESPCP message queues
+
+### 4.4 — Evaluate Dual-Machine Emulation (Future)
+- [ ] Research Renode's multi-machine SPI bridging capabilities
+- [ ] Determine if Renode has ESP32 or Xtensa platform support
+- [ ] If viable: create `platforms/meadow-esp32.repl` for the coprocessor
+- [ ] Create `.resc` script that wires both machines together via virtual SPI
+- [ ] Build ESP32 firmware from `../Meadow.OS/esp32/` and load into ESP32 machine
+- [ ] Test end-to-end: STM32 sends ESPCP message → SPI → ESP32 processes → responds
+
+---
+
+## Phase 5: Peripheral Parity (Ongoing)
 **Goal:** Incrementally improve emulation fidelity
 **Priority:** As-needed, driven by testing requirements
 
-### 4.1 — QSPI Flash
+### 5.1 — QSPI Flash
 - [ ] Replace MappedMemory stub with proper SPI flash model (if Renode supports W25QXXXJV)
 - [ ] Add persistent backing file for flash contents
 - [ ] Test LittleFS mount, file create/read/write/delete
 - [ ] Test FAT filesystem operations
 
-### 4.2 — Additional Peripherals
+### 5.2 — Additional Peripherals
 - [ ] **Timers:** Verify PWM output and timer interrupt generation
 - [ ] **GPIO:** Test basic pin read/write
 - [ ] **I2C/SPI:** Basic bus communication (may need virtual devices attached)
@@ -210,16 +275,21 @@
 ```
 Meadow.OS.Emulator/
 ├── platforms/
-│   └── meadow-f7.repl              # Renode platform description
+│   ├── meadow-f7.repl              # STM32F7 Renode platform description
+│   └── meadow-esp32.repl           # ESP32 coprocessor platform (Phase 4)
+├── peripherals/
+│   └── espcp_stub.py               # ESPCP SPI stub peripheral (Phase 4)
 ├── scripts/
 │   ├── meadow-nsh.resc             # NSH boot (FLAT mode)
 │   ├── meadow-os.resc              # Full Meadow.OS boot (PROTECTED mode)
+│   ├── meadow-full.resc            # Dual-machine: STM32 + ESP32 (Phase 4)
 │   ├── meadow-os-tests.resc        # Test automation
 │   └── run-tests.sh                # CI test runner
 ├── build/                           # Build artifacts (gitignored)
 │   ├── nuttx.bin
 │   ├── nuttx_user.bin
-│   └── Meadow.OS.bin
+│   ├── Meadow.OS.bin
+│   └── esp32/                       # ESP32 firmware (Phase 4)
 ├── build-emulator.sh                # Build script (calls into ../Meadow.OS/)
 ├── run.sh                           # Quick-launch wrapper
 ├── conductor/                       # Planning docs
@@ -248,9 +318,13 @@ Meadow.OS.Emulator/
 | 2026-03-08 | QSPI as MappedMemory stub initially | 32MB @ 0x90000000 simulates memory-mapped QSPI. Avoids needing SPI flash model for first boot |
 | 2026-03-08 | Separate build script in emulator repo | Emulation build will diverge initially; converge over time as feature parity grows |
 | 2026-03-08 | NuttX sim as complement only | Useful for OS-logic testing but can't validate ARM code, peripherals, or PROTECTED mode |
+| 2026-03-08 | ESP32 coprocessor: stub first, dual-machine later | ESPCP SPI stub unblocks networking tests without needing ESP32 firmware. Dual-machine emulation is a future goal for full-fidelity testing |
+| 2026-03-08 | ESPCP disabled for Phase 1A-1C | `CONFIG_MEADOW_ESPCP_MANAGER` is already `not set` in defconfig — safe to boot without ESP32 for initial bring-up |
 
 ## Open Questions
 1. **Renode MPU support:** Does Renode's Cortex-M7 model fully support MPU configuration? Critical gate for Phase 1B.
 2. **RCC/Clock tree:** How much of the STM32F7 clock tree does Renode model? NuttX's `stm32_clockconfig()` configures PLL from HSE — may need stubs.
 3. **HCOM dual-serial:** Can Renode expose two UART instances (console + HCOM) to the host simultaneously? (likely yes — multiple analyzers/sockets supported)
 4. **GDB register set:** Renode's Cortex-M7 GDB server likely exposes OpenOCD-style registers (xPSR, msp, psp, control). Need to verify.
+5. **Renode ESP32 support:** Does Renode have an ESP32/Xtensa platform? If so, dual-machine emulation becomes much more viable.
+6. **ESPCP stub fidelity:** How much of the ESPCP protocol needs to be stubbed for Meadow.OS to boot with networking enabled? Minimum viable: system status + WiFi init responses.

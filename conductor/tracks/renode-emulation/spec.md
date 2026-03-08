@@ -91,9 +91,23 @@ Investigation confirmed that protected build mode is **architecturally fundament
 - [ ] Unit tests (`--unittests=os,misc`) pass in emulation
 - [ ] CI pipeline runs tests in Renode headless mode
 
+### Dual-Chip Architecture: STM32F7 + ESP32 Coprocessor
+The Meadow F7 board has two main chips:
+- **STM32F777** — Main MCU running NuttX + Meadow.OS (kernel + HCOM)
+- **ESP32** — Coprocessor providing WiFi, BLE, mesh networking, NTP, file system services
+
+**Inter-chip communication:**
+- **SPI2** with GPIO handshaking (CS: PI0, Ready: PI10, Reset: PF7)
+- **ESPCP protocol:** Custom request-response, 27-byte headers, CRC8/CRC32, max 4092-byte SPI frames
+- **UART5:** Secondary channel for ESP32 debug/monitor output
+- **STM32 threads:** ESPCP thread (outgoing messages), event handler (incoming), UART monitor
+
+**What ESP32 provides:** WiFi (connect, scan, AP mode, full POSIX socket API), BLE, mesh networking, NTP time sync, file system operations on ESP32 flash, battery charge level, core dump retrieval.
+
+**Emulation strategy:** Start with ESPCP disabled (`CONFIG_MEADOW_ESPCP_MANAGER` not set) for initial bring-up. Then add an ESPCP SPI stub peripheral in Renode that responds to STM32 requests with mock data. Eventually, explore Renode dual-machine emulation with a real ESP32 machine for full-fidelity testing.
+
 ## Out of Scope (for now)
-- ESP32 coprocessor emulation (separate Xtensa target)
-- WiFi/BLE stack emulation
+- Full dual-machine ESP32 emulation (Phase 4 goal, not initial)
 - USB CDC-ACM device emulation
 - Hardware crypto accelerator (CRYP/HASH)
 - LTDC display controller
