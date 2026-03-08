@@ -41,16 +41,18 @@ Emulation lives in `Meadow.OS.Emulator/` — a **separate repo**, sibling to `Me
 The existing `stm32f746.repl` provides:
 - CPU: Cortex-M7 @ 462 MIPS, systick @ 216MHz ✅
 - Flash: 2MB @ 0x08000000 ✅
-- SRAM: 384KB @ 0x20000000 ✅
-- External memory: 256MB @ 0xC0000000 ✅
+- SRAM: 384KB @ 0x20000000 ⚠️ (stock F746 has single block; F777 needs DTCM 128KB @ 0x20000000, SRAM1 368KB @ 0x20020000, SRAM2 16KB @ 0x2007C000)
+- External memory: 256MB @ 0xC0000000 ⚠️ (resize to 32MB for Meadow — matches CONFIG_HEAP2_SIZE)
 - ROM: 64KB @ 0x1FFF0000 ✅
 
 Needed adaptations for STM32F777:
 - **QSPI flash:** MappedMemory stub at 0x90000000 (32MB) for initial bring-up. Proper SPI flash model later.
 - **USART1 as console:** Already present, just needs wiring in `.resc` script
-- **Additional UARTs:** F777 has UART4/5/7/8 not in F746 file (add when needed for HCOM)
+- **Additional UARTs:** F777 has UART4/5/7/8 not in F746 file (add as needed)
+- **HCOM transport:** On real hardware, HCOM uses USB CDC-ACM (`/dev/ttyACM0`), not UART. Renode cannot emulate USB device controllers, so emulation needs a defconfig that redirects HCOM to a UART.
 - **Crypto accelerator:** F777 has hardware crypto (CRYP/HASH) — skip initially
-- **SDRAM via FMC:** Already have `fsmcBank1` at 0xC0000000, adjust size to 32MB
+- **Memory regions:** Split single 384KB sram into DTCM (128KB @ 0x20000000), SRAM1 (368KB @ 0x20020000), SRAM2 (16KB @ 0x2007C000) — required for correct kernel/user memory isolation
+- **SDRAM via FMC:** Already have `fsmcBank1` at 0xC0000000, adjust size to 32MB (CONFIG_HEAP2_SIZE)
 
 ### CONFIG_BUILD_PROTECTED is Non-Negotiable
 Investigation confirmed that protected build mode is **architecturally fundamental** to Meadow.OS:
@@ -84,7 +86,7 @@ Investigation confirmed that protected build mode is **architecturally fundament
 ## Success Criteria
 - [ ] NuttX boots to NSH shell in Renode (FLAT mode, `nsh` config)
 - [ ] NuttX boots with PROTECTED mode (`meadow_os` config, both binaries loaded)
-- [ ] HCOM shell functional over emulated USART
+- [ ] HCOM shell functional over emulated UART (via emulation-specific defconfig redirecting from USB CDC-ACM)
 - [ ] USART1 console output visible
 - [ ] GDB attach + step-through debugging works
 - [ ] QSPI flash read/write functional (LittleFS mount)
@@ -108,12 +110,12 @@ The Meadow F7 board has two main chips:
 
 ## Out of Scope (for now)
 - Full dual-machine ESP32 emulation (Phase 4 goal, not initial)
-- USB CDC-ACM device emulation
+- USB CDC-ACM device emulation (HCOM will use UART redirect instead)
 - Hardware crypto accelerator (CRYP/HASH)
 - LTDC display controller
 
 ## Open Questions
 1. **Renode MPU support:** Does Renode's Cortex-M7 model fully support MPU configuration? This is the critical gate for PROTECTED mode.
 2. **RCC/Clock tree:** How much of the STM32F7 clock tree does Renode model? NuttX's `stm32_clockconfig()` configures PLL from HSE — may need stubs.
-3. **HCOM dual-serial:** Can Renode expose two UART instances (console + HCOM) to the host simultaneously? (likely yes — multiple analyzers/sockets supported)
+3. **HCOM transport:** ~~Dual-serial question~~ **RESOLVED:** HCOM uses USB CDC-ACM on real hardware. Emulation will use a `meadow_os_emu` defconfig that redirects HCOM to a UART. Two UARTs (console + HCOM) are supported via multiple Renode analyzers/sockets.
 4. **GDB register set:** Renode's Cortex-M7 GDB server likely exposes the OpenOCD-style register set (xPSR, msp, psp, control). Need to verify.

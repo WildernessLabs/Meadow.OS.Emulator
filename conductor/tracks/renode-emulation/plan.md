@@ -29,7 +29,12 @@
 ### 1A.3 — Create Meadow F7 Platform Description
 - [ ] Create `platforms/meadow-f7.repl` based on Renode's `stm32f746.repl`
 - [ ] Modifications from stock F746:
-  - Resize `fsmcBank1` (external SDRAM): 256MB → 32MB
+  - **Fix memory regions** — stock F746 has a single 384KB `sram` block. Replace with accurate STM32F777 layout:
+    - `dtcm: Memory.MappedMemory @ sysbus 0x20000000 { size: 0x20000 }` (128KB DTCM)
+    - `sram1: Memory.MappedMemory @ sysbus 0x20020000 { size: 0x5C000 }` (368KB SRAM1)
+    - `sram2: Memory.MappedMemory @ sysbus 0x2007C000 { size: 0x4000 }` (16KB SRAM2)
+    - Note: NSH flat config uses RAM starting at 0x20010000 (mid-DTCM), so DTCM must be present
+  - Resize `fsmcBank1` (external SDRAM): 256MB → 32MB (matches CONFIG_HEAP2_SIZE=33554432)
   - Add QSPI flash stub: `qspiFlash: Memory.MappedMemory @ sysbus 0x90000000 { size: 0x2000000 }`
   - Update SVD reference to F7x7 if available
   - All other peripherals (USART, timers, GPIO, DMA, etc.) stay as-is — same addresses on F777
@@ -95,9 +100,12 @@
   mach create "meadow"
   machine LoadPlatformDescription @platforms/meadow-f7.repl
 
-  # Load kernel at 0x08000000
+  # Load kernel at link-time address (0x08000000)
+  # NOTE: The production bootloader places kernel at 0x08040000 in combined
+  # Meadow.OS.bin, but the kernel is LINKED at 0x08000000. In Renode we skip
+  # the bootloader and load each binary at its link-time address directly.
   sysbus LoadBinary @build/nuttx.bin 0x08000000
-  # Load user binary at 0x08100000
+  # Load user binary at 0x08100000 (CONFIG_NUTTX_USERSPACE)
   sysbus LoadBinary @build/nuttx_user.bin 0x08100000
 
   sysbus.cpu VectorTableOffset 0x08000000
@@ -106,12 +114,13 @@
 
   start
   ```
-- [ ] Alternatively, load combined `Meadow.OS.bin` at 0x08000000
+- [ ] Do NOT use the combined `Meadow.OS.bin` — it includes the bootloader and places the kernel at offset 0x40000 (0x08040000), which doesn't match link-time addresses. Always load the individual `nuttx.bin` and `nuttx_user.bin` directly.
 
 ### 1B.4 — Validate Protected Mode Boot
 - [ ] Verify kernel boots and transitions to user-space `hcom_main`
 - [ ] Confirm MPU regions are configured (GPIO, QSPI, Ethernet SRAM access)
-- [ ] Check memory isolation: kernel SRAM (0x20020000, 128KB) vs user SRAM (0x20040000, 240KB)
+- [ ] Check memory isolation: kernel SRAM (0x20020000, 128KB) vs user SRAM (0x20040000, 240KB per memory.ld)
+  - Note: SDRAM at 0xC0000000 is used as heap2 (CONFIG_HEAP2_SIZE=32MB) — verify accessible from user space
 - [ ] Debug any faults related to MPU/privilege level transitions
 - **Depends on:** 1B.1, 1B.2, 1B.3
 
@@ -121,19 +130,32 @@
 **Goal:** Get HCOM protocol working over emulated serial
 **Depends on:** Phase 1B (PROTECTED mode boot with `hcom_main`)
 
-### 1C.1 — HCOM Serial Configuration
-- [ ] Wire second UART for HCOM (add UART4 or UART5 to `meadow-f7.repl` if not present)
+### Important: HCOM Uses USB CDC-ACM, Not UART
+On real hardware, HCOM communicates over USB CDC-ACM (`/dev/ttyACM0`), configured via `CONFIG_CDCACM=y` in the `meadow_os` defconfig. HCOM is NOT a UART — it's a USB device class.
+
+Renode does not emulate USB device controllers, so HCOM cannot use its native CDC-ACM transport in emulation. **Solution:** Create an emulation-specific NuttX defconfig (`meadow_os_emu`) that redirects HCOM to a UART by changing `CONFIG_HCOM_COMMS_DEVICE_NAME` from `/dev/ttyACM0` to a UART device (e.g., `/dev/ttyS1` mapped to USART2 or UART4).
+
+### 1C.1 — Create Emulation Defconfig
+- [ ] Copy `meadow_os` defconfig to `meadow_os_emu`
+- [ ] Disable USB CDC-ACM: `CONFIG_CDCACM=n`, `CONFIG_USBDEV=n`
+- [ ] Add/enable a second UART for HCOM: e.g., `CONFIG_STM32F7_USART2=y`
+- [ ] Set `CONFIG_HCOM_COMMS_DEVICE_NAME="/dev/ttyS1"` (or whichever UART is chosen)
+- [ ] Keep all other PROTECTED mode settings identical to `meadow_os`
+- [ ] Verify build succeeds with the new defconfig
+
+### 1C.2 — HCOM Serial Configuration in Renode
+- [ ] Ensure the chosen UART (e.g., USART2) is present in `meadow-f7.repl`
 - [ ] Expose HCOM UART via Renode socket: `emulation CreateServerSocketTerminal 1234 "hcom"`
 - [ ] Connect HCOM UART to socket terminal in `.resc` script
 - [ ] USART1 stays as console/debug output
 
-### 1C.2 — HCOM Protocol Testing
-- [ ] Verify `hcom_main` initializes and listens on the HCOM serial port
+### 1C.3 — HCOM Protocol Testing
+- [ ] Verify `hcom_main` initializes and listens on the redirected UART
 - [ ] Send basic HCOM commands via socket (e.g., using `nc` or a test script)
 - [ ] Verify command/response cycle
 - [ ] Test file transfer operations (requires QSPI flash working — Phase 1A.3 stub may suffice)
 
-### 1C.3 — GDB Debugging Workflow
+### 1C.4 — GDB Debugging Workflow
 - [ ] Start Renode with GDB server: `machine StartGdbServer 3333`
 - [ ] Connect: `arm-none-eabi-gdb ../Meadow.OS/nuttx/nuttx -ex "target remote :3333"`
 - [ ] Verify: breakpoints, step, backtrace, register inspection
@@ -493,7 +515,7 @@ Meadow.OS.Emulator/
 │   ├── meadow-f7.repl              # STM32F7 Renode platform description
 │   └── meadow-esp32.repl           # ESP32 coprocessor platform (Phase 4)
 ├── peripherals/
-│   └── espcp_stub.py               # ESPCP SPI stub peripheral (Phase 4)
+│   └── EspcpStub.cs                 # ESPCP SPI stub peripheral (C#, Phase 4)
 ├── scripts/
 │   ├── meadow-nsh.resc             # NSH boot (FLAT mode)
 │   ├── meadow-os.resc              # Full Meadow.OS boot (PROTECTED mode)
@@ -535,11 +557,13 @@ Meadow.OS.Emulator/
 | 2026-03-08 | NuttX sim as complement only | Useful for OS-logic testing but can't validate ARM code, peripherals, or PROTECTED mode |
 | 2026-03-08 | ESP32 coprocessor: stub first, dual-machine later | ESPCP SPI stub unblocks networking tests without needing ESP32 firmware. Dual-machine emulation is a future goal for full-fidelity testing |
 | 2026-03-08 | ESPCP disabled for Phase 1A-1C | `CONFIG_MEADOW_ESPCP_MANAGER` is already `not set` in defconfig — safe to boot without ESP32 for initial bring-up |
+| 2026-03-08 | Skip bootloader in Renode, load at link-time addresses | Bootloader places kernel at 0x08040000 in combined image, but kernel is linked at 0x08000000. Loading individual binaries at link addresses avoids address mismatch. |
+| 2026-03-08 | HCOM needs emulation-specific defconfig | HCOM uses USB CDC-ACM (`/dev/ttyACM0`) which Renode can't emulate. Create `meadow_os_emu` defconfig that redirects HCOM to a UART. |
 
 ## Open Questions
 1. **Renode MPU support:** Does Renode's Cortex-M7 model fully support MPU configuration? Critical gate for Phase 1B.
 2. **RCC/Clock tree:** How much of the STM32F7 clock tree does Renode model? NuttX's `stm32_clockconfig()` configures PLL from HSE — may need stubs.
-3. **HCOM dual-serial:** Can Renode expose two UART instances (console + HCOM) to the host simultaneously? (likely yes — multiple analyzers/sockets supported)
+3. **HCOM dual-serial:** ~~Can Renode expose two UART instances?~~ **RESOLVED:** HCOM uses USB CDC-ACM, not UART. Renode can't emulate USB device controllers. Solution: emulation-specific defconfig redirecting HCOM to a UART. Two UARTs (console + HCOM) are supported via multiple analyzers/sockets.
 4. **GDB register set:** Renode's Cortex-M7 GDB server likely exposes OpenOCD-style registers (xPSR, msp, psp, control). Need to verify.
 5. **Renode ESP32 support:** Does Renode have an ESP32/Xtensa platform? If so, dual-machine emulation becomes much more viable.
 6. **ESPCP stub fidelity:** How much of the ESPCP protocol needs to be stubbed for Meadow.OS to boot with networking enabled? Minimum viable: system status + WiFi init responses.
