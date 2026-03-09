@@ -5,7 +5,7 @@ SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
 MEADOW_OS_DIR="$SCRIPT_DIR/../Meadow.OS"
 NUTTX_DIR="$MEADOW_OS_DIR/nuttx"
 BUILD_DIR="$SCRIPT_DIR/build"
-CONFIG="${1:-meadow_os_emu}"
+CONFIG="${1:-meadow}"
 
 # Validate Meadow.OS sibling directory exists
 if [ ! -d "$NUTTX_DIR" ]; then
@@ -50,6 +50,37 @@ if [ -f ".config" ]; then
 fi
 
 ./tools/configure.sh "stm32f777zit6-meadow:$CONFIG"
+
+# Apply emulator-specific config tweaks
+# (uses the standard meadow defconfig as base, then modifies for Renode)
+NUTTX_CONFIG="$NUTTX_DIR/.config"
+
+# Disable USB (Renode can't emulate USB device controllers)
+kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_CDCACM
+kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_BOARDCTL_USBDEVCTRL
+kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_STM32F7_OTGFS
+kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_USBDEV
+
+# Enable UART4 for HCOM (replaces USB CDC-ACM)
+kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_STM32F7_UART4
+kconfig-tweak --file "$NUTTX_CONFIG" --set-str CONFIG_HCOM_COMMS_DEVICE_NAME /dev/ttyS1
+kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_BAUD 115200
+kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_BITS 8
+kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_PARITY 0
+kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_2STOP 0
+kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_RXBUFSIZE 512
+kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_TXBUFSIZE 512
+
+# Route syslog to serial console instead of RAM log
+kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_DEV_CONSOLE
+kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_SYSLOG_SERIAL_CONSOLE
+kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_RAMLOG_SYSLOG
+
+# Prevent reset loops in emulator
+kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_BOARD_RESET_ON_ASSERT 0
+
+# Resolve kconfig dependencies after tweaks
+$MAKE olddefconfig 2>/dev/null || true
 
 # Inject version placeholders in hcom_nuttx_shared.h
 # The production build.sh does this via version_methods.sh — we use defaults

@@ -1,10 +1,11 @@
 #!/bin/bash
 # Minimal kconfig-tweak shim for NuttX configure.sh
-# Implements --enable, --disable, --file options
+# Implements --enable, --disable, --set-str, --set-val, --file options
 
 FILE=""
 ACTION=""
 CONFIG=""
+VALUE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -17,10 +18,27 @@ while [[ $# -gt 0 ]]; do
             CONFIG="$2"
             shift 2
             ;;
-        --disable)
+        --disable|-d)
             ACTION="disable"
             CONFIG="$2"
             shift 2
+            ;;
+        --undefine|-u)
+            ACTION="disable"
+            CONFIG="$2"
+            shift 2
+            ;;
+        --set-str)
+            ACTION="set-str"
+            CONFIG="$2"
+            VALUE="$3"
+            shift 3
+            ;;
+        --set-val)
+            ACTION="set-val"
+            CONFIG="$2"
+            VALUE="$3"
+            shift 3
             ;;
         *)
             shift
@@ -32,16 +50,26 @@ if [ -z "$FILE" ] || [ -z "$ACTION" ] || [ -z "$CONFIG" ]; then
     exit 0
 fi
 
-if [ "$ACTION" = "enable" ]; then
-    if grep -q "^# ${CONFIG} is not set" "$FILE" 2>/dev/null; then
-        sed -i '' "s/^# ${CONFIG} is not set/${CONFIG}=y/" "$FILE"
-    elif grep -q "^${CONFIG}=" "$FILE" 2>/dev/null; then
-        sed -i '' "s/^${CONFIG}=.*/${CONFIG}=y/" "$FILE"
+set_config_value() {
+    local key="$1"
+    local val="$2"
+    if grep -q "^# ${key} is not set" "$FILE" 2>/dev/null; then
+        sed -i '' "s|^# ${key} is not set|${key}=${val}|" "$FILE"
+    elif grep -q "^${key}=" "$FILE" 2>/dev/null; then
+        sed -i '' "s|^${key}=.*|${key}=${val}|" "$FILE"
     else
-        echo "${CONFIG}=y" >> "$FILE"
+        echo "${key}=${val}" >> "$FILE"
     fi
+}
+
+if [ "$ACTION" = "enable" ]; then
+    set_config_value "$CONFIG" "y"
 elif [ "$ACTION" = "disable" ]; then
     if grep -q "^${CONFIG}=" "$FILE" 2>/dev/null; then
-        sed -i '' "s/^${CONFIG}=.*/# ${CONFIG} is not set/" "$FILE"
+        sed -i '' "s|^${CONFIG}=.*|# ${CONFIG} is not set|" "$FILE"
     fi
+elif [ "$ACTION" = "set-str" ]; then
+    set_config_value "$CONFIG" "\"${VALUE}\""
+elif [ "$ACTION" = "set-val" ]; then
+    set_config_value "$CONFIG" "$VALUE"
 fi
