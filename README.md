@@ -30,9 +30,10 @@ Meadow.OS.Emulator/
 │   ├── meadow-os-diag.resc   # Diagnostic script with SVC/context-switch logging hooks
 │   ├── meadow-os-test.resc   # Test script with verbose logging
 │   ├── meadow-nsh.resc       # NSH-only flat build (no user binary, no workarounds)
-│   └── pydev/                # Python peripherals
+│   └── pydev/                # Python peripherals and hook references
 │       ├── rcc.py            # RCC clock controller (ready-bit handling)
 │       ├── otg_fs.py         # USB OTG FS stub (GRSTCTL/AHBIDL)
+│       ├── qspi_dma_bypass.py # QSPI DMA bypass hook (reference/docs)
 │       └── flipflop.py       # Simple read-back peripheral (PWR, LPTIM1)
 ├── tools/
 │   └── kconfig-tweak         # Kconfig shim for NuttX build

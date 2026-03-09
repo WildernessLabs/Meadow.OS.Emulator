@@ -269,7 +269,7 @@ Meadow.OS.Emulator/
 4. ~~**HCOM `/dev/nxupd` dependency:**~~ ✅ HCOM works without the ESP32 coprocessor, but `/dev/nxupd` must still be registered (requires QSPI flash chain in `board_late_initialize`). Phase 1B.5 addresses this.
 
 5. ~~**`0x35` command conflict:**~~ ✅ Not an issue in practice — QUADSPI controller handles command routing, and our `qspi_waitstatusflags` skip means commands aren't fully executed through the SPI protocol layer anyway.
-6. ~~**Flash partition layout:**~~ ✅ Resolved — NuttX creates 7 partitions on the 64MB QSPI flash (see boot output above). Blank flash (all 0xFF) boots successfully; LittleFS mount fails with -110 but doesn't crash.
+6. ~~**Flash partition layout:**~~ ✅ Resolved — NuttX creates 7 partitions on the 64MB QSPI flash (see boot output above). Blank flash (all 0xFF) boots successfully; LittleFS auto-formats and mounts.
 
 ### Open
 7. **SVC/hook address automation:** Currently SVC hooks (7 addresses), GPIO version hook (1 address), QSPI wait skip (1 address), and DMA bypass hooks (2 addresses) are all hardcoded and must be manually re-scanned after kernel rebuild. Should automate this.
