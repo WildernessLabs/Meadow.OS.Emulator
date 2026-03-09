@@ -147,6 +147,10 @@ Unconnected GPIO pins with pull-ups read high (0x0F = UNKNOWN), causing version 
 
 Renode's `STM32H7_QuadSPI` never sets TCF (bit 1) in the Status Register after indirect-mode transactions, causing the firmware to poll forever. Fix: hook at `qspi_waitstatusflags` entry skips the function via `cpu.PC = cpu.LR`.
 
+### QUADSPI DMA Bypass
+
+Renode's `STM32H7_QuadSPI` doesn't drive DMA requests, so DMA transfers to/from QSPI flash never complete (800ms watchdog timeout). Fix: hook at `qspi_memory_dma` entry reads `struct qspi_meminfo_s` from R1 and copies data directly between RAM and flash backing memory (0x90000000). A second hook fixes the return value (writes 0 to the stack slot where the caller stores R0).
+
 ### FPU Frame Mismatch (Non-critical)
 
 Renode exception entry always uses standard frames (32 bytes) even when the FPU is active. NuttX always calculates with extended frames (104 bytes). The saved stack pointer is off by 72 bytes but doesn't cause crashes since MSP restore comes from the hardware frame.
@@ -163,31 +167,30 @@ The emulator uses `stm32f777zit6-meadow:meadow_os` defconfig with key settings:
 
 ## Current Boot Status
 
-NuttX boots through hardware init, task scheduling, QSPI flash init, and MTD partition detection. The system reaches a stable idle state.
+NuttX boots through hardware init, task scheduling, QSPI flash init, MTD partition detection, LittleFS filesystem creation, and reaches a stable idle state.
 
 ```
 MTD Geo info - total erase sectors 16384, eraseSize 4096 block/page size 256
-Runtime       part:0, size: 3145728 ( 3072 Kb)
-Meadow update part:1, size: 1835008 ( 1792 Kb)
-OTA State     part:2, size:    4096 (    4 Kb)
-OS Persisted  part:3, size:    4096 (    4 Kb)
-Assert Data   part:4, size:   32768 (   32 Kb)
-Unused        part:5, size:  221184 (  216 Kb)
-File System   part:6, size:61865984 (60416 Kb)
+Runtime       part:0, size: 3145728 ( 3072 Kb), Byte Offset:0x00000000, Block Offset     0
+Meadow update part:1, size: 1835008 ( 1792 Kb), Byte Offset:0x00300000, Block Offset 12288
+OTA State     part:2, size:    4096 (    4 Kb), Byte Offset:0x004c0000, Block Offset 19456
+OS Persisted  part:3, size:    4096 (    4 Kb), Byte Offset:0x004c1000, Block Offset 19472
+Assert Data   part:4, size:   32768 (   32 Kb), Byte Offset:0x004c2000, Block Offset 19488
+Unused        part:5, size:  221184 (  216 Kb), Byte Offset:0x004ca000, Block Offset 19616
+File System   part:6, size:61865984 (60416 Kb), Byte Offset:0x00500000, Block Offset 20480
 Created 7 partitions, Total size:67108864 bytes (65536 Kb)
-LittleFS mount as '/meadow0' type 'littlefs' for Part 6, err:-110 failed
 F/S creation complete.
+Meadow reset code: 0x00, reset count: 1, power cycle count 1
 Mono runtime was not found flashed in external flash.
 ```
 
-Remaining issues:
-- LittleFS mount fails (-110 ETIMEDOUT) — blank flash, needs formatting or pre-populated image
-- `/dev/nxupd` not yet registered — HCOM init fails
-- Mono runtime not found — expected, not flashed
+Remaining:
+- Mono runtime not found (expected — not flashed in QSPI backing memory)
+- `/dev/nxupd` registration status needs verification
 
 ## Next Steps
 
-- **LittleFS / `/dev/nxupd`** — Investigate mount failure and HCOM device registration
+- **`/dev/nxupd` verification** — Confirm HCOM device registration now works with full flash chain
 - **HCOM bring-up** — Redirect HCOM from USB CDC-ACM to UART for emulator interaction (see `renode-hcom` track)
 - **ESP32 coprocessor** — Emulate the ESPCP protocol over SPI2 (see `renode-esp32` track)
 - **CI integration** — Automated boot tests (see `renode-ci` track)

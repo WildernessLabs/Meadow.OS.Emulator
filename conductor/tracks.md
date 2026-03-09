@@ -2,7 +2,7 @@
 
 | Track ID           | Title                                    | Status      |
 |-------------------|------------------------------------------|-------------|
-| renode-platform   | Renode Platform Definition & Boot Bring-Up | `in_progress` (1A ✅, 1B ✅, 1B+ ✅, 1B.5 in progress: LittleFS mount + validation remaining) |
+| renode-platform   | Renode Platform Definition & Boot Bring-Up | `in_progress` (1A ✅, 1B ✅, 1B+ ✅, 1B.5 nearly complete: QSPI+DMA+LittleFS working, `/dev/nxupd` verification remaining) |
 | renode-hcom       | HCOM Bring-Up over Emulated UART          | `blocked` (waiting on renode-platform 1B.5) |
 | renode-esp32      | ESP32 Coprocessor Emulation               | `planned` |
 | renode-ci         | CI Integration for Emulated Testing       | `planned` |

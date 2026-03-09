@@ -144,38 +144,45 @@ Deferred (not adding now):
 - [x] Hook at `qspi_waitstatusflags` (0x08036bcc) skips function via `cpu.PC = cpu.LR`
 - [x] Tracked as U.6 in `renode-upstream` for proper fix
 
-### 1B.5.5 — Update .resc Scripts ✅
-- [x] Added `include @peripherals/Winbond_W25QXXXJV.cs` to all 5 .resc scripts
-- [x] Added GPIO version hook + QSPI wait skip to meadow-os, meadow-os-gdb, meadow-os-diag
+### 1B.5.5 — Fix QUADSPI DMA Transfers ✅
+- [x] Renode's `STM32H7_QuadSPI` doesn't drive DMA requests → 800ms watchdog timeout (ETIMEDOUT)
+- [x] Hook at `qspi_memory_dma` entry (0x08036db4) does direct memcpy from/to flash backing memory
+- [x] Reads `struct qspi_meminfo_s` from R1: flags(+0,u8) buflen(+8,u32) addr(+12,u32) buffer(+20,ptr)
+- [x] `QSPIMEM_WRITE = 0x04` → copy buf→flash; else (read) → copy flash→buf
+- [x] Second hook at 0x0803731e: fix return value by writing 0 to stack slot (sp+44)
+- [x] Created `scripts/pydev/qspi_dma_bypass.py` as reference documentation
 
-### 1B.5.6 — Validate Boot Chain — PARTIAL
+### 1B.5.6 — Update .resc Scripts ✅
+- [x] Added `include @peripherals/Winbond_W25QXXXJV.cs` to all .resc scripts
+- [x] Added GPIO version hook + QSPI wait skip + DMA bypass to meadow-os, meadow-os-gdb, meadow-os-diag
+- [x] Added optional UART file backend to meadow-os.resc (commented out)
+
+### 1B.5.7 — Validate Boot Chain ✅
 - [x] Version detection passes (CCMv2)
 - [x] MTD flash driver initializes — partition table detected (7 partitions, 64MB total)
-- [x] Filesystem init runs — LittleFS mount fails with -110 (ETIMEDOUT, expected on blank flash)
+- [x] LittleFS format + mount succeeds on blank flash (initial mount fails → auto-format → remount OK)
+- [x] Filesystem creation completes
 - [x] System reaches idle (no crash)
-- [ ] Verify `hcom_main` opens `/dev/nxupd` successfully — **currently fails** (`Failed to open, errno:2`)
-- [ ] Investigate LittleFS mount failure (-110) — may need formatted flash image or LittleFS format operation
-- [ ] Mono runtime not found (expected — not flashed yet)
+- [x] Mono runtime not found (expected — not flashed yet)
+- [ ] Verify `hcom_main` opens `/dev/nxupd` successfully — needs investigation
 
 ### Current Boot Output
 ```
 MTD Geo info - total erase sectors 16384, eraseSize 4096 block/page size 256
-Runtime       part:0, size: 3145728 ( 3072 Kb)
-Meadow update part:1, size: 1835008 ( 1792 Kb)
-OTA State     part:2, size:    4096 (    4 Kb)
-OS Persisted  part:3, size:    4096 (    4 Kb)
-Assert Data   part:4, size:   32768 (   32 Kb)
-Unused        part:5, size:  221184 (  216 Kb)
-File System   part:6, size:61865984 (60416 Kb)
+Runtime       part:0, size: 3145728 ( 3072 Kb), Byte Offset:0x00000000, Block Offset     0
+Meadow update part:1, size: 1835008 ( 1792 Kb), Byte Offset:0x00300000, Block Offset 12288
+OTA State     part:2, size:    4096 (    4 Kb), Byte Offset:0x004c0000, Block Offset 19456
+OS Persisted  part:3, size:    4096 (    4 Kb), Byte Offset:0x004c1000, Block Offset 19472
+Assert Data   part:4, size:   32768 (   32 Kb), Byte Offset:0x004c2000, Block Offset 19488
+Unused        part:5, size:  221184 (  216 Kb), Byte Offset:0x004ca000, Block Offset 19616
+File System   part:6, size:61865984 (60416 Kb), Byte Offset:0x00500000, Block Offset 20480
 Created 7 partitions, Total size:67108864 bytes (65536 Kb)
-LittleFS mount as '/meadow0' type 'littlefs' for Part 6, err:-110 failed
-fs mount failed '/dev/little' to '/meadow0' for type 'littlefs', Part 6 error:-110
 F/S creation complete.
 Meadow reset code: 0x00, reset count: 1, power cycle count 1
 Mono runtime was not found flashed in external flash.
 ```
 
-### 1B.5.7 — Flash Persistence (Future)
+### 1B.5.8 — Flash Persistence (Future)
 - [ ] Investigate Renode `MappedMemory` file backing for persistent flash contents
 - [ ] Pre-populate flash with valid filesystem image if needed
 - [ ] Document flash partition layout
@@ -199,6 +206,7 @@ Meadow.OS.Emulator/
 │   └── pydev/                      # Python peripherals and hooks
 │       ├── rcc.py                  # RCC clock controller
 │       ├── otg_fs.py               # USB OTG FS stub
+│       ├── qspi_dma_bypass.py      # QSPI DMA bypass hook (reference)
 │       ├── fix_svc_primask.py      # SVC PRIMASK workaround (reference)
 │       ├── fix_fpu_frame.py        # FPU frame mismatch correction
 │       └── flipflop.py             # Simple read-back peripheral
@@ -247,6 +255,9 @@ Meadow.OS.Emulator/
 | 2026-03-08 | Peripheral verification ad-hoc, not formal track | On-chip peripheral fidelity (timers, GPIO, I2C/SPI, RTC) will be verified as Meadow.OS features exercise them, not as a standalone effort. |
 | 2026-03-08 | GPIO version hook uses stack write, not register set | `cpu.SetRegister()`, `cpu.SetRegisterUlong()`, `cpu.R0` all fail in IronPython hooks on CortexM (hangs or missing attribute). Writing to stack via `machine.SystemBus.WriteDoubleWord(sp + 12, value)` is reliable. |
 | 2026-03-08 | QSPI wait skip via `cpu.PC = cpu.LR` | `STM32H7_QuadSPI` doesn't set TCF in SR. Rather than replace the whole controller, skip `qspi_waitstatusflags` entirely. Flash I/O still works for partition detection (MTD reads geometry). Full read/write may need a proper controller later. |
+| 2026-03-08 | DMA bypass via direct memcpy hook | QUADSPI doesn't drive DMA requests so transfers never complete (800ms timeout). Hook `qspi_memory_dma` to read `struct qspi_meminfo_s` and copy directly between RAM buffer and flash backing memory (0x90000000). Keeps W25QXXXJV C# peripheral for hardware fidelity while bypassing the broken DMA path. |
+| 2026-03-08 | Keep W25QXXXJV C# peripheral (not PyDev bypass) | Attempted PyDev QUADSPI replacement but: (a) `self.SystemBus` unavailable in PyDev register handlers, (b) loses W25Q flash command fidelity. Kept built-in STM32H7_QuadSPI + C# W25Q + CPU hook bypass for DMA. |
+| 2026-03-08 | `struct qspi_meminfo_s` layout (ARM32) | flags(+0,u8) addrlen(+1,u8) dummies(+2,u8) pad(+3) cmd(+4,u16) pad(+6-7) buflen(+8,u32) addr(+12,u32) key(+16,u32) buffer(+20,ptr). Total 24 bytes. Initial hook had wrong offsets (assumed all uint32_t) causing nonsensical values. |
 | 2026-03-08 | `STM32_UART` type doesn't exist in Renode v1.16.1 | Must use `UART.STM32F7_USART` for all UART/USART instances — same register layout on STM32F7. |
 
 ## Open Questions
@@ -261,7 +272,7 @@ Meadow.OS.Emulator/
 6. ~~**Flash partition layout:**~~ ✅ Resolved — NuttX creates 7 partitions on the 64MB QSPI flash (see boot output above). Blank flash (all 0xFF) boots successfully; LittleFS mount fails with -110 but doesn't crash.
 
 ### Open
-7. **SVC/hook address automation:** Currently SVC hooks (7 addresses), GPIO version hook (1 address), and QSPI wait skip (1 address) are all hardcoded and must be manually re-scanned after kernel rebuild. Should automate this.
-8. **LittleFS mount -110 (ETIMEDOUT):** LittleFS mount on Part 6 fails. May need: (a) QSPI read/write to actually work (currently skipped by wait hook), or (b) pre-formatted flash image. Investigate whether the timeout is in QSPI I/O or LittleFS superblock validation.
-9. **`/dev/nxupd` still not registered:** HCOM still fails to open `/dev/nxupd`. Need to trace whether `hcom_nx_setup_mgr()` is called and where it fails in the init chain after filesystem setup.
+7. **SVC/hook address automation:** Currently SVC hooks (7 addresses), GPIO version hook (1 address), QSPI wait skip (1 address), and DMA bypass hooks (2 addresses) are all hardcoded and must be manually re-scanned after kernel rebuild. Should automate this.
+8. ~~**LittleFS mount -110 (ETIMEDOUT):**~~ ✅ Resolved — caused by QUADSPI not driving DMA requests (800ms watchdog timeout). Fixed by DMA bypass hook that does direct memcpy from/to flash backing memory. LittleFS auto-formats blank flash and mounts successfully.
+9. **`/dev/nxupd` registration:** Need to verify whether `hcom_nx_setup_mgr()` now succeeds with working flash. If not, trace where it fails after filesystem setup.
 10. **CortexM register access from hooks:** `cpu.SetRegister()`, `cpu.SetRegisterUlong()`, and `cpu.R0` all fail (hangs or attribute errors). Only `cpu.SP`, `cpu.PC`, `cpu.LR`, `cpu.PRIMASK` etc. work as named properties. `cpu.GetRegisterUnsafe()` works for reads. Stack writes are the workaround for modifying R0-R12.
