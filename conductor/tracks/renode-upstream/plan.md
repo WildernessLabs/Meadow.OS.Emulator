@@ -38,6 +38,14 @@
 - [ ] Wait until validated with NuttX MTD driver (`renode-platform` Phase 1B.5 complete)
 - [ ] Winbond W25Q series is extremely common — high value contribution
 
+## U.6 — STM32H7_QuadSPI Transfer Complete Flag Bug (PR or Issue)
+- [ ] **Bug:** `STM32H7_QuadSPI` never sets TCF (Transfer Complete Flag, bit 1) in the Status Register (SR, offset 0x8) after indirect-mode transactions complete
+- [ ] **Impact:** Any firmware using the QUADSPI peripheral in indirect mode that polls SR for TCF will hang forever (NuttX `qspi_waitstatusflags`, STM32 HAL `QSPI_WaitFlagStateUntilTimeout`)
+- [ ] **Also likely missing:** BUSY flag (bit 5) clearing, FTF (FIFO Threshold Flag, bit 2) handling
+- [ ] Our workaround: Hook `qspi_waitstatusflags` to skip via `cpu.PC = cpu.LR`. Proper fix belongs in the C# `STM32H7_QuadSPI` model.
+- [ ] Decide: submit as issue with reproduction details, or fix in C# and submit as PR
+- [ ] Note: `STM32H7_QuadSPI` register layout is identical to STM32F7 QUADSPI (same IP block), so fix benefits both F7 and H7 users
+
 ---
 
 ## Decision Log

@@ -25,3 +25,4 @@ User's fork of `renode/renode` (already forked)
 | U.3 | RCC ready bit handling | PR or Issue | Our `rcc.py` as reference | Hangs any firmware polling clock ready bits (NuttX, STM32 HAL) |
 | U.4 | FPU exception frame | Issue | Documented | Non-critical but spec-incorrect; breaks stack verification code |
 | U.5 | Winbond W25QXXXJV flash | PR | After `renode-platform` 1B.5 validated | ~30-line `GenericSpiFlash` subclass; very common flash chip |
+| U.6 | STM32H7_QuadSPI TCF bug | PR or Issue | Minimal repro ready | QUADSPI SR never sets Transfer Complete Flag (TCF, bit 1) after transactions; firmware polling `qspi_waitstatusflags` hangs forever |
