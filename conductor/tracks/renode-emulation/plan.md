@@ -93,45 +93,128 @@ HCOM fails because `/dev/nxupd` (coprocessor communication device) doesn't exist
 
 ---
 
-## Phase 1C: HCOM Bring-Up
-**Goal:** Get HCOM protocol working over emulated serial
+## Phase 1B.5: QSPI Flash + Board Init Chain
+**Goal:** Get `board_late_initialize()` completing fully — QSPI flash, filesystem, config, `/dev/nxupd` registration
 **Status:** `next_up`
 **Depends on:** Phase 1B ✅
+**Blocks:** Phase 1C (HCOM needs `/dev/nxupd` which is registered at end of this chain)
+
+### Background: Why This Is Required
+
+The `board_late_initialize()` chain in `stm32_boot.c` runs:
+```
+QSPI controller init → GPIO version detect → MTD flash init → filesystem → config → hcom_nx_setup_mgr → register /dev/nxupd
+```
+
+Currently this chain fails at step 2 (GPIO version pins all read high → `UNKNOWN` → returns early). Even if fixed, step 3 would fail because the QSPI flash is a MappedMemory stub that can't respond to flash commands. Without completing this chain, `/dev/nxupd` is never registered, and `hcom_main` fails to start.
+
+### Architecture: C# Peripherals via Renode AdHoc Compiler
+
+Renode supports runtime loading of C# peripherals via `include @path/to/Peripheral.cs` — no Renode rebuild required. The existing `STM32H7_QuadSPI` controller and `GenericSpiFlash` base class do most of the heavy lifting:
+
+- **`STM32H7_QuadSPI`** — QSPI controller with identical register layout to STM32F7 (CR, DCR, SR, CCR, AR, DR). Reusable as-is.
+- **`GenericSpiFlash`** — Base class handling all SPI NOR flash commands (JEDEC ID, read, write, erase, status registers, 4-byte addressing, quad I/O). Supports 50+ commands.
+- **`Micron_MT25Q`** — Example subclass: just 30 lines setting manufacturer ID (`0x20`) and memory type (`0xBB`).
+
+We need a `Winbond_W25QXXXJV` subclass (~30 lines) with Winbond's JEDEC IDs, plus a GPIO version detection fix.
+
+### 1B.5.1 — Create Winbond W25QXXXJV Flash Peripheral
+- [ ] Create `peripherals/Winbond_W25QXXXJV.cs` extending `GenericSpiFlash`
+  - Manufacturer ID: `0xEF` (Winbond)
+  - Memory Type: `0x40` (W25QXXXJVQ, QE=1 fixed)
+  - Capacity auto-calculated by `GenericSpiFlash.GetCapacityCode()` from backing memory size (32MB → `0x19`)
+  - Size range validation: 2MB–64MB
+- [ ] Verify the NuttX W25QXXXJV driver commands are all in `GenericSpiFlash.Commands` enum:
+  - `0x9F` ReadID ✅, `0x05` ReadStatusRegister ✅, `0x35` EnterQuadInputOutputMode ✅
+  - `0x06` WriteEnable ✅, `0xEB` QuadInputOutputFastRead ✅, `0xEC` QuadInputOutputFastRead4byte ✅
+  - `0x02` PageProgram ✅, `0x20` SubsectorErase4kb ✅, `0xD8` SectorErase ✅
+  - `0xB7` Enter4byteAddressMode ✅, `0xE9` Exit4byteAddressMode ✅
+  - `0x66`/`0x99` ResetEnable/ResetMemory ✅
+- [ ] Note: `0x35` is `EnterQuadInputOutputMode` in GenericSpiFlash but NuttX uses it as "Read Status Register-2". Need to verify compatibility or override if needed.
+
+### 1B.5.2 — Update Platform Description
+- [ ] Remove old QSPI MappedMemory stub from `meadow-f7.repl`:
+  ```
+  // REMOVE: qspiFlash: Memory.MappedMemory @ sysbus 0x90000000
+  ```
+- [ ] Add QSPI controller (reusing STM32H7 model at F7 address):
+  ```
+  quadspi: SPI.STM32H7_QuadSPI @ sysbus 0xA0001000
+      -> nvic@92
+  ```
+- [ ] Add W25QXXXJV flash connected to controller:
+  ```
+  w25q: SPI.Winbond_W25QXXXJV @ quadspi
+      underlyingMemory: qspiFlashMem
+  ```
+- [ ] Add backing memory for flash (32MB):
+  ```
+  qspiFlashMem: Memory.MappedMemory @ sysbus 0x90000000
+      size: 0x2000000
+  ```
+
+### 1B.5.3 — Fix GPIO Board Version Detection
+- [ ] Add IronPython hook at `meadow_hw_version_find_gpio_ver` return (0x08005666) to force R0=0x01 (CCMv2 GPIO pattern)
+  - CCMv2 (0x01) skips QSPI flash chip ID query, directly sets version to `MEADOW_F7_HW_VERSION_NUMB_CCMV2` (3)
+  - This selects the W25QXXXJV MTD driver path in `board_late_initialize()`
+- [ ] Alternative: set GPIO pin states in Renode to match CCMv2 board (PC14=low, PG3=low, PC13=low)
+- [ ] Address is binary-specific — add to the objdump re-scan procedure alongside SVC hooks
+
+### 1B.5.4 — Update .resc Scripts
+- [ ] Add `include @peripherals/Winbond_W25QXXXJV.cs` to all .resc scripts (before platform load)
+- [ ] Add GPIO version hook to scripts that have the SVC PRIMASK hooks
+- [ ] Test with `meadow-os.resc` (interactive) and `meadow-os-gdb.resc` (debugging)
+
+### 1B.5.5 — Validate Full Boot Chain
+- [ ] Verify `board_late_initialize()` completes:
+  - QSPI init succeeds
+  - Version detection returns CCMv2
+  - W25QXXXJV MTD driver initializes
+  - Filesystem init (LittleFS/FAT on flash partitions)
+  - Config init
+  - `hcom_nx_setup_mgr()` runs
+  - `/dev/nxupd` registered
+- [ ] Verify `hcom_main` opens `/dev/nxupd` successfully
+- [ ] Check for any new failures further in the boot chain
+- [ ] Monitor UART output for new error messages
+
+### 1B.5.6 — Flash Persistence (Future)
+- [ ] Investigate Renode `MappedMemory` file backing for persistent flash contents
+- [ ] Pre-populate flash with valid filesystem image if needed for config/file operations
+- [ ] Document flash partition layout (from NuttX defconfig / board code)
+
+---
+
+## Phase 1C: HCOM Bring-Up
+**Goal:** Get HCOM protocol working over emulated serial
+**Status:** `blocked` (waiting on Phase 1B.5)
+**Depends on:** Phase 1B.5 (QSPI flash / `/dev/nxupd` registration)
 
 ### Current Situation
-HCOM initialization has two dependencies:
-1. **`/dev/nxupd`** — coprocessor communication device (ESP32 ESPCP channel). HCOM calls `hcom_via_nx_access` which opens this device. Without ESP32 emulation, this fails with `errno:2`.
-2. **USB CDC-ACM** — HCOM's host communication transport (`/dev/ttyACM0`). Renode can't emulate USB device controllers.
+HCOM initialization requires:
+1. **`/dev/nxupd`** — Registered by kernel during `board_late_initialize()` → requires working QSPI flash chain (Phase 1B.5). HCOM is designed to work without the ESP32 coprocessor, but the device must exist.
+2. **USB CDC-ACM** — HCOM's host communication transport (`/dev/ttyACM0`). Renode can't emulate USB device controllers. Need UART redirect.
 
-Both need to be addressed for HCOM to function.
-
-### 1C.1 — Investigate HCOM Startup Path
-- [ ] Trace `hcom_main` → `hcom_startup_manager` → understand what happens after `/dev/nxupd` failure
-- [ ] Determine if HCOM can proceed without coprocessor (graceful degradation vs hard fail)
-- [ ] Identify minimum viable path: can HCOM accept host commands with coprocessor offline?
-- [ ] Map out which HCOM features depend on ESP32 vs which are self-contained
-
-### 1C.2 — Create Emulation Defconfig (`meadow_os_emu`)
-- [ ] Copy `meadow_os` defconfig to `meadow_os_emu`
+### 1C.1 — Update Emulation Defconfig (`meadow_os_emu`)
 - [ ] Disable USB CDC-ACM: `CONFIG_CDCACM=n`, `CONFIG_USBDEV=n`
 - [ ] Redirect HCOM to UART: `CONFIG_HCOM_COMMS_DEVICE_NAME="/dev/ttyS1"` (USART2)
-- [ ] Enable USART2: `CONFIG_STM32F7_USART2=y`
-- [ ] Consider: disable or stub ESPCP manager if it blocks HCOM startup
+- [ ] Enable USART2: `CONFIG_STM32F7_USART2=y`, add USART2 serial driver configs
+- [ ] Add USART2 pin definitions to board.h if needed (PA2/PA3 or PD5/PD6)
 - [ ] Keep all other PROTECTED mode settings identical to `meadow_os`
 - [ ] Verify build succeeds
 
-### 1C.3 — HCOM Serial Configuration in Renode
+### 1C.2 — HCOM Serial Configuration in Renode
 - [ ] Expose HCOM UART via Renode socket: `emulation CreateServerSocketTerminal 1234 "hcom"`
 - [ ] Connect USART2 to socket terminal in `.resc` script
 - [ ] USART1 stays as console/syslog output
 
-### 1C.4 — HCOM Protocol Testing
+### 1C.3 — HCOM Protocol Testing
 - [ ] Verify `hcom_main` initializes and listens on the redirected UART
 - [ ] Send basic HCOM commands via socket (e.g., using `nc` or a test script)
 - [ ] Verify command/response cycle
-- [ ] Test file transfer operations (requires QSPI flash — current MappedMemory stub may suffice)
+- [ ] Test file transfer operations (uses QSPI flash from Phase 1B.5)
 
-### 1C.5 — GDB Debugging Workflow ✅ COMPLETE
+### 1C.4 — GDB Debugging Workflow ✅ COMPLETE
 - [x] GDB server works via `machine StartGdbServer 3333` (meadow-os-gdb.resc)
 - [x] `arm-none-eabi-gdb build/nuttx.elf -ex "target remote :3333"` connects successfully
 - [x] Breakpoints, stepi, backtrace, register inspection all work
@@ -538,6 +621,10 @@ Meadow.OS.Emulator/
 | 2026-03-08 | Custom RCC Python peripheral | Renode's built-in STM32F4_RCC does not set clock ready bits. Custom `rcc.py` handles HSIRDY/HSERDY/PLLRDY/etc. and SW→SWS mirroring. |
 | 2026-03-08 | SVC PRIMASK workaround via inline hooks | Renode silently skips SVC when PRIMASK=1. IronPython hooks at all 7 SVC addresses clear PRIMASK before execution. Hooks are address-specific and must be updated when kernel is rebuilt. |
 | 2026-03-08 | SVC hooks inline in .resc, not PyDevFromFile | Inline one-liner is simpler than a separate Python file for CPU hooks. `fix_svc_primask.py` kept as reference. |
+| 2026-03-08 | C# peripheral for QSPI flash (not Python) | Renode's `GenericSpiFlash` base class handles all SPI NOR flash commands. Creating a `Winbond_W25QXXXJV` subclass (~30 lines of C#) gives us full flash emulation. Renode's AdHoc Compiler loads C# at runtime via `include @file.cs` — no Renode rebuild needed. |
+| 2026-03-08 | Reuse `STM32H7_QuadSPI` controller for F7 | STM32F7 and H7 QUADSPI have identical register layouts (CR, DCR, SR, CCR, AR, DR). Only difference is base address (F7: 0xA0001000, H7: 0x52005000), handled in .repl. |
+| 2026-03-08 | `/dev/nxupd` requires full QSPI/MTD chain | `board_late_initialize()` gates `hcom_nx_setup_mgr()` (which registers `/dev/nxupd`) behind successful QSPI flash init, version detection, MTD driver init, and filesystem setup. Cannot shortcut — need working QSPI flash. |
+| 2026-03-08 | GPIO version detection hook for CCMv2 | Board version is detected via 4 GPIO pins. In Renode, unconnected inputs with pull-ups all read high (0x0F = F7V1/V2), triggering a flash chip ID query that fails. Hook to return 0x01 (CCMv2) skips the query and selects W25QXXXJV driver directly. |
 
 ## Open Questions
 
@@ -550,5 +637,7 @@ Meadow.OS.Emulator/
 ### Open
 5. **Renode ESP32 support:** Does Renode have an ESP32/Xtensa platform? If so, dual-machine emulation becomes much more viable.
 6. **ESPCP stub fidelity:** How much of the ESPCP protocol needs to be stubbed for Meadow.OS to boot with networking enabled? Minimum viable: system status + WiFi init responses.
-7. ~~**HCOM `/dev/nxupd` dependency:**~~ ✅ HCOM is designed to work without the coprocessor. The `/dev/nxupd` failure is non-fatal — HCOM should continue to accept host commands. Phase 1C can proceed independently of Phase 4A.
+7. ~~**HCOM `/dev/nxupd` dependency:**~~ ✅ HCOM works without the ESP32 coprocessor, but `/dev/nxupd` must still be registered (requires QSPI flash chain in `board_late_initialize`). Phase 1B.5 addresses this.
 8. **SVC address automation:** Currently the 7 SVC hook addresses are hardcoded and must be manually re-scanned after kernel rebuild. Should automate this (e.g., script that parses objdump output and generates hook lines).
+9. **`0x35` command conflict:** NuttX W25QXXXJV driver uses `0x35` as "Read Status Register-2" but `GenericSpiFlash` maps it to `EnterQuadInputOutputMode`. Need to verify if `GenericSpiFlash` handles this correctly or if we need to override behavior in the subclass.
+10. **Flash partition layout:** What partitions does NuttX create on the QSPI flash? Need to understand if a blank flash (all 0xFF) is sufficient for first boot or if pre-populated filesystem images are needed.
