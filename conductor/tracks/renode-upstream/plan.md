@@ -38,13 +38,17 @@
 - [ ] Wait until validated with NuttX MTD driver (`renode-platform` Phase 1B.5 complete)
 - [ ] Winbond W25Q series is extremely common — high value contribution
 
-## U.6 — STM32H7_QuadSPI Transfer Complete Flag Bug (PR or Issue)
-- [ ] **Bug:** `STM32H7_QuadSPI` never sets TCF (Transfer Complete Flag, bit 1) in the Status Register (SR, offset 0x8) after indirect-mode transactions complete
-- [ ] **Impact:** Any firmware using the QUADSPI peripheral in indirect mode that polls SR for TCF will hang forever (NuttX `qspi_waitstatusflags`, STM32 HAL `QSPI_WaitFlagStateUntilTimeout`)
-- [ ] **Also likely missing:** BUSY flag (bit 5) clearing, FTF (FIFO Threshold Flag, bit 2) handling
-- [ ] Our workaround: Hook `qspi_waitstatusflags` to skip via `cpu.PC = cpu.LR`. Proper fix belongs in the C# `STM32H7_QuadSPI` model.
-- [ ] Decide: submit as issue with reproduction details, or fix in C# and submit as PR
-- [ ] Note: `STM32H7_QuadSPI` register layout is identical to STM32F7 QUADSPI (same IP block), so fix benefits both F7 and H7 users
+## U.6 — STM32H7_QuadSPI Completeness (Feature Request / PR)
+- [ ] **Issue:** `STM32H7_QuadSPI` is a minimal register stub — not a bug per se, but incomplete
+- [ ] **Missing features:**
+  - TCF (Transfer Complete Flag) never set in SR after indirect-mode transactions
+  - No DMA request outputs (model doesn't expose them for `.repl` connection)
+  - BUSY flag (bit 5) and FTF (FIFO Threshold Flag, bit 2) likely not handled
+  - No actual indirect-mode read/write transaction logic
+- [ ] **Impact:** Any firmware using QUADSPI in indirect mode with polling or DMA will hang (NuttX, STM32 HAL)
+- [ ] Our workarounds: Skip `qspi_waitstatusflags` + DMA bypass hook that does direct memcpy
+- [ ] Note: `STM32H7_QuadSPI` register layout is identical to STM32F7 QUADSPI (same IP block), so improvements benefit both F7 and H7 users
+- [ ] Decide: submit as feature request issue, or implement full transaction logic in C# as PR
 
 ---
 
@@ -53,3 +57,5 @@
 | Date       | Decision | Rationale |
 |------------|----------|-----------|
 | 2026-03-08 | Submit our STM32F777 definition instead of reviewing PR #583 | Our definition is more complete and correct; supersedes their work |
+| 2026-03-08 | U.6 reclassified: QuadSPI TCF is incomplete peripheral, not a bug | `STM32H7_QuadSPI` is a minimal register stub — no DMA outputs, no transaction-completion logic. TCF not being set is an unimplemented feature, not broken behavior. DMA issue is the same root cause (model doesn't support it). |
+| 2026-03-08 | CortexM register access not an upstream issue | `cpu.SetRegister()` hanging is likely IronPython type mismatch, not a Renode defect. `GetRegisterUnsafe` deprecation warning points to `GetRegister` as correct API. Not worth filing upstream. |

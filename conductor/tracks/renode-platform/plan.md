@@ -142,7 +142,7 @@ Deferred (not adding now):
 ### 1B.5.4 — Fix QUADSPI Status Register Polling ✅
 - [x] Renode's `STM32H7_QuadSPI` doesn't set TCF (Transfer Complete Flag) in SR after transactions
 - [x] Hook at `qspi_waitstatusflags` (0x08036bcc) skips function via `cpu.PC = cpu.LR`
-- [x] Tracked as U.6 in `renode-upstream` for proper fix
+- [x] Tracked as U.6 in `renode-upstream` (reclassified as incomplete peripheral, not a bug)
 
 ### 1B.5.5 — Fix QUADSPI DMA Transfers ✅
 - [x] Renode's `STM32H7_QuadSPI` doesn't drive DMA requests → 800ms watchdog timeout (ETIMEDOUT)
@@ -275,4 +275,4 @@ Meadow.OS.Emulator/
 7. **SVC/hook address automation:** Currently SVC hooks (7 addresses), GPIO version hook (1 address), QSPI wait skip (1 address), and DMA bypass hooks (2 addresses) are all hardcoded and must be manually re-scanned after kernel rebuild. Should automate this.
 8. ~~**LittleFS mount -110 (ETIMEDOUT):**~~ ✅ Resolved — caused by QUADSPI not driving DMA requests (800ms watchdog timeout). Fixed by DMA bypass hook that does direct memcpy from/to flash backing memory. LittleFS auto-formats blank flash and mounts successfully.
 9. **`/dev/nxupd` registration:** Need to verify whether `hcom_nx_setup_mgr()` now succeeds with working flash. If not, trace where it fails after filesystem setup.
-10. **CortexM register access from hooks:** `cpu.SetRegister()`, `cpu.SetRegisterUlong()`, and `cpu.R0` all fail (hangs or attribute errors). Only `cpu.SP`, `cpu.PC`, `cpu.LR`, `cpu.PRIMASK` etc. work as named properties. `cpu.GetRegisterUnsafe()` works for reads. Stack writes are the workaround for modifying R0-R12.
+10. ~~**CortexM register access from hooks:**~~ Not a Renode bug — we were using the wrong API. `GetRegisterUnsafe` is deprecated (Renode says to use `GetRegister`). `cpu.SetRegister()` hangs likely due to IronPython type mismatch, not a Renode defect. Named properties (`cpu.SP`, `cpu.PC`, `cpu.LR`, `cpu.PRIMASK`) and stack writes remain the practical approach for hooks.
