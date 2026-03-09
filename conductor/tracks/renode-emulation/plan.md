@@ -1,168 +1,144 @@
 # Plan: Renode Emulation for Meadow.OS
 
 ## Track ID: `renode-emulation`
-## Status: `planning`
+## Status: `in_progress`
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
 
-## Phase 1A: First Boot — NSH in Renode (FLAT mode)
+## Phase 1A: First Boot — NSH in Renode (FLAT mode) ✅ COMPLETE
 **Goal:** Prove Renode can boot NuttX on the Meadow F7 platform
 **Build config:** `nsh` (FLAT mode, no MPU, single binary)
 **Binary:** `nuttx.bin` only
 
-### 1A.1 — Environment Setup
-- [ ] Install Renode (`brew install renode` or from https://renode.io/download)
-- [ ] Verify installation: `renode --version`, `renode --console` (headless mode)
-- [ ] Locate built-in STM32F746 platform: find `stm32f746.repl` in Renode's install directory
-- [ ] Quick smoke test: run any built-in Renode STM32 demo to confirm setup works
+### 1A.1 — Environment Setup ✅
+- [x] Install Renode v1.16.1 (macOS `.dmg` → `/Applications/Renode.app`)
+- [x] Verify installation: runs via `mono /Applications/Renode.app/Contents/MacOS/bin/Renode.exe`
+- [x] Headless mode: `--disable-xwt --console` for interactive, `--disable-xwt` alone for telnet on port 1234
 
-### 1A.2 — Build NuttX with `nsh` Config
-- [ ] Create `build-emulator.sh` in `Meadow.OS.Emulator/`
-- [ ] Script should:
-  - Reference `../Meadow.OS/nuttx/` for source
-  - Configure with: `./tools/configure.sh stm32f777zit6-meadow:nsh`
-  - Build: `make -j8`
-  - Copy `nuttx.bin` to `Meadow.OS.Emulator/build/`
-- [ ] Verify build succeeds and `nuttx.bin` is produced
+### 1A.2 — Build NuttX with `nsh` Config ✅
+- [x] Created `build-emulator.sh` — handles both `nsh` (flat) and `meadow_os` (protected) configs
+- [x] Includes version placeholder injection, mbedTLS build, artifact copy to `build/`
+- [x] Added `tools/kconfig-tweak` shim for NuttX build compatibility
 
-### 1A.3 — Create Meadow F7 Platform Description
-- [ ] Create `platforms/meadow-f7.repl` based on Renode's `stm32f746.repl`
-- [ ] Modifications from stock F746:
-  - **Fix memory regions** — stock F746 has a single 384KB `sram` block. Replace with accurate STM32F777 layout:
-    - `dtcm: Memory.MappedMemory @ sysbus 0x20000000 { size: 0x20000 }` (128KB DTCM)
-    - `sram1: Memory.MappedMemory @ sysbus 0x20020000 { size: 0x5C000 }` (368KB SRAM1)
-    - `sram2: Memory.MappedMemory @ sysbus 0x2007C000 { size: 0x4000 }` (16KB SRAM2)
-    - Note: NSH flat config uses RAM starting at 0x20010000 (mid-DTCM), so DTCM must be present
-  - Resize `fsmcBank1` (external SDRAM): 256MB → 32MB (matches CONFIG_HEAP2_SIZE=33554432)
-  - Add QSPI flash stub: `qspiFlash: Memory.MappedMemory @ sysbus 0x90000000 { size: 0x2000000 }`
-  - Update SVD reference to F7x7 if available
-  - All other peripherals (USART, timers, GPIO, DMA, etc.) stay as-is — same addresses on F777
+### 1A.3 — Create Meadow F7 Platform Description ✅
+- [x] Created `platforms/meadow-f7.repl` based on `stm32f746.repl`
+- [x] Fixed memory regions: DTCM (128KB), SRAM1 (368KB), SRAM2 (16KB)
+- [x] Added SDRAM 32MB @ 0xC0000000, QSPI flash 32MB @ 0x90000000
+- [x] Full peripheral set: 4x USART, 3x SPI, 4x I2C, 2x DMA, 14x Timers, 11x GPIO ports, Ethernet, LTDC, SDMMC, RTC, RNG, CAN, EXTI
+- [x] Timer AF pin mappings, SVD reference (STM32F7x6)
 
-### 1A.4 — Create Renode Launch Script
-- [ ] Create `scripts/meadow-nsh.resc`:
-  ```
-  using sysbus
-  mach create "meadow"
-  machine LoadPlatformDescription @platforms/meadow-f7.repl
+### 1A.4 — Create Renode Launch Script ✅
+- [x] Created `scripts/meadow-nsh.resc` (flat mode, single binary)
+- [x] Created `run.sh` with auto-detection of Renode on PATH or in `/Applications/Renode.app`
 
-  sysbus LoadBinary @build/nuttx.bin 0x08000000
-  sysbus.cpu VectorTableOffset 0x08000000
+### 1A.5 — Boot and Debug ✅
+- [x] NSH config boots — required custom RCC Python peripheral for clock ready bits
+- [x] Created `scripts/pydev/rcc.py` — auto-sets HSIRDY/HSERDY/PLLRDY/PLLI2SRDY/PLLSAIRDY, mirrors SW→SWS
+- [x] Created `scripts/pydev/otg_fs.py` — USB OTG FS stub (AHBIDL, GRSTCTL, GINTSTS)
+- [x] Created `scripts/pydev/flipflop.py` — simple read-back for PWR registers, LPTIM1
 
-  showAnalyzer usart1
-
-  start
-  ```
-- [ ] Create `run.sh` wrapper for convenience:
-  ```bash
-  renode --console scripts/meadow-nsh.resc
-  ```
-
-### 1A.5 — Boot and Debug
-- [ ] Run: `./run.sh`
-- [ ] Observe USART1 output — expect NuttX boot messages or fault
-- [ ] If fault: start GDB server (`machine StartGdbServer 3333`), attach, diagnose
-- [ ] Common issues to expect and resolve:
-  - **RCC/Clock init:** NuttX configures PLL from HSE. Renode's RCC stub (`STM32F4_RCC`) may not fully model this. May need to stub specific registers.
-  - **Flash wait states:** `flash_regs` is a MappedMemory region — may need preset values
-  - **DTCM/ITCM memory:** May need additional memory regions if NuttX references them
-- [ ] Iterate until `nsh>` prompt appears on USART1
-- **Depends on:** 1A.2, 1A.3, 1A.4
+**Resolved open questions:**
+- RCC/Clock tree: Renode's built-in STM32F4_RCC does NOT handle ready bits. Custom Python peripheral required.
+- Flash wait states: MappedMemory region at 0x40023C00 is sufficient.
 
 ---
 
-## Phase 1B: Protected Mode Boot
+## Phase 1B: Protected Mode Boot ✅ COMPLETE
 **Goal:** Boot full Meadow.OS with PROTECTED build (kernel + user binaries)
 **Build config:** `meadow_os` (PROTECTED mode, MPU, two-pass build)
-**Binaries:** `nuttx.bin` + `nuttx_user.bin` (or combined `Meadow.OS.bin`)
-**Critical gate:** Renode MPU support
+**Binaries:** `nuttx.bin` + `nuttx_user.bin`
 
-### 1B.1 — Investigate Renode MPU Support
-- [ ] Research Renode's Cortex-M7 MPU implementation (docs, source, community)
-- [ ] Test: write a minimal MPU configuration program, run in Renode, verify behavior
-- [ ] Determine if MPU region configuration works (needed for user-space GPIO/QSPI access)
-- [ ] If MPU not supported: evaluate workarounds or contribute upstream
-- **This is the critical gate for Phase 1B. If blocked, document and escalate.**
+### 1B.1 — Investigate Renode MPU Support ✅
+- [x] Renode's Cortex-M7 model supports MPU configuration — protected mode boots without MPU-related faults
+- [x] Kernel/user privilege transitions work correctly via SVC
+- [x] MPU regions configured by NuttX at boot (GPIO, QSPI, Ethernet SRAM) — no issues observed
 
-### 1B.2 — Build Meadow.OS (Protected Mode)
-- [ ] Update `build-emulator.sh` to support `--config=meadow_os`
-- [ ] Script should:
-  - Configure with: `./tools/configure.sh stm32f777zit6-meadow:meadow_os`
-  - Two-pass build: `make pass2` → `build-mbedtls.sh` → `make pass1` → `make nuttx`
-  - Copy `nuttx.bin` and `nuttx_user.bin` to `build/`
-  - Optionally combine into `Meadow.OS.bin` (matching `build.sh` packaging logic)
-- [ ] Verify build succeeds
+### 1B.2 — Build Meadow.OS (Protected Mode) ✅
+- [x] `build-emulator.sh` supports `meadow_os` (default) and `nsh` configs
+- [x] Two-pass build: pass2 → mbedTLS → pass1 → nuttx
+- [x] Copies `nuttx.bin`, `nuttx_user.bin`, and `nuttx.elf` (for GDB) to `build/`
 
-### 1B.3 — Load Both Binaries in Renode
-- [ ] Create `scripts/meadow-os.resc`:
-  ```
-  using sysbus
-  mach create "meadow"
-  machine LoadPlatformDescription @platforms/meadow-f7.repl
+### 1B.3 — Load Both Binaries in Renode ✅
+- [x] Created `scripts/meadow-os.resc` — loads kernel @ 0x08000000, user @ 0x08100000
+- [x] Created `scripts/meadow-os-gdb.resc` — same but with GDB server on port 3333, starts paused
+- [x] Created `scripts/meadow-os-diag.resc` — diagnostic hooks for SVC/context-switch tracing
 
-  # Load kernel at link-time address (0x08000000)
-  # NOTE: The production bootloader places kernel at 0x08040000 in combined
-  # Meadow.OS.bin, but the kernel is LINKED at 0x08000000. In Renode we skip
-  # the bootloader and load each binary at its link-time address directly.
-  sysbus LoadBinary @build/nuttx.bin 0x08000000
-  # Load user binary at 0x08100000 (CONFIG_NUTTX_USERSPACE)
-  sysbus LoadBinary @build/nuttx_user.bin 0x08100000
+### 1B.4 — Validate Protected Mode Boot ✅
+- [x] Kernel boots, creates hpwork/lpwork threads, transitions to user space
+- [x] AppBringUp task starts, runs `nx_start_application()`, exits cleanly
+- [x] `hcom_main` starts and runs in user space
+- [x] System enters healthy idle state (CPU in `wfi`)
+- [x] **Critical bug found and fixed:** Renode SVC-with-PRIMASK bug (see Workarounds below)
 
-  sysbus.cpu VectorTableOffset 0x08000000
+### Workaround: SVC-with-PRIMASK (discovered during 1B.4)
+**Root cause:** Renode v1.16.1 silently skips `SVC` when `PRIMASK=1`. On real ARMv7-M, this escalates to HardFault (which NuttX handles intentionally). The skip caused `arm_fullcontextrestore()` to fall through and `PANIC()`.
 
-  showAnalyzer usart1
+**Crash path traced via GDB:** `up_exit()` → `enter_critical_section()` (sets PRIMASK=1) → `arm_fullcontextrestore()` → `svc 0` (SKIPPED by Renode) → falls through → `PANIC()`
 
-  start
-  ```
-- [ ] Do NOT use the combined `Meadow.OS.bin` — it includes the bootloader and places the kernel at offset 0x40000 (0x08040000), which doesn't match link-time addresses. Always load the individual `nuttx.bin` and `nuttx_user.bin` directly.
+**Fix:** IronPython hooks at all 7 `SVC #0` instruction addresses unconditionally clear PRIMASK before execution. Addresses are binary-specific and must be re-scanned after kernel rebuild:
+```bash
+arm-none-eabi-objdump -d build/nuttx.elf | grep 'svc\s'
+```
 
-### 1B.4 — Validate Protected Mode Boot
-- [ ] Verify kernel boots and transitions to user-space `hcom_main`
-- [ ] Confirm MPU regions are configured (GPIO, QSPI, Ethernet SRAM access)
-- [ ] Check memory isolation: kernel SRAM (0x20020000, 128KB) vs user SRAM (0x20040000, 240KB per memory.ld)
-  - Note: SDRAM at 0xC0000000 is used as heap2 (CONFIG_HEAP2_SIZE=32MB) — verify accessible from user space
-- [ ] Debug any faults related to MPU/privilege level transitions
-- **Depends on:** 1B.1, 1B.2, 1B.3
+**Also identified (non-critical):** FPU frame mismatch — Renode always uses standard exception frames (32 bytes) but NuttX always calculates REG_R13 assuming extended frames (104 bytes). Off by 72 bytes but doesn't cause crashes since MSP restore comes from hardware frame.
+
+### Current Boot Output
+```
+stm32_boot.c@300-ERROR: Meadow version could not be determined
+hcom_via_nx_access.c@94-/dev/nxupd Failed to open, errno:2
+hcom_startup_manager.c@174-setup hcom nx access:-1
+```
+HCOM fails because `/dev/nxupd` (coprocessor communication device) doesn't exist — expected without ESP32 coprocessor emulation.
 
 ---
 
 ## Phase 1C: HCOM Bring-Up
 **Goal:** Get HCOM protocol working over emulated serial
-**Depends on:** Phase 1B (PROTECTED mode boot with `hcom_main`)
+**Status:** `next_up`
+**Depends on:** Phase 1B ✅
 
-### Important: HCOM Uses USB CDC-ACM, Not UART
-On real hardware, HCOM communicates over USB CDC-ACM (`/dev/ttyACM0`), configured via `CONFIG_CDCACM=y` in the `meadow_os` defconfig. HCOM is NOT a UART — it's a USB device class.
+### Current Situation
+HCOM initialization has two dependencies:
+1. **`/dev/nxupd`** — coprocessor communication device (ESP32 ESPCP channel). HCOM calls `hcom_via_nx_access` which opens this device. Without ESP32 emulation, this fails with `errno:2`.
+2. **USB CDC-ACM** — HCOM's host communication transport (`/dev/ttyACM0`). Renode can't emulate USB device controllers.
 
-Renode does not emulate USB device controllers, so HCOM cannot use its native CDC-ACM transport in emulation. **Solution:** Create an emulation-specific NuttX defconfig (`meadow_os_emu`) that redirects HCOM to a UART by changing `CONFIG_HCOM_COMMS_DEVICE_NAME` from `/dev/ttyACM0` to a UART device (e.g., `/dev/ttyS1` mapped to USART2 or UART4).
+Both need to be addressed for HCOM to function.
 
-### 1C.1 — Create Emulation Defconfig
+### 1C.1 — Investigate HCOM Startup Path
+- [ ] Trace `hcom_main` → `hcom_startup_manager` → understand what happens after `/dev/nxupd` failure
+- [ ] Determine if HCOM can proceed without coprocessor (graceful degradation vs hard fail)
+- [ ] Identify minimum viable path: can HCOM accept host commands with coprocessor offline?
+- [ ] Map out which HCOM features depend on ESP32 vs which are self-contained
+
+### 1C.2 — Create Emulation Defconfig (`meadow_os_emu`)
 - [ ] Copy `meadow_os` defconfig to `meadow_os_emu`
 - [ ] Disable USB CDC-ACM: `CONFIG_CDCACM=n`, `CONFIG_USBDEV=n`
-- [ ] Add/enable a second UART for HCOM: e.g., `CONFIG_STM32F7_USART2=y`
-- [ ] Set `CONFIG_HCOM_COMMS_DEVICE_NAME="/dev/ttyS1"` (or whichever UART is chosen)
+- [ ] Redirect HCOM to UART: `CONFIG_HCOM_COMMS_DEVICE_NAME="/dev/ttyS1"` (USART2)
+- [ ] Enable USART2: `CONFIG_STM32F7_USART2=y`
+- [ ] Consider: disable or stub ESPCP manager if it blocks HCOM startup
 - [ ] Keep all other PROTECTED mode settings identical to `meadow_os`
-- [ ] Verify build succeeds with the new defconfig
+- [ ] Verify build succeeds
 
-### 1C.2 — HCOM Serial Configuration in Renode
-- [ ] Ensure the chosen UART (e.g., USART2) is present in `meadow-f7.repl`
+### 1C.3 — HCOM Serial Configuration in Renode
 - [ ] Expose HCOM UART via Renode socket: `emulation CreateServerSocketTerminal 1234 "hcom"`
-- [ ] Connect HCOM UART to socket terminal in `.resc` script
-- [ ] USART1 stays as console/debug output
+- [ ] Connect USART2 to socket terminal in `.resc` script
+- [ ] USART1 stays as console/syslog output
 
-### 1C.3 — HCOM Protocol Testing
+### 1C.4 — HCOM Protocol Testing
 - [ ] Verify `hcom_main` initializes and listens on the redirected UART
 - [ ] Send basic HCOM commands via socket (e.g., using `nc` or a test script)
 - [ ] Verify command/response cycle
-- [ ] Test file transfer operations (requires QSPI flash working — Phase 1A.3 stub may suffice)
+- [ ] Test file transfer operations (requires QSPI flash — current MappedMemory stub may suffice)
 
-### 1C.4 — GDB Debugging Workflow
-- [ ] Start Renode with GDB server: `machine StartGdbServer 3333`
-- [ ] Connect: `arm-none-eabi-gdb ../Meadow.OS/nuttx/nuttx -ex "target remote :3333"`
-- [ ] Verify: breakpoints, step, backtrace, register inspection
-- [ ] Test NuttX GDB Python scripts (`../Meadow.OS/gdb/Nuttx.py`)
-  - Renode's Cortex-M7 GDB should expose OpenOCD-style registers (xPSR, msp, psp)
-  - Renode behaves like real hardware from GDB's perspective
-- [ ] Document the debugging workflow
+### 1C.5 — GDB Debugging Workflow ✅ COMPLETE
+- [x] GDB server works via `machine StartGdbServer 3333` (meadow-os-gdb.resc)
+- [x] `arm-none-eabi-gdb build/nuttx.elf -ex "target remote :3333"` connects successfully
+- [x] Breakpoints, stepi, backtrace, register inspection all work
+- [x] Memory reads (`x/Nxw addr`) work correctly
+- [x] NuttX data structures readable (e.g., `(struct tcb_s *)g_readytorun.head`)
+- [x] UART output captured to `/tmp/renode-uart.txt` for monitoring
+- [x] Documented in README.md
 
 ---
 
@@ -559,11 +535,20 @@ Meadow.OS.Emulator/
 | 2026-03-08 | ESPCP disabled for Phase 1A-1C | `CONFIG_MEADOW_ESPCP_MANAGER` is already `not set` in defconfig — safe to boot without ESP32 for initial bring-up |
 | 2026-03-08 | Skip bootloader in Renode, load at link-time addresses | Bootloader places kernel at 0x08040000 in combined image, but kernel is linked at 0x08000000. Loading individual binaries at link addresses avoids address mismatch. |
 | 2026-03-08 | HCOM needs emulation-specific defconfig | HCOM uses USB CDC-ACM (`/dev/ttyACM0`) which Renode can't emulate. Create `meadow_os_emu` defconfig that redirects HCOM to a UART. |
+| 2026-03-08 | Custom RCC Python peripheral | Renode's built-in STM32F4_RCC does not set clock ready bits. Custom `rcc.py` handles HSIRDY/HSERDY/PLLRDY/etc. and SW→SWS mirroring. |
+| 2026-03-08 | SVC PRIMASK workaround via inline hooks | Renode silently skips SVC when PRIMASK=1. IronPython hooks at all 7 SVC addresses clear PRIMASK before execution. Hooks are address-specific and must be updated when kernel is rebuilt. |
+| 2026-03-08 | SVC hooks inline in .resc, not PyDevFromFile | Inline one-liner is simpler than a separate Python file for CPU hooks. `fix_svc_primask.py` kept as reference. |
 
 ## Open Questions
-1. **Renode MPU support:** Does Renode's Cortex-M7 model fully support MPU configuration? Critical gate for Phase 1B.
-2. **RCC/Clock tree:** How much of the STM32F7 clock tree does Renode model? NuttX's `stm32_clockconfig()` configures PLL from HSE — may need stubs.
-3. **HCOM dual-serial:** ~~Can Renode expose two UART instances?~~ **RESOLVED:** HCOM uses USB CDC-ACM, not UART. Renode can't emulate USB device controllers. Solution: emulation-specific defconfig redirecting HCOM to a UART. Two UARTs (console + HCOM) are supported via multiple analyzers/sockets.
-4. **GDB register set:** Renode's Cortex-M7 GDB server likely exposes OpenOCD-style registers (xPSR, msp, psp, control). Need to verify.
+
+### Resolved
+1. ~~**Renode MPU support:**~~ ✅ Works. Protected mode boots without MPU-related faults. Kernel/user privilege transitions function correctly.
+2. ~~**RCC/Clock tree:**~~ ✅ Custom Python peripheral required. Renode's built-in STM32F4_RCC does not set ready bits.
+3. ~~**HCOM dual-serial:**~~ ✅ HCOM uses USB CDC-ACM, not UART. Solution: emulation-specific defconfig redirecting HCOM to a UART.
+4. ~~**GDB register set:**~~ ✅ Verified — GDB server exposes standard Cortex-M registers, breakpoints/stepi/backtrace/memory reads all work.
+
+### Open
 5. **Renode ESP32 support:** Does Renode have an ESP32/Xtensa platform? If so, dual-machine emulation becomes much more viable.
 6. **ESPCP stub fidelity:** How much of the ESPCP protocol needs to be stubbed for Meadow.OS to boot with networking enabled? Minimum viable: system status + WiFi init responses.
+7. ~~**HCOM `/dev/nxupd` dependency:**~~ ✅ HCOM is designed to work without the coprocessor. The `/dev/nxupd` failure is non-fatal — HCOM should continue to accept host commands. Phase 1C can proceed independently of Phase 4A.
+8. **SVC address automation:** Currently the 7 SVC hook addresses are hardcoded and must be manually re-scanned after kernel rebuild. Should automate this (e.g., script that parses objdump output and generates hook lines).

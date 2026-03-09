@@ -1,7 +1,7 @@
 {
   "track_id": "renode-emulation",
   "title": "Renode Emulation for Meadow.OS",
-  "status": "planning",
+  "status": "in_progress",
   "created": "2026-03-08",
   "updated": "2026-03-08",
   "repo": "Meadow.OS.Emulator",

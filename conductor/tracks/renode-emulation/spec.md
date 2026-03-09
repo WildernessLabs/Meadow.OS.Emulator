@@ -84,11 +84,11 @@ Investigation confirmed that protected build mode is **architecturally fundament
 | Separate build script in emulator repo | Emulation build will diverge from hardware build; converge over time as feature parity grows |
 
 ## Success Criteria
-- [ ] NuttX boots to NSH shell in Renode (FLAT mode, `nsh` config)
-- [ ] NuttX boots with PROTECTED mode (`meadow_os` config, both binaries loaded)
+- [x] NuttX boots to NSH shell in Renode (FLAT mode, `nsh` config)
+- [x] NuttX boots with PROTECTED mode (`meadow_os` config, both binaries loaded)
 - [ ] HCOM shell functional over emulated UART (via emulation-specific defconfig redirecting from USB CDC-ACM)
-- [ ] USART1 console output visible
-- [ ] GDB attach + step-through debugging works
+- [x] USART1 console output visible
+- [x] GDB attach + step-through debugging works
 - [ ] QSPI flash read/write functional (LittleFS mount)
 - [ ] Unit tests (`--unittests=os,misc`) pass in emulation
 - [ ] CI pipeline runs tests in Renode headless mode
@@ -115,7 +115,13 @@ The Meadow F7 board has two main chips:
 - LTDC display controller
 
 ## Open Questions
-1. **Renode MPU support:** Does Renode's Cortex-M7 model fully support MPU configuration? This is the critical gate for PROTECTED mode.
-2. **RCC/Clock tree:** How much of the STM32F7 clock tree does Renode model? NuttX's `stm32_clockconfig()` configures PLL from HSE — may need stubs.
-3. **HCOM transport:** ~~Dual-serial question~~ **RESOLVED:** HCOM uses USB CDC-ACM on real hardware. Emulation will use a `meadow_os_emu` defconfig that redirects HCOM to a UART. Two UARTs (console + HCOM) are supported via multiple Renode analyzers/sockets.
-4. **GDB register set:** Renode's Cortex-M7 GDB server likely exposes the OpenOCD-style register set (xPSR, msp, psp, control). Need to verify.
+
+### Resolved
+1. ~~**Renode MPU support:**~~ ✅ Works — protected mode boots, kernel/user transitions functional.
+2. ~~**RCC/Clock tree:**~~ ✅ Renode's built-in RCC is insufficient. Custom Python peripheral (`rcc.py`) handles ready bits and clock switching.
+3. ~~**HCOM transport:**~~ ✅ HCOM uses USB CDC-ACM. Emulation will redirect to UART via `meadow_os_emu` defconfig.
+4. ~~**GDB register set:**~~ ✅ Verified — standard Cortex-M registers, full debugging support works.
+
+### Open
+5. **Renode SVC-with-PRIMASK bug:** Discovered that Renode silently skips SVC when PRIMASK=1 instead of escalating to HardFault. Workaround in place (IronPython hooks). Should this be reported upstream to Renode?
+6. ~~**HCOM `/dev/nxupd` dependency:**~~ ✅ HCOM is designed to work without the coprocessor — the `/dev/nxupd` failure is non-fatal.
