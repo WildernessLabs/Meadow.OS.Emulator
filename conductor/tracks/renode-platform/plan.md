@@ -184,11 +184,6 @@ Meadow reset code: 0x00, reset count: 1, power cycle count 1
 Mono runtime was not found flashed in external flash.
 ```
 
-### 1B.5.8 — Flash Persistence (Future)
-- [ ] Investigate Renode `MappedMemory` file backing for persistent flash contents
-- [ ] Pre-populate flash with valid filesystem image if needed
-- [ ] Document flash partition layout
-
 ---
 
 ## File Structure

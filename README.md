@@ -187,12 +187,11 @@ Mono runtime was not found flashed in external flash.
 
 Remaining:
 - Mono runtime not found (expected — not flashed in QSPI backing memory)
-- `/dev/nxupd` registration status needs verification
 
 ## Next Steps
 
-- **`/dev/nxupd` verification** — Confirm HCOM device registration now works with full flash chain
 - **HCOM bring-up** — Redirect HCOM from USB CDC-ACM to UART for emulator interaction (see `renode-hcom` track)
+- **Flash persistence** — Investigate Renode `MappedMemory` file backing for persistent QSPI flash contents across runs; pre-populate with filesystem image if needed
 - **ESP32 coprocessor** — Emulate the ESPCP protocol over SPI2 (see `renode-esp32` track)
 - **CI integration** — Automated boot tests (see `renode-ci` track)
-- **Upstream contributions** — PR STM32F777 platform, SVC bug fix, RCC ready bits, W25Q flash, QuadSPI TCF fix to Renode (see `renode-upstream` track)
+- **Upstream contributions** — PR STM32F777 platform, SVC bug fix, RCC ready bits, W25Q flash, QuadSPI completeness to Renode (see `renode-upstream` track)
