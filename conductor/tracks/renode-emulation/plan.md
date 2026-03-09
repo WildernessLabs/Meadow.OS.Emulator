@@ -93,10 +93,88 @@ HCOM fails because `/dev/nxupd` (coprocessor communication device) doesn't exist
 
 ---
 
+## Phase 1B+ : Platform Description Refactor + Upgrade
+**Goal:** Separate chip-level and board-level platform descriptions; add missing on-chip peripherals identified via PR #583 comparison
+**Status:** `next_up`
+**Depends on:** Phase 1B ✅
+**Blocks:** Phase 1B.5 (QSPI peripheral goes into the right file)
+
+### Background: Chip vs. Board Separation
+
+The current `meadow-f7.repl` mixes on-chip STM32F777 peripherals with board-level external hardware (SDRAM, QSPI flash chip). Renode supports a clean `using` pattern to separate these:
+
+- **`stm32f777.repl`** (chip) — CPU, internal flash, SRAM, all on-die peripherals
+- **`meadow-f7.repl`** (board) — `using "stm32f777.repl"` + external SDRAM, QSPI flash chip, SD card, ESP32 coprocessor (future), LAN9355 PHY (future)
+
+This makes the chip definition reusable and keeps board-specific hardware clearly separated.
+
+### 1B+.1 — Refactor: Split into Chip + Board Files
+- [ ] Create `platforms/stm32f777.repl` with all on-chip peripherals extracted from current `meadow-f7.repl`:
+  - CPU (Cortex-M7), NVIC, internal flash (2MB @ 0x08000000), flash mirror (@ 0x00000000)
+  - DTCM (128KB), SRAM1 (368KB), SRAM2 (16KB), ROM (64KB)
+  - All UART/USART, SPI, I2C, CAN, timers, DMA, GPIO ports
+  - RCC, PWR, SYSCFG, EXTI, RTC, RNG, OTG_FS, LTDC, Ethernet MAC, SDMMC controller
+  - Flash registers, SVD reference
+- [ ] Refactor `platforms/meadow-f7.repl` to use chip file + board-level externals:
+  ```
+  using "stm32f777.repl"
+
+  // Board-level external peripherals
+  sdram: Memory.MappedMemory @ sysbus 0xC0000000
+      size: 0x02000000    // 32MB SDRAM (Meadow board)
+
+  qspiFlash: Memory.MappedMemory @ sysbus 0x90000000
+      size: 0x04000000    // 64MB W25Q flash (Meadow board)
+  ```
+  Note: QSPI flash size corrected from 32MB to 64MB to match actual Meadow board hardware.
+- [ ] Verify all `.resc` scripts still work with the refactored files
+- [ ] Update README.md project structure section
+
+### 1B+.2 — Add Missing On-Chip Peripherals (to `stm32f777.repl`)
+
+Based on comparison with Renode PR #583 and STM32F777 datasheet:
+
+| Item | Peripheral | Address | IRQ | Notes |
+|------|-----------|---------|-----|-------|
+| 1 | `MTD.STM32F4_FlashController` | 0x40023C00 | — | Replace `flash_regs` MappedMemory stub with proper flash interface |
+| 2 | `Miscellaneous.DWT` | 0xE0001000 | — | Data Watchpoint & Trace. Set `frequency: 216000000` (216MHz, not PR's incorrect 72MHz) |
+| 3 | `Analog.STM32_ADC` x3 | ADC1: 0x40012000, ADC2: 0x40012100, ADC3: 0x40012200 | nvic@18 | All three share one NVIC line |
+| 4 | `UART.STM32_UART` x4 | UART4: 0x40004C00, UART5: 0x40005000, UART7: 0x40007C00, UART8: 0x40007800 | 52, 53, 82, 83 | Additional UARTs not in original F746 file |
+| 5 | `fpuInterruptNumber: 81` | — | 81 | Add to CPU definition |
+| 6 | `CAN.STMCAN` x2 | CAN2: 0x40006800, CAN3: 0x40006C00 | 63, 104 | CAN1 already present. STM32F777 has 3 CAN buses |
+| 7 | `SPI.STM32SPI` x3 | SPI4: 0x40013400, SPI5: 0x40015000, SPI6: 0x40015400 | 84, 85, 86 | Confirmed in NuttX chip.h and memory map. Meadow board uses SPI2, SPI3, SPI5 |
+
+Deferred (not adding now):
+- **Ethernet PHY** — Meadow uses LAN9355/ML, not LAN8742A. Add when networking phase begins.
+- **CRC unit** — Hardware CRC not enabled in Meadow defconfig. Renode's `STM32F0_CRC` model is incorrect for F7 anyway.
+
+### 1B+.3 — Board-Level Notes (for `meadow-f7.repl`)
+
+Items that belong in the board file, tracked here for future phases:
+- **QSPI flash chip** — W25QXXXJV (Winbond). Phase 1B.5 replaces MappedMemory stub with real C# peripheral.
+- **SD card** — Physical card attached via SDMMC controller. Controller is on-chip, card is board-level. Add when needed.
+- **ESP32 coprocessor** — Phase 4. Connected via SPI2 + GPIO handshaking.
+- **Ethernet PHY** — LAN9355/ML. Add when networking phase begins.
+- **SDRAM** — 32MB external SDRAM via FMC. Already in board file.
+
+### Verification: Things We Got Right (vs. PR #583 Bugs)
+
+Confirmed our implementations are correct where PR #583 has errors:
+- ✅ **SRAM layout** — Proper 3-region split (DTCM/SRAM1/SRAM2) vs PR's incorrect 256MB single block
+- ✅ **RCC** — Custom Python peripheral with ready bits vs PR's built-in model that hangs NuttX
+- ✅ **GPIO reset values** — GPIOA 0xA8000000, GPIOB 0x00000280 vs PR's all-zeros (wrong for A/B debug pins)
+- ✅ **GPIO→EXTI routing** — Through SYSCFG mux vs PR's incorrect direct connection
+- ✅ **Timers** — Full 14-timer set vs PR's 5 timers
+- ✅ **SDMMC** — Proper `STM32FSDMMC` peripheral vs PR's nothing
+- ✅ **USB OTG FS** — Custom Python stub vs PR's nothing
+- ✅ **SDRAM** — 32MB @ 0xC0000000 vs PR's nothing
+
+---
+
 ## Phase 1B.5: QSPI Flash + Board Init Chain
 **Goal:** Get `board_late_initialize()` completing fully — QSPI flash, filesystem, config, `/dev/nxupd` registration
 **Status:** `next_up`
-**Depends on:** Phase 1B ✅
+**Depends on:** Phase 1B+ (platform refactor — peripherals go into correct chip/board files)
 **Blocks:** Phase 1C (HCOM needs `/dev/nxupd` which is registered at end of this chain)
 
 ### Background: Why This Is Required
@@ -567,11 +645,51 @@ Renode supports multiple machines in a single simulation with inter-machine conn
 
 ---
 
+## Upstream Contributions (Renode)
+**Goal:** Contribute fixes and platform definitions back to the Renode project
+**Repo:** User's fork of `renode/renode` (already forked)
+**Priority:** After each item is validated in our emulation environment
+
+### U.1 — STM32F777 Platform Definition (PR)
+- [ ] Submit `stm32f777.repl` as a PR to `renode/renode`
+- [ ] Supersedes PR #583 (which has SRAM size bug, incorrect GPIO reset values, missing SYSCFG routing, no QSPI/SDRAM, broken RCC)
+- [ ] Our definition includes: correct SRAM split, full timer set (14), proper GPIO reset values, SYSCFG→EXTI routing, DWT, ADC, all 6 SPI, all 3 CAN, all 8 UART/USART, flash controller
+- [ ] Wait until platform is validated with NuttX boot (Phase 1B+ complete)
+- [ ] Include test `.resc` script if Renode contribution guidelines require it
+
+### U.2 — SVC-with-PRIMASK Bug Fix (PR or Issue)
+- [ ] **Bug:** Renode v1.16.1 silently skips `SVC` when `PRIMASK=1`. Per ARMv7-M architecture, this should escalate to HardFault (synchronous, precise).
+- [ ] **Impact:** Breaks any RTOS that uses PRIMASK for critical sections around SVC calls (NuttX, FreeRTOS patterns)
+- [ ] **Location in Renode source:** Cortex-M CPU model, SVC instruction handling
+- [ ] Decide: submit as bug report (issue) or attempt a fix (PR)
+- [ ] Include minimal reproduction case (NuttX `arm_fullcontextrestore` with PRIMASK=1)
+
+### U.3 — RCC Ready Bit Handling (PR or Issue)
+- [ ] **Bug:** Built-in `STM32F4_RCC` does not auto-set clock ready bits (HSIRDY, HSERDY, PLLRDY, PLLI2SRDY, PLLSAIRDY) when corresponding enable bits are written
+- [ ] **Impact:** Any firmware that enables a clock and polls the ready bit will hang forever (NuttX, STM32 HAL, bare-metal init code)
+- [ ] **Also missing:** SW→SWS mirroring in RCC_CFGR (clock switch status never reflects selected clock)
+- [ ] Our workaround: Python peripheral (`rcc.py`). Proper fix belongs in the C# `STM32F4_RCC` model.
+- [ ] Decide: submit as issue with our Python implementation as reference, or port to C# and submit as PR
+
+### U.4 — FPU Exception Frame Fix (Issue)
+- [ ] **Bug:** Renode exception entry always uses standard frames (32 bytes, `EXC_RETURN` bit4=1) even when FPU is active. Should use extended frames (104 bytes, bit4=0) per ARMv7-M spec.
+- [ ] **Impact:** Non-critical for most code (MSP restore uses hardware frame), but breaks stack pointer verification and any code that inspects saved FPU registers on the exception frame
+- [ ] Submit as issue — this is a deeper fix in the Cortex-M exception entry model
+
+### U.5 — Winbond W25QXXXJV Flash Peripheral (PR)
+- [ ] Submit `Winbond_W25QXXXJV.cs` extending `GenericSpiFlash`
+- [ ] ~30 lines: manufacturer ID `0xEF`, memory type `0x40`, size validation
+- [ ] Wait until validated with NuttX MTD driver (Phase 1B.5 complete)
+- [ ] Winbond W25Q series is extremely common — high value contribution
+
+---
+
 ## File Structure
 ```
 Meadow.OS.Emulator/
 ├── platforms/
-│   ├── meadow-f7.repl              # STM32F7 Renode platform description
+│   ├── stm32f777.repl              # STM32F777 chip-level platform (on-die peripherals only)
+│   ├── meadow-f7.repl              # Meadow F7 board (uses stm32f777.repl + external hw)
 │   └── meadow-esp32.repl           # ESP32 coprocessor platform (Phase 4)
 ├── peripherals/
 │   └── EspcpStub.cs                 # ESPCP SPI stub peripheral (C#, Phase 4)
@@ -625,6 +743,11 @@ Meadow.OS.Emulator/
 | 2026-03-08 | Reuse `STM32H7_QuadSPI` controller for F7 | STM32F7 and H7 QUADSPI have identical register layouts (CR, DCR, SR, CCR, AR, DR). Only difference is base address (F7: 0xA0001000, H7: 0x52005000), handled in .repl. |
 | 2026-03-08 | `/dev/nxupd` requires full QSPI/MTD chain | `board_late_initialize()` gates `hcom_nx_setup_mgr()` (which registers `/dev/nxupd`) behind successful QSPI flash init, version detection, MTD driver init, and filesystem setup. Cannot shortcut — need working QSPI flash. |
 | 2026-03-08 | GPIO version detection hook for CCMv2 | Board version is detected via 4 GPIO pins. In Renode, unconnected inputs with pull-ups all read high (0x0F = F7V1/V2), triggering a flash chip ID query that fails. Hook to return 0x01 (CCMv2) skips the query and selects W25QXXXJV driver directly. |
+| 2026-03-08 | Split platform into chip + board .repl files | `stm32f777.repl` has on-die peripherals only; `meadow-f7.repl` uses it and adds board-level hardware (SDRAM, QSPI flash chip, future ESP32/PHY). Makes chip definition reusable and keeps board-specific hardware clearly separated. |
+| 2026-03-08 | QSPI flash size corrected to 64MB | Meadow board has 64MB W25Q flash, not 32MB. Previous stub was undersized. |
+| 2026-03-08 | PR #583 comparison — selective adoption | Compared our platform against Renode PR #583 (stm32f777.repl). Adopted: flash controller, DWT, ADC, UARTs, FPU IRQ, CAN2/3, SPI4/5/6. Rejected: CRC (wrong model), Ethernet PHY (wrong chip). Confirmed our SRAM/RCC/GPIO/timer implementations are superior to PR's. |
+| 2026-03-08 | Skip hardware CRC | Meadow defconfig does not enable hardware CRC. Renode's `STM32F0_CRC` model is also incorrect for F7 (different polynomial/register layout). |
+| 2026-03-08 | Ethernet PHY deferred — LAN9355/ML | Meadow uses LAN9355/ML PHY, not LAN8742A. NuttX defconfig has `CONFIG_ETH0_PHY_LAN8742A=y` but actual board differs. Defer until networking phase. |
 
 ## Open Questions
 
