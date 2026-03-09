@@ -108,7 +108,7 @@ The script auto-detects Renode on `PATH` or in `/Applications/Renode.app` (macOS
 ## Python Peripherals
 
 ### RCC (`rcc.py`)
-Custom clock controller that auto-sets ready bits when the corresponding clock enable is written. Handles: `HSIRDY`, `HSERDY`, `PLLRDY`, `PLLI2SRDY`, `PLLSAIRDY`, and mirrors clock switch bits (SW) to status (SWS) in RCC_CFGR.
+Custom clock controller that auto-sets ready bits when the corresponding clock enable is written. Handles: `HSIRDY`, `HSERDY`, `PLLRDY`, `PLLI2SRDY`, `PLLSAIRDY`, and mirrors clock switch bits (SW) to status (SWS) in `RCC_CFGR`.
 
 ### USB OTG FS (`otg_fs.py`)
 Stub for USB OTG FS controller. Keeps AHBIDL bit set in `GRSTCTL` (`AHB` bus always idle), auto-clears software reset bits, and implements write-1-to-clear for `GINTSTS`.
