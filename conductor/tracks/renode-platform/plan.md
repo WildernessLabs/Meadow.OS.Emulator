@@ -118,10 +118,10 @@ Deferred (not adding now):
 
 ---
 
-## Phase 1B.5: QSPI Flash + Board Init Chain — IN PROGRESS
+## Phase 1B.5: QSPI Flash + Board Init Chain ✅ COMPLETE
 **Goal:** Get `board_late_initialize()` completing fully — QSPI flash, filesystem, config, `/dev/nxupd` registration
 **Depends on:** Phase 1B+ ✅
-**Blocks:** `renode-hcom` track (HCOM needs `/dev/nxupd` which is registered at end of this chain)
+**Unblocks:** `renode-hcom` track
 
 ### 1B.5.1 — Create Winbond W25QXXXJV Flash Peripheral ✅
 - [x] Created `peripherals/Winbond_W25QXXXJV.cs` extending `GenericSpiFlash`
@@ -164,7 +164,9 @@ Deferred (not adding now):
 - [x] Filesystem creation completes
 - [x] System reaches idle (no crash)
 - [x] Mono runtime not found (expected — not flashed yet)
-- [ ] Verify `hcom_main` opens `/dev/nxupd` successfully — needs investigation
+- [x] `hcom_via_nx_upd_setup()` opens `/dev/nxupd` successfully (old error gone)
+- [x] HCOM startup proceeds past nxupd, blocks at USB CDC-ACM recv setup (expected — no USB emulated)
+  - This is the handoff point to `renode-hcom` track
 
 ### Current Boot Output
 ```
@@ -274,5 +276,5 @@ Meadow.OS.Emulator/
 ### Open
 7. **SVC/hook address automation:** Currently SVC hooks (7 addresses), GPIO version hook (1 address), QSPI wait skip (1 address), and DMA bypass hooks (2 addresses) are all hardcoded and must be manually re-scanned after kernel rebuild. Should automate this.
 8. ~~**LittleFS mount -110 (ETIMEDOUT):**~~ ✅ Resolved — caused by QUADSPI not driving DMA requests (800ms watchdog timeout). Fixed by DMA bypass hook that does direct memcpy from/to flash backing memory. LittleFS auto-formats blank flash and mounts successfully.
-9. **`/dev/nxupd` registration:** Need to verify whether `hcom_nx_setup_mgr()` now succeeds with working flash. If not, trace where it fails after filesystem setup.
+9. ~~**`/dev/nxupd` registration:**~~ ✅ Resolved — `/dev/nxupd` registers successfully. `hcom_via_nx_upd_setup()` opens it without error. HCOM proceeds through startup until it blocks at USB CDC-ACM recv thread (no USB device emulated). This is the expected handoff to the `renode-hcom` track.
 10. ~~**CortexM register access from hooks:**~~ Not a Renode bug — we were using the wrong API. `GetRegisterUnsafe` is deprecated (Renode says to use `GetRegister`). `cpu.SetRegister()` hangs likely due to IronPython type mismatch, not a Renode defect. Named properties (`cpu.SP`, `cpu.PC`, `cpu.LR`, `cpu.PRIMASK`) and stack writes remain the practical approach for hooks.
