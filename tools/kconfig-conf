@@ -1,0 +1,22 @@
+#!/bin/bash
+# Shim that translates kconfig-conf calls to kconfiglib (Python)
+# Legacy NuttX calls: kconfig-conf --olddefconfig Kconfig
+# kconfiglib provides: olddefconfig (reads Kconfig from env or arg)
+
+for arg in "$@"; do
+    case "$arg" in
+        --olddefconfig)
+            exec olddefconfig
+            ;;
+        --oldconfig)
+            exec oldconfig
+            ;;
+        --savedefconfig)
+            shift
+            exec savedefconfig "$@"
+            ;;
+    esac
+done
+
+# Fallback: try running olddefconfig
+exec olddefconfig

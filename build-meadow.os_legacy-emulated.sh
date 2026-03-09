@@ -56,9 +56,6 @@ fi
 # Legacy NuttX uses slash separator: stm32f777zit6-meadow/mono
 ./tools/configure.sh "stm32f777zit6-meadow/$CONFIG"
 
-# Run make context to generate headers (required by legacy NuttX)
-$MAKE context 2>/dev/null || true
-
 # Apply emulator-specific config tweaks
 NUTTX_CONFIG="$NUTTX_DIR/.config"
 
