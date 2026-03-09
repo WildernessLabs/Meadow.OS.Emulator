@@ -10,8 +10,8 @@ sdram: Memory.MappedMemory @ sysbus 0xC0000000
     size: 0x2000000
 
 // QSPI flash — 64MB Winbond W25QXXXJV (external, on Meadow board)
-// Backing memory is mapped at 0x90000000 for memory-mapped read access.
-// The W25Q chip connects to the on-chip QUADSPI controller.
+// Backing memory at 0x90000000 for memory-mapped read access.
+// W25Q connects to the on-chip QUADSPI controller.
 qspiFlashMem: Memory.MappedMemory @ sysbus 0x90000000
     size: 0x4000000
 

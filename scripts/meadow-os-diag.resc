@@ -29,6 +29,17 @@ cpu AddHook 0x08005668 $gpio_ver_fix
 set qspi_wait_skip "cpu.PC = cpu.LR"
 cpu AddHook 0x08036bcc $qspi_wait_skip
 
+# Workaround: QUADSPI doesn't drive DMA requests, so DMA transfers never complete.
+# Hook qspi_memory_dma to copy data directly from flash backing memory (0x90000000).
+# struct qspi_meminfo_s: flags(+0,u8) addrlen(+1,u8) dummies(+2,u8) cmd(+4,u16) buflen(+8,u32) addr(+12,u32) key(+16,u32) buffer(+20,ptr)
+set qspi_dma_bypass "meminfo = cpu.GetRegisterUnsafe(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 8); faddr = machine.SystemBus.ReadDoubleWord(meminfo + 12); buf = machine.SystemBus.ReadDoubleWord(meminfo + 20); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
+cpu AddHook 0x08036db4 $qspi_dma_bypass
+
+# Fix return value: qspi_memory_dma returns priv (non-zero) via R0.
+# Overwrite the stack slot where the caller stores R0 with 0 (success).
+set qspi_dma_fixret "sp = cpu.GetRegisterUnsafe(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 44, 0)"
+cpu AddHook 0x0803731e $qspi_dma_fixret
+
 # Hook arm_doirq to detect context switch (when return value differs from input)
 # Can't easily hook return, but let's hook the ldmia to see what context is restored
 cpu AddHook 0x080009BA "ctx = cpu.GetRegisterUnsafe(0).RawValue; cpu.Log(LogLevel.Error, 'RESTORE ctx=0x{0:X8}'.format(ctx)) if ctx != 0x2002b100 else None"
