@@ -1,0 +1,31 @@
+using sysbus
+mach create "meadow"
+machine LoadPlatformDescription @platforms/meadow-f7.repl
+
+machine PyDevFromFile @scripts/pydev/rcc.py 0x40023800 0x400 true "rcc"
+machine PyDevFromFile @scripts/pydev/otg_fs.py 0x50000000 0x40000 true "otg_fs"
+
+sysbus LoadBinary @build/nuttx.bin 0x08000000
+sysbus LoadBinary @build/nuttx_user.bin 0x08100000
+
+sysbus.cpu VectorTableOffset 0x08000000
+
+usart1 CreateFileBackend @/tmp/renode-uart.txt true
+
+# Workaround: Renode skips SVC when PRIMASK=1 instead of escalating to HardFault.
+# On real ARMv7-M, SVC with PRIMASK=1 escalates to HardFault (which NuttX handles).
+# Clear PRIMASK before every SVC instruction so the exception fires normally.
+set svc_fix "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.PRIMASK = RegisterValue.Create(0, 32)"
+cpu AddHook 0x08002240 $svc_fix
+cpu AddHook 0x08038cd8 $svc_fix
+cpu AddHook 0x08038fca $svc_fix
+cpu AddHook 0x08039232 $svc_fix
+cpu AddHook 0x0803927a $svc_fix
+cpu AddHook 0x080394dc $svc_fix
+cpu AddHook 0x08065bb2 $svc_fix
+
+machine StartGdbServer 3333
+
+# Start but immediately pause so GDB can set breakpoints
+start
+pause

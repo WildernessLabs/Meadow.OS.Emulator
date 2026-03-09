@@ -1,0 +1,35 @@
+using sysbus
+mach create "meadow"
+machine LoadPlatformDescription @platforms/meadow-f7.repl
+
+# RCC peripheral with proper clock ready bit handling
+machine PyDevFromFile @scripts/pydev/rcc.py 0x40023800 0x400 true "rcc"
+
+# USB OTG FS stub — handles GRSTCTL polling (AHBIDL bit)
+machine PyDevFromFile @scripts/pydev/otg_fs.py 0x50000000 0x40000 true "otg_fs"
+
+# Load kernel at link-time address (0x08000000)
+sysbus LoadBinary @build/nuttx.bin 0x08000000
+# Load user binary at 0x08100000 (CONFIG_NUTTX_USERSPACE)
+sysbus LoadBinary @build/nuttx_user.bin 0x08100000
+
+sysbus.cpu VectorTableOffset 0x08000000
+
+showAnalyzer usart1
+
+# Workaround: Renode skips SVC when PRIMASK=1 instead of escalating to HardFault.
+# On real ARMv7-M, SVC with PRIMASK=1 escalates to HardFault (which NuttX handles).
+# Clear PRIMASK before every SVC instruction so the exception fires normally.
+set svc_fix "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.PRIMASK = RegisterValue.Create(0, 32)"
+cpu AddHook 0x08002240 $svc_fix
+cpu AddHook 0x08038cd8 $svc_fix
+cpu AddHook 0x08038fca $svc_fix
+cpu AddHook 0x08039232 $svc_fix
+cpu AddHook 0x0803927a $svc_fix
+cpu AddHook 0x080394dc $svc_fix
+cpu AddHook 0x08065bb2 $svc_fix
+
+# GDB server on port 3333 (uncomment to enable)
+# machine StartGdbServer 3333
+
+start

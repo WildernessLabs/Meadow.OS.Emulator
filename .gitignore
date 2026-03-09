@@ -416,3 +416,9 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Renode emulator build artifacts
+build/
+
+# Mac Bullshit
+.DS_Store

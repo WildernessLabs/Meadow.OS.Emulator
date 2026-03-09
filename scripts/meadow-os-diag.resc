@@ -1,0 +1,24 @@
+using sysbus
+mach create "meadow"
+machine LoadPlatformDescription @platforms/meadow-f7.repl
+
+machine PyDevFromFile @scripts/pydev/rcc.py 0x40023800 0x400 true "rcc"
+machine PyDevFromFile @scripts/pydev/otg_fs.py 0x50000000 0x40000 true "otg_fs"
+
+sysbus LoadBinary @build/nuttx.bin 0x08000000
+sysbus LoadBinary @build/nuttx_user.bin 0x08100000
+
+sysbus.cpu VectorTableOffset 0x08000000
+
+usart1 CreateFileBackend @/tmp/renode-uart.txt true
+logFile @/tmp/renode-meadow.log true
+
+# Hook arm_svcall to log cmd, R1, R2
+cpu AddHook 0x08002248 "regs = cpu.GetRegisterUnsafe(1).RawValue; cmd = machine.SystemBus.ReadDoubleWord(regs + 0x70); r1v = machine.SystemBus.ReadDoubleWord(regs + 0x74); r2v = machine.SystemBus.ReadDoubleWord(regs + 0x78); cpu.Log(LogLevel.Error, 'SVC cmd={0} R1=0x{1:X8} R2=0x{2:X8}'.format(cmd, r1v, r2v))"
+
+# Hook nxtask_start - also dump the PC from saved context to verify it's nxtask_start
+cpu AddHook 0x08021B70 "cpu.Log(LogLevel.Error, 'nxtask_start SP=0x{0:X8} R0=0x{1:X8}'.format(cpu.SP.RawValue, cpu.GetRegisterUnsafe(0).RawValue))"
+
+# Hook arm_doirq to detect context switch (when return value differs from input)
+# Can't easily hook return, but let's hook the ldmia to see what context is restored
+cpu AddHook 0x080009BA "ctx = cpu.GetRegisterUnsafe(0).RawValue; cpu.Log(LogLevel.Error, 'RESTORE ctx=0x{0:X8}'.format(ctx)) if ctx != 0x2002b100 else None"

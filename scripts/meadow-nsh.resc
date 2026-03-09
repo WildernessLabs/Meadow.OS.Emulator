@@ -1,0 +1,13 @@
+using sysbus
+mach create "meadow"
+machine LoadPlatformDescription @platforms/meadow-f7.repl
+
+sysbus LoadBinary @build/nuttx.bin 0x08000000
+sysbus.cpu VectorTableOffset 0x08000000
+
+showAnalyzer usart1
+
+# GDB server on port 3333 (uncomment to enable)
+# machine StartGdbServer 3333
+
+start
