@@ -20,7 +20,10 @@ Meadow.OS.Emulator/
 ├── build-emulator.sh         # Builds NuttX with the emulator defconfig
 ├── run.sh                    # Launches Renode with a given script
 ├── platforms/
-│   └── meadow-f7.repl        # Renode platform description (STM32F777ZIT6)
+│   ├── stm32f777.repl        # STM32F777 chip-level platform (on-die peripherals)
+│   └── meadow-f7.repl        # Meadow F7 board (uses chip + external hw)
+├── peripherals/              # C# peripherals (loaded at runtime via AdHoc Compiler)
+│   └── Winbond_W25QXXXJV.cs  # QSPI flash peripheral (planned)
 ├── scripts/
 │   ├── meadow-os.resc        # Main emulation script (interactive, with UART analyzer)
 │   ├── meadow-os-gdb.resc    # GDB-enabled script (starts paused, GDB on port 3333)
@@ -174,6 +177,9 @@ The system enters a healthy idle state after this (CPU in `wfi`, idle task at he
 
 ## Next Steps
 
-- Stub or redirect HCOM communication (USB CDC-ACM to UART) for emulator interaction
-- Add QSPI flash filesystem support for app deployment
-- Implement additional peripherals as needed for specific Meadow.OS features
+- **Platform refactor** — Split `meadow-f7.repl` into chip-level `stm32f777.repl` + board-level `meadow-f7.repl` (using `stm32f777.repl` + external hardware)
+- **Peripheral upgrades** — Add missing on-chip peripherals: UART4/5/7/8, SPI4/5/6, CAN2/3, ADC x3, DWT, flash controller, FPU interrupt
+- **QSPI flash** — Replace MappedMemory stub with proper W25QXXXJV C# peripheral + STM32H7_QuadSPI controller
+- **HCOM bring-up** — Redirect HCOM from USB CDC-ACM to UART for emulator interaction
+- **On-chip peripheral verification** — As Meadow.OS features exercise specific peripherals (timers/PWM, GPIO, I2C/SPI bus, SDMMC, RTC), verify and fix emulation fidelity as needed
+- **Upstream contributions** — PR our STM32F777 platform definition, SVC-with-PRIMASK bug fix, RCC ready bits, and Winbond W25Q flash peripheral to the Renode project

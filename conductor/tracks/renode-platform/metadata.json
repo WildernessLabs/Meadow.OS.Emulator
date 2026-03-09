@@ -1,0 +1,10 @@
+{
+  "track_id": "renode-platform",
+  "title": "Renode Platform Definition & Boot Bring-Up",
+  "status": "in_progress",
+  "created": "2026-03-08",
+  "updated": "2026-03-08",
+  "repo": "Meadow.OS.Emulator",
+  "priority": "high",
+  "tags": ["emulation", "renode", "nuttx", "stm32f7", "stm32f777", "platform", "qspi"]
+}

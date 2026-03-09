@@ -1,0 +1,10 @@
+{
+  "track_id": "renode-upstream",
+  "title": "Upstream Contributions to Renode",
+  "status": "planned",
+  "created": "2026-03-08",
+  "updated": "2026-03-08",
+  "repo": "renode/renode (fork)",
+  "priority": "medium",
+  "tags": ["renode", "upstream", "open-source", "stm32f7", "bugfix"]
+}

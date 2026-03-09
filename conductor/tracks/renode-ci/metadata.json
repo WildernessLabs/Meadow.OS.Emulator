@@ -1,0 +1,10 @@
+{
+  "track_id": "renode-ci",
+  "title": "CI Integration for Emulated Testing",
+  "status": "planned",
+  "created": "2026-03-08",
+  "updated": "2026-03-08",
+  "repo": "Meadow.OS.Emulator",
+  "priority": "medium",
+  "tags": ["emulation", "renode", "ci", "testing", "automation"]
+}
