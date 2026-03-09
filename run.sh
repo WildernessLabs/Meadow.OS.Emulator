@@ -40,4 +40,12 @@ fi
 
 echo "=== Starting Renode with $SCRIPT ==="
 cd "$SCRIPT_DIR"
-"$RENODE" --disable-xwt --console --execute "include @$SCRIPT"
+# Use --port for headless scripts (console mode can throttle emulation),
+# --console for interactive scripts
+if [[ "$SCRIPT" == *headless* ]]; then
+    echo "Monitor available via: telnet localhost 43210"
+    echo "Press Ctrl+C to stop."
+    $RENODE --disable-xwt --port 43210 --execute "include @$SCRIPT"
+else
+    $RENODE --disable-xwt --console --execute "include @$SCRIPT"
+fi

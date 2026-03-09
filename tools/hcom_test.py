@@ -108,15 +108,19 @@ def parse_header(data: bytes):
 
 def build_packet(request_type: int, extra_data: int = 0, user_data: int = 0,
                  payload: bytes = b'') -> bytes:
-    """Build a complete HCOM wire packet (delimiter + COBS + delimiter)."""
+    """Build a complete HCOM wire packet (COBS + 0x00 terminator)."""
     header = build_header(request_type, extra_data, user_data)
     message = header + payload
     encoded = cobs_encode(message)
-    return bytes([HCOM_COBS_DELIMITER]) + encoded + bytes([HCOM_COBS_DELIMITER])
+    return encoded + bytes([HCOM_COBS_DELIMITER])
 
 
 def receive_packets(sock: socket.socket, timeout: float = 5.0):
-    """Receive and decode HCOM packets from socket. Yields (header, payload) tuples."""
+    """Receive and decode HCOM packets from socket. Yields (header, payload) tuples.
+
+    HCOM uses 0x00 as a packet terminator (not a start/end framing pair).
+    Each packet is: [COBS-encoded-data] [0x00].
+    """
     sock.settimeout(timeout)
     buf = bytearray()
 
@@ -130,23 +134,15 @@ def receive_packets(sock: socket.socket, timeout: float = 5.0):
             except socket.timeout:
                 break
 
-            # Process complete packets (delimited by 0x00)
+            # Process complete packets (terminated by 0x00)
             while True:
-                # Find leading delimiter
                 try:
-                    start = buf.index(0x00)
+                    end = buf.index(0x00)
                 except ValueError:
-                    buf.clear()
-                    break
+                    break  # no complete packet yet
 
-                # Find trailing delimiter
-                try:
-                    end = buf.index(0x00, start + 1)
-                except ValueError:
-                    break  # incomplete packet
-
-                # Extract and decode
-                encoded = bytes(buf[start + 1:end])
+                # Extract COBS-encoded data before the delimiter
+                encoded = bytes(buf[:end])
                 buf = buf[end + 1:]
 
                 if len(encoded) == 0:

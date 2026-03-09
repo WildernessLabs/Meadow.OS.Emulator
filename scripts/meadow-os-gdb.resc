@@ -55,7 +55,7 @@ cpu AddHook 0x080346c8 $qspi_dma_fixret
 
 # Workaround: LSI clock calibration thread polls Timer 5 capture/compare which
 # Renode doesn't emulate. Skip the thread function to avoid burning CPU.
-set lsi_skip "cpu.SetRegisterUnsafe(0, 0); cpu.PC = cpu.LR"
+set lsi_skip "cpu.PC = cpu.LR"
 cpu AddHook 0x0800e07c $lsi_skip
 
 machine StartGdbServer 3333
