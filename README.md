@@ -111,10 +111,10 @@ The script auto-detects Renode on `PATH` or in `/Applications/Renode.app` (macOS
 Custom clock controller that auto-sets ready bits when the corresponding clock enable is written. Handles: `HSIRDY`, `HSERDY`, `PLLRDY`, `PLLI2SRDY`, `PLLSAIRDY`, and mirrors clock switch bits (SW) to status (SWS) in RCC_CFGR.
 
 ### USB OTG FS (`otg_fs.py`)
-Stub for USB OTG FS controller. Keeps AHBIDL bit set in GRSTCTL (AHB bus always idle), auto-clears software reset bits, and implements write-1-to-clear for GINTSTS.
+Stub for USB OTG FS controller. Keeps AHBIDL bit set in `GRSTCTL` (`AHB` bus always idle), auto-clears software reset bits, and implements write-1-to-clear for `GINTSTS`.
 
 ### Flipflop (`flipflop.py`)
-Simple read-back peripheral used for PWR_CR1, PWR_CSR1, and LPTIM1 registers that just need to return whatever was last written.
+Simple read-back peripheral used for `PWR_CR1`, `PWR_CSR1`, and `LPTIM1` registers that just need to return whatever was last written.
 
 ## Workarounds
 
@@ -127,6 +127,7 @@ Simple read-back peripheral used for PWR_CR1, PWR_CSR1, and LPTIM1 registers tha
 **Fix:** IronPython hooks at every `SVC #0` instruction in the kernel binary unconditionally clear PRIMASK before the instruction executes. The saved CPU context preserves the original PRIMASK value, so exception return restores it correctly.
 
 The hooks are defined inline in the `.resc` scripts:
+
 ```
 set svc_fix "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.PRIMASK = RegisterValue.Create(0, 32)"
 cpu AddHook 0x08002240 $svc_fix
@@ -141,7 +142,7 @@ arm-none-eabi-objdump -d build/nuttx.elf | grep 'svc\s'
 
 ### FPU Frame Mismatch (Non-critical)
 
-Renode exception entry always uses standard frames (32 bytes, EXC_RETURN bit4=1) even when the FPU is active. NuttX's `arm_exception.S` always adds 104 bytes (extended frame size) when calculating REG_R13. This means the saved stack pointer in context is off by 72 bytes when a standard frame is used. This doesn't cause crashes because MSP restore comes from the hardware frame, but could affect stack pointer verification code.
+Renode exception entry always uses standard frames (32 bytes, `EXC_RETURN` bit4=1) even when the FPU is active. NuttX's `arm_exception.S` always adds 104 bytes (extended frame size) when calculating REG_R13. This means the saved stack pointer in context is off by 72 bytes when a standard frame is used. This doesn't cause crashes because MSP restore comes from the hardware frame, but could affect stack pointer verification code.
 
 ## NuttX Configuration
 
@@ -162,6 +163,7 @@ NuttX boots successfully through:
 4. `hcom_main` starts and attempts HCOM setup
 
 Current stop point — HCOM initialization fails because `/dev/nxupd` doesn't exist (this device is normally provided by the Meadow coprocessor communication channel):
+
 ```
 stm32_boot.c@300-ERROR: Meadow version could not be determined
 hcom_via_nx_access.c@94-/dev/nxupd Failed to open, errno:2
