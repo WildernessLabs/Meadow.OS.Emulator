@@ -16,8 +16,29 @@ else
     exit 1
 fi
 
-# Default to meadow-os script, or pass a custom .resc file
-SCRIPT="${1:-meadow-os}"
+# Parse arguments
+LEGACY=false
+SCRIPT=""
+
+for arg in "$@"; do
+    case "$arg" in
+        --legacy)
+            LEGACY=true
+            ;;
+        *)
+            SCRIPT="$arg"
+            ;;
+    esac
+done
+
+# Select default script based on OS variant
+if [ -z "$SCRIPT" ]; then
+    if [ "$LEGACY" = true ]; then
+        SCRIPT="meadow-legacy"
+    else
+        SCRIPT="meadow-os"
+    fi
+fi
 
 # If just a name was given, look in scripts/
 if [[ ! "$SCRIPT" == *.resc ]]; then
@@ -32,10 +53,18 @@ if [ ! -f "$SCRIPT_DIR/$SCRIPT" ]; then
 fi
 
 # Check for built binary
-if [ ! -f "$SCRIPT_DIR/build/nuttx.bin" ]; then
-    echo "ERROR: nuttx.bin not found in build/"
-    echo "       Run ./build-emulator.sh first"
-    exit 1
+if [ "$LEGACY" = true ]; then
+    if [ ! -f "$SCRIPT_DIR/build/legacy/nuttx.bin" ]; then
+        echo "ERROR: nuttx.bin not found in build/legacy/"
+        echo "       Run ./build-legacy.sh first"
+        exit 1
+    fi
+else
+    if [ ! -f "$SCRIPT_DIR/build/nuttx.bin" ]; then
+        echo "ERROR: nuttx.bin not found in build/"
+        echo "       Run ./build-emulator.sh first"
+        exit 1
+    fi
 fi
 
 echo "=== Starting Renode with $SCRIPT ==="

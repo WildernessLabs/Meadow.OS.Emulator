@@ -1,0 +1,64 @@
+using sysbus
+include @peripherals/Winbond_W25QXXXJV.cs
+mach create "meadow-legacy"
+machine LoadPlatformDescription @platforms/meadow-f7.repl
+
+# RCC peripheral with proper clock ready bit handling
+machine PyDevFromFile @scripts/pydev/rcc.py 0x40023800 0x400 true "rcc"
+
+# USB OTG FS stub — handles GRSTCTL polling (AHBIDL bit)
+machine PyDevFromFile @scripts/pydev/otg_fs.py 0x50000000 0x40000 true "otg_fs"
+
+# Load kernel at link-time address (0x08000000)
+sysbus LoadBinary @build/legacy/nuttx.bin 0x08000000
+# Load user binary at 0x08100000 (CONFIG_NUTTX_USERSPACE — same as new OS)
+sysbus LoadBinary @build/legacy/nuttx_user.bin 0x08100000
+
+sysbus.cpu VectorTableOffset 0x08000000
+
+# USART1: Console/syslog output to file
+usart1 CreateFileBackend @/tmp/renode-uart-legacy.txt true
+
+# UART4: HCOM transport — exposed as TCP socket on port 4242
+emulation CreateServerSocketTerminal 4242 "hcom" false
+connector Connect sysbus.uart4 hcom
+
+# =============================================================================
+# IronPython hooks — addresses must be extracted from legacy ELF after first build.
+# Use: arm-none-eabi-nm build/legacy/nuttx.elf | grep <symbol_name>
+#
+# The same workarounds are needed but at different addresses than the new OS.
+# Uncomment and fill in addresses after building.
+# =============================================================================
+
+# Workaround: Renode skips SVC when PRIMASK=1 instead of escalating to HardFault.
+# Extract addresses: arm-none-eabi-nm build/legacy/nuttx.elf | grep ' svc '
+# Or search for SVC instructions: arm-none-eabi-objdump -d build/legacy/nuttx.elf | grep 'svc'
+# set svc_fix "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.PRIMASK = RegisterValue.Create(0, 32)"
+# cpu AddHook 0x???????? $svc_fix
+
+# Workaround: Force GPIO board version to CCMv2 (0x01).
+# Extract: arm-none-eabi-nm build/legacy/nuttx.elf | grep meadow_hw_version_find_gpio_ver
+# set gpio_ver_fix "sp = cpu.GetRegisterUnsafe(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 12, 0x01)"
+# cpu AddHook 0x???????? $gpio_ver_fix
+
+# Workaround: Renode's STM32H7_QuadSPI doesn't set TCF in SR.
+# Extract: arm-none-eabi-nm build/legacy/nuttx.elf | grep qspi_waitstatusflags
+# set qspi_wait_skip "cpu.PC = cpu.LR"
+# cpu AddHook 0x???????? $qspi_wait_skip
+
+# Workaround: QUADSPI doesn't drive DMA requests.
+# Extract: arm-none-eabi-nm build/legacy/nuttx.elf | grep qspi_memory_dma
+# set qspi_dma_bypass "meminfo = cpu.GetRegisterUnsafe(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 8); faddr = machine.SystemBus.ReadDoubleWord(meminfo + 12); buf = machine.SystemBus.ReadDoubleWord(meminfo + 20); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
+# cpu AddHook 0x???????? $qspi_dma_bypass
+
+# Fix return value for DMA bypass.
+# set qspi_dma_fixret "sp = cpu.GetRegisterUnsafe(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 44, 0)"
+# cpu AddHook 0x???????? $qspi_dma_fixret
+
+# Workaround: LSI clock calibration skip
+# Extract: arm-none-eabi-nm build/legacy/nuttx.elf | grep lsi_calibration
+# set lsi_skip "cpu.PC = cpu.LR"
+# cpu AddHook 0x???????? $lsi_skip
+
+start
