@@ -1,7 +1,7 @@
 {
   "track_id": "meadow-cli-emu",
   "title": "Meadow.CLI Emulator Connection (SocketConnection)",
-  "status": "ready",
+  "status": "complete",
   "created": "2026-03-09",
   "updated": "2026-03-09",
   "repo": "Meadow.CLI",
