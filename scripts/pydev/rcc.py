@@ -8,6 +8,13 @@
 #   bit 26 PLLI2SON -> bit 27 PLLI2SRDY
 #   bit 28 PLLSAION -> bit 29 PLLSAIRDY
 #
+# RCC_BDCR (offset 0x70):
+#   bit 0  LSEON  -> bit 1  LSERDY
+#   bit 8  RTCEN  (stored as-is)
+#
+# RCC_CSR (offset 0x74):
+#   bit 0  LSION  -> bit 1  LSIRDY
+#
 # RCC_CFGR (offset 0x08):
 #   SW (bits 1:0) mirrored to SWS (bits 3:2)
 
@@ -46,6 +53,18 @@ elif request.IsWrite:
         # RCC_CFGR: mirror SW (bits 1:0) into SWS (bits 3:2)
         sw = val & 0x3
         val = (val & ~0xC) | (sw << 2)
+        regs[off] = val
+
+    elif off == 0x70:
+        # RCC_BDCR: auto-set LSERDY when LSEON is set
+        if val & (1 << 0):
+            val |= (1 << 1)    # LSERDY
+        regs[off] = val
+
+    elif off == 0x74:
+        # RCC_CSR: auto-set LSIRDY when LSION is set
+        if val & (1 << 0):
+            val |= (1 << 1)    # LSIRDY
         regs[off] = val
 
     else:

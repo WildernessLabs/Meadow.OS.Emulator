@@ -1,11 +1,11 @@
 {
   "track_id": "renode-hcom",
   "title": "HCOM Bring-Up over Emulated UART",
-  "status": "blocked",
+  "status": "complete",
   "created": "2026-03-08",
   "updated": "2026-03-08",
+  "completed": "2026-03-08",
   "repo": "Meadow.OS.Emulator",
   "priority": "high",
-  "blocked_by": "renode-platform",
   "tags": ["emulation", "renode", "hcom", "uart", "nuttx"]
 }

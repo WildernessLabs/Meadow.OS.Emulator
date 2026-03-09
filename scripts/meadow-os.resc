@@ -16,41 +16,52 @@ sysbus LoadBinary @build/nuttx_user.bin 0x08100000
 
 sysbus.cpu VectorTableOffset 0x08000000
 
+# USART1: Console/syslog output (interactive terminal)
 showAnalyzer usart1
+
+# UART4: HCOM transport — exposed as TCP socket on port 4242
+# Connect with: nc localhost 4242 (or use tools/hcom_test.py)
+emulation CreateServerSocketTerminal 4242 "hcom" false
+connector Connect sysbus.uart4 hcom
 
 # Workaround: Renode skips SVC when PRIMASK=1 instead of escalating to HardFault.
 # On real ARMv7-M, SVC with PRIMASK=1 escalates to HardFault (which NuttX handles).
 # Clear PRIMASK before every SVC instruction so the exception fires normally.
 set svc_fix "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.PRIMASK = RegisterValue.Create(0, 32)"
-cpu AddHook 0x08002240 $svc_fix
-cpu AddHook 0x08038cd8 $svc_fix
-cpu AddHook 0x08038fca $svc_fix
-cpu AddHook 0x08039232 $svc_fix
-cpu AddHook 0x0803927a $svc_fix
-cpu AddHook 0x080394dc $svc_fix
-cpu AddHook 0x08065bb2 $svc_fix
+cpu AddHook 0x08002258 $svc_fix
+cpu AddHook 0x08036080 $svc_fix
+cpu AddHook 0x08036372 $svc_fix
+cpu AddHook 0x08036610 $svc_fix
+cpu AddHook 0x0803665a $svc_fix
+cpu AddHook 0x080368bc $svc_fix
+cpu AddHook 0x080616a2 $svc_fix
 
 # Workaround: Force GPIO board version to CCMv2 (0x01).
 # Unconnected GPIO pins with pull-ups read high (0x0F = UNKNOWN), causing early return.
 # CCMv2 skips flash chip ID query and selects W25QXXXJV driver directly.
 # Hook after bl to meadow_hw_version_find_gpio_ver returns; write 0x01 to stack slot.
 set gpio_ver_fix "sp = cpu.GetRegisterUnsafe(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 12, 0x01)"
-cpu AddHook 0x08005668 $gpio_ver_fix
+cpu AddHook 0x08002c60 $gpio_ver_fix
 
 # Workaround: Renode's STM32H7_QuadSPI doesn't set TCF in SR,
 # causing qspi_waitstatusflags to poll forever. Skip it.
 set qspi_wait_skip "cpu.PC = cpu.LR"
-cpu AddHook 0x08036bcc $qspi_wait_skip
+cpu AddHook 0x08033f74 $qspi_wait_skip
 
 # Workaround: QUADSPI doesn't drive DMA requests, so DMA transfers never complete.
 # Hook qspi_memory_dma to copy data directly from flash backing memory (0x90000000).
 set qspi_dma_bypass "meminfo = cpu.GetRegisterUnsafe(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 8); faddr = machine.SystemBus.ReadDoubleWord(meminfo + 12); buf = machine.SystemBus.ReadDoubleWord(meminfo + 20); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
-cpu AddHook 0x08036db4 $qspi_dma_bypass
+cpu AddHook 0x0803415c $qspi_dma_bypass
 
 # Fix return value: qspi_memory_dma returns priv (non-zero) via R0.
 # Overwrite the stack slot where the caller stores R0 with 0 (success).
 set qspi_dma_fixret "sp = cpu.GetRegisterUnsafe(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 44, 0)"
-cpu AddHook 0x0803731e $qspi_dma_fixret
+cpu AddHook 0x080346c8 $qspi_dma_fixret
+
+# Workaround: LSI clock calibration thread polls Timer 5 capture/compare which
+# Renode doesn't emulate. Skip the thread function to avoid burning CPU.
+set lsi_skip "cpu.SetRegisterUnsafe(0, 0); cpu.PC = cpu.LR"
+cpu AddHook 0x0800e07c $lsi_skip
 
 # Log UART output to file (uncomment to enable)
 # usart1 CreateFileBackend @/tmp/uart1.txt true

@@ -5,7 +5,7 @@ SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
 MEADOW_OS_DIR="$SCRIPT_DIR/../Meadow.OS"
 NUTTX_DIR="$MEADOW_OS_DIR/nuttx"
 BUILD_DIR="$SCRIPT_DIR/build"
-CONFIG="${1:-meadow_os}"
+CONFIG="${1:-meadow_os_emu}"
 
 # Validate Meadow.OS sibling directory exists
 if [ ! -d "$NUTTX_DIR" ]; then

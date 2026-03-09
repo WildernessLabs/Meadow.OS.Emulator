@@ -27,6 +27,7 @@ Meadow.OS.Emulator/
 ├── scripts/
 │   ├── meadow-os.resc        # Main emulation script (interactive, with UART analyzer)
 │   ├── meadow-os-gdb.resc    # GDB-enabled script (starts paused, GDB on port 3333)
+│   ├── meadow-os-headless.resc # Headless script (UART to file, no analyzer)
 │   ├── meadow-os-diag.resc   # Diagnostic script with SVC/context-switch logging hooks
 │   ├── meadow-os-test.resc   # Test script with verbose logging
 │   ├── meadow-nsh.resc       # NSH-only flat build (no user binary, no workarounds)
@@ -36,6 +37,7 @@ Meadow.OS.Emulator/
 │       ├── qspi_dma_bypass.py # QSPI DMA bypass hook (reference/docs)
 │       └── flipflop.py       # Simple read-back peripheral (PWR, LPTIM1)
 ├── tools/
+│   ├── hcom_test.py          # HCOM protocol test tool (COBS + socket)
 │   └── kconfig-tweak         # Kconfig shim for NuttX build
 └── conductor/                # Project planning and track documents
 ```
@@ -49,7 +51,7 @@ The build script configures and compiles NuttX using the emulator-specific defco
 ```
 
 This will:
-1. Configure NuttX with `stm32f777zit6-meadow:meadow_os`
+1. Configure NuttX with `stm32f777zit6-meadow:meadow_os_emu`
 2. Build in protected mode (two-pass: pass2 + mbedTLS + pass1 + final link)
 3. Copy `nuttx.bin`, `nuttx_user.bin`, and `nuttx.elf` to `build/`
 
@@ -119,7 +121,7 @@ External hardware on the Meadow F7 board:
 ## Python Peripherals
 
 ### RCC (`rcc.py`)
-Custom clock controller that auto-sets ready bits when the corresponding clock enable is written. Handles: `HSIRDY`, `HSERDY`, `PLLRDY`, `PLLI2SRDY`, `PLLSAIRDY`, and mirrors clock switch bits (SW) to status (SWS) in `RCC_CFGR`.
+Custom clock controller that auto-sets ready bits when the corresponding clock enable is written. Handles: `HSIRDY`, `HSERDY`, `PLLRDY`, `PLLI2SRDY`, `PLLSAIRDY`, `LSIRDY`, `LSERDY`, and mirrors clock switch bits (SW) to status (SWS) in `RCC_CFGR`.
 
 ### USB OTG FS (`otg_fs.py`)
 Stub for USB OTG FS controller. Keeps AHBIDL bit set in `GRSTCTL` (`AHB` bus always idle), auto-clears software reset bits, and implements write-1-to-clear for `GINTSTS`.
@@ -152,19 +154,26 @@ Renode's `STM32H7_QuadSPI` never sets TCF (bit 1) in the Status Register after i
 
 Renode's `STM32H7_QuadSPI` doesn't drive DMA requests, so DMA transfers to/from QSPI flash never complete (800ms watchdog timeout). Fix: hook at `qspi_memory_dma` entry reads `struct qspi_meminfo_s` from R1 and copies data directly between RAM and flash backing memory (0x90000000). A second hook fixes the return value (writes 0 to the stack slot where the caller stores R0).
 
+### LSI Clock Calibration Skip
+
+The power management subsystem spawns a thread (`pwrmgmt_lsi_calc_prep_thread_func`) that measures the LSI oscillator frequency using Timer 5 input capture. Renode doesn't emulate TIM5 capture/compare, causing the thread to busy-wait forever. Fix: hook at the thread entry point returns immediately with success (R0=0).
+
 ### FPU Frame Mismatch (Non-critical)
 
 Renode exception entry always uses standard frames (32 bytes) even when the FPU is active. NuttX always calculates with extended frames (104 bytes). The saved stack pointer is off by 72 bytes but doesn't cause crashes since MSP restore comes from the hardware frame.
 
 ## NuttX Configuration
 
-The emulator uses `stm32f777zit6-meadow:meadow_os` defconfig with key settings:
+The emulator uses `stm32f777zit6-meadow:meadow_os_emu` defconfig with key settings:
 
 - `CONFIG_BUILD_PROTECTED=y` — Protected build with kernel/user separation
 - `CONFIG_NUTTX_USERSPACE=0x08100000` — User binary loaded at this address
 - `CONFIG_INIT_ENTRYPOINT="hcom_main"` — Initial user-space task
 - `CONFIG_SYSLOG_SERIAL_CONSOLE=y` — Syslog output to USART1
 - `CONFIG_BOARD_RESET_ON_ASSERT=0` — Don't reset on assertion failures
+- `CONFIG_STM32F7_UART4=y` — UART4 enabled for HCOM transport
+- `CONFIG_HCOM_COMMS_DEVICE_NAME="/dev/ttyS1"` — HCOM redirected from USB to UART4
+- USB CDC-ACM, USBDEV, and OTG FS disabled (not emulatable)
 
 ## Current Boot Status
 
@@ -188,9 +197,19 @@ Mono runtime was not found flashed in external flash.
 Remaining:
 - Mono runtime not found (expected — not flashed in QSPI backing memory)
 
+## HCOM Communication
+
+HCOM is the host-to-device protocol used by Meadow CLI. In the emulator, HCOM is redirected from USB CDC-ACM to UART4, which is exposed as a TCP socket on port 4242.
+
+```bash
+# Test HCOM communication (emulator must be running):
+python3 tools/hcom_test.py info       # Get device information
+python3 tools/hcom_test.py name       # Get device name
+python3 tools/hcom_test.py listen     # Listen for unsolicited messages
+```
+
 ## Next Steps
 
-- **HCOM bring-up** — Redirect HCOM from USB CDC-ACM to UART for emulator interaction (see `renode-hcom` track)
 - **Flash persistence** — Investigate Renode `MappedMemory` file backing for persistent QSPI flash contents across runs; pre-populate with filesystem image if needed
 - **ESP32 coprocessor** — Emulate the ESPCP protocol over SPI2 (see `renode-esp32` track)
 - **CI integration** — Automated boot tests (see `renode-ci` track)
