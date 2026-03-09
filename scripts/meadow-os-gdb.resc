@@ -1,4 +1,5 @@
 using sysbus
+include @peripherals/Winbond_W25QXXXJV.cs
 mach create "meadow"
 machine LoadPlatformDescription @platforms/meadow-f7.repl
 
@@ -23,6 +24,18 @@ cpu AddHook 0x08039232 $svc_fix
 cpu AddHook 0x0803927a $svc_fix
 cpu AddHook 0x080394dc $svc_fix
 cpu AddHook 0x08065bb2 $svc_fix
+
+# Workaround: Force GPIO board version to CCMv2 (0x01).
+# Unconnected GPIO pins with pull-ups read high (0x0F = UNKNOWN), causing early return.
+# CCMv2 skips flash chip ID query and selects W25QXXXJV driver directly.
+# Hook after bl to meadow_hw_version_find_gpio_ver returns; write 0x01 to stack slot.
+set gpio_ver_fix "sp = cpu.GetRegisterUnsafe(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 12, 0x01)"
+cpu AddHook 0x08005668 $gpio_ver_fix
+
+# Workaround: Renode's STM32H7_QuadSPI doesn't set Transfer Complete Flag (TCF) in SR,
+# causing firmware to poll forever in qspi_waitstatusflags. Skip the function entirely.
+set qspi_wait_skip "cpu.PC = cpu.LR"
+cpu AddHook 0x08036bcc $qspi_wait_skip
 
 machine StartGdbServer 3333
 

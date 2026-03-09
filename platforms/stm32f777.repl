@@ -248,6 +248,11 @@ sdmmc: SD.STM32FSDMMC @ sysbus 0x40012c00
     IRQ -> nvic@49
     DMAReceive -> dma2@3
 
+// --- QUADSPI Controller (on-chip) ---
+// Reuses STM32H7_QuadSPI model — identical register layout to STM32F7 QUADSPI
+quadspi: SPI.STM32H7_QuadSPI @ sysbus 0xA0001000
+    -> nvic@92
+
 // --- DWT (Data Watchpoint and Trace) ---
 dwt: Miscellaneous.DWT @ sysbus 0xE0001000
     frequency: 216000000

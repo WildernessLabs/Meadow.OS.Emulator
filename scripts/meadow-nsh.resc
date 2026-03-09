@@ -1,4 +1,5 @@
 using sysbus
+include @peripherals/Winbond_W25QXXXJV.cs
 mach create "meadow"
 machine LoadPlatformDescription @platforms/meadow-f7.repl
 

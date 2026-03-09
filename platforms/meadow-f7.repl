@@ -9,8 +9,11 @@ using "stm32f777.repl"
 sdram: Memory.MappedMemory @ sysbus 0xC0000000
     size: 0x2000000
 
-// QSPI flash — 64MB memory-mapped region (W25QXXXJV on Meadow board)
-// This is a MappedMemory stub for initial bring-up.
-// Phase 1B.5 replaces with proper QSPI controller + W25QXXXJV C# peripheral.
-qspiFlash: Memory.MappedMemory @ sysbus 0x90000000
+// QSPI flash — 64MB Winbond W25QXXXJV (external, on Meadow board)
+// Backing memory is mapped at 0x90000000 for memory-mapped read access.
+// The W25Q chip connects to the on-chip QUADSPI controller.
+qspiFlashMem: Memory.MappedMemory @ sysbus 0x90000000
     size: 0x4000000
+
+w25q: SPI.Winbond_W25QXXXJV @ quadspi
+    underlyingMemory: qspiFlashMem
