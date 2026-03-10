@@ -38,6 +38,18 @@
 - [ ] Wait until validated with NuttX MTD driver (`renode-platform` Phase 1B.5 complete)
 - [ ] Winbond W25Q series is extremely common — high value contribution
 
+## U.7 — GenericSpiFlash Winbond Status Register Fix (PR)
+- [ ] **Issue:** `GenericSpiFlash` maps command `0x35` to `EnterQuadInputOutputMode` — on Winbond W25Q chips this is "Read Status Register 2". Similarly, `0x31` (Write SR2) is unrecognized, and `0x15` maps to Micron-style `ReadConfigurationRegister` instead of Winbond "Read Status Register 3".
+- [ ] **Root cause:** GenericSpiFlash models Micron/Numonyx register architecture (1 status reg + volatile/non-volatile/enhanced config regs). Winbond uses 3 status registers with different command mappings.
+- [ ] **Missing Winbond registers:**
+  - SR1 (0x05/0x01) — WEL, BUSY, block protect bits (partially works today)
+  - SR2 (0x35/0x31) — QE bit, SRP1, security register lock bits (broken: 0x35 = wrong command)
+  - SR3 (0x15/0x11) — output driver strength, write protect, hold/reset (broken: 0x15 = wrong register)
+- [ ] **Impact:** Firmware that configures quad mode, checks write protection, or reads security register locks via Winbond register layout gets wrong data or errors. Currently papered over by QSPI DMA bypass hooks.
+- [ ] **Fix approach:** Override command handling in `Winbond_W25QXXXJV.cs` to remap 0x35→ReadSR2, 0x31→WriteSR2, 0x15→ReadSR3, 0x11→WriteSR3, and implement 3-register Winbond status model
+- [ ] **Alternative:** Submit as GenericSpiFlash enhancement with vendor-specific register profiles
+- [ ] Depends on U.5 (Winbond peripheral must be accepted upstream first)
+
 ## U.6 — STM32H7_QuadSPI Completeness (Feature Request / PR)
 - [ ] **Issue:** `STM32H7_QuadSPI` is a minimal register stub — not a bug per se, but incomplete
 - [ ] **Missing features:**
