@@ -6,6 +6,9 @@
 | renode-hcom       | HCOM Bring-Up over Emulated UART          | `complete` (UART4→socket on port 4242, GET_DEVICE_INFO/NAME verified) |
 | meadow-cli-emu    | Meadow.CLI Emulator Connection (SocketConnection) | `complete` (SocketConnection + socket:// route parsing, PR on feature/TCP_Socket_Connection_for_EMU) |
 | renode-legacy-os  | Emulator Support for Production Meadow OS (Legacy NuttX) | `complete` (build, boot, HCOM, Meadow.CLI all verified) |
-| renode-esp32      | ESP32 Coprocessor Emulation               | `in-progress` (Phase A: ESPCP SPI stub working — boot + post-boot polling ✅, event delivery next) |
+| renode-esp32      | ESP32 Coprocessor Emulation (SPI Stub)    | `complete` (EspcpStub.cs — boot + post-boot polling, all ESPCP interfaces stubbed) |
+| renode-mono       | Mono Runtime Bring-Up in Emulator         | `planned` (unlocks Meadow.NET apps, WiFi/network, BLE) |
+| renode-esp32-dual | Dual-Machine ESP32 Emulation (Full Fidelity) | `planned` (real ESP32 firmware on Xtensa + SPI bridge) |
+| renode-network    | Network Stack End-to-End Testing          | `planned` (bridge ESPCP socket ops to host; blocked on `renode-mono`) |
 | renode-ci         | CI Integration for Emulated Testing       | `planned` |
 | renode-upstream   | Upstream Contributions to Renode          | `planned` (U.1–U.6 identified; U.6 reclassified as incomplete peripheral, not bug) |
