@@ -64,12 +64,12 @@ cpu AddHook 0x08161270 $qspi_wait_skip
 # struct qspi_meminfo_s layout: flags(+0,u8) addrlen(+1,u8) dummies(+2,u8) pad(+3)
 #   buflen(+4,u16) cmd(+6,u16) addr(+8,u32) key(+12,u32) buffer(+16,ptr)
 # QSPIMEM_WRITE = 0x04
-set qspi_dma_bypass "meminfo = cpu.GetRegisterUnsafe(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 4) & 0xFFFF; faddr = machine.SystemBus.ReadDoubleWord(meminfo + 8); buf = machine.SystemBus.ReadDoubleWord(meminfo + 16); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
+set qspi_dma_bypass "meminfo = cpu.GetRegister(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 4) & 0xFFFF; faddr = machine.SystemBus.ReadDoubleWord(meminfo + 8); buf = machine.SystemBus.ReadDoubleWord(meminfo + 16); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
 cpu AddHook 0x0816136a $qspi_dma_bypass
 
 # Workaround: Firmware gates ESP32 operations behind Mono runtime state. Bypass the
 # "is Mono running" check to always return 0 (not running), allowing ESP32 HCOM commands.
-set mono_check_bypass "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
+set mono_check_bypass "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegister(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
 cpu AddHook 0x08057bee $mono_check_bypass
 
 # Workaround: STM32SPI doesn't drive DMA — bypass espcp_send_data_over_spi with direct
@@ -77,13 +77,13 @@ cpu AddHook 0x08057bee $mono_check_bypass
 # writes returned bytes to RX buffer, then calls FinishTransmission() to trigger message handling.
 # espcp_send_data_over_spi(void *tx, void *rx, size_t length) = 0x08147c94
 # R0 = tx buffer (0 for receive-only), R1 = rx buffer (0 for send-only), R2 = buffer length
-set espcp_spi_bypass "from System import Array, Byte; stub = [p.Peripheral for p in machine.GetRegisteredPeripherals() if type(p.Peripheral).__name__ == 'EspcpStub'][0]; tx = cpu.GetRegisterUnsafe(0).RawValue; rx = cpu.GetRegisterUnsafe(1).RawValue; length = int(cpu.GetRegisterUnsafe(2).RawValue); print('ESPCP_SPI: tx=' + hex(tx) + ' rx=' + hex(rx) + ' len=' + str(length)); txdata = machine.SystemBus.ReadBytes(tx, length) if tx else Array.CreateInstance(Byte, length); rxarr = Array.CreateInstance(Byte, length); [rxarr.__setitem__(i, stub.Transmit(txdata[i])) for i in range(length)]; stub.FinishTransmission(); machine.SystemBus.WriteBytes(rxarr, rx) if rx else None; cpu.PC = cpu.LR"
+set espcp_spi_bypass "from System import Array, Byte; stub = [p.Peripheral for p in machine.GetRegisteredPeripherals() if type(p.Peripheral).__name__ == 'EspcpStub'][0]; tx = cpu.GetRegister(0).RawValue; rx = cpu.GetRegister(1).RawValue; length = int(cpu.GetRegister(2).RawValue); txdata = machine.SystemBus.ReadBytes(tx, length) if tx else Array.CreateInstance(Byte, length); rxarr = Array.CreateInstance(Byte, length); [rxarr.__setitem__(i, stub.Transmit(txdata[i])) for i in range(length)]; stub.FinishTransmission(); machine.SystemBus.WriteBytes(rxarr, rx) if rx else None; cpu.PC = cpu.LR"
 cpu AddHook 0x08147c94 $espcp_spi_bypass
 
 # Workaround: Force ESPCP initialization by setting selected network type to WiFi (1).
 # hcom_nx_setup_mgr gates espcp_late_init on config[8] & 0xFF — if 0, ESPCP is skipped.
 # At 0x08141144 (ands.w r0, r5, #255), R5 holds config[8]. Force R5=1 so branch is not taken.
-set espcp_force_init "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(5, RegisterValue.Create(1, 32)); print('ESPCP_INIT: Forced selected network = WiFi')"
+set espcp_force_init "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegister(5, RegisterValue.Create(1, 32))"
 cpu AddHook 0x08141144 $espcp_force_init
 
 # Workaround: ESPCP SPI lock semaphore starts at 0 — first espcp_spi_interface_lock blocks.
@@ -92,14 +92,6 @@ set spi_lock_skip "cpu.PC = cpu.LR"
 cpu AddHook 0x08147d0c $spi_lock_skip
 cpu AddHook 0x08147d18 $spi_lock_skip
 
-# Debug: trace key ESPCP execution points
-set espcp_late_trace "print('ESPCP_TRACE: espcp_late_init entered')"
-cpu AddHook 0x08147f80 $espcp_late_trace
-set espcp_thread_trace "print('ESPCP_TRACE: espcp_thread started')"
-cpu AddHook 0x0814de28 $espcp_thread_trace
-set espcp_get_msg_trace "print('ESPCP_TRACE: espcp_get_message called')"
-cpu AddHook 0x081478b8 $espcp_get_msg_trace
-
 # Workaround: On real hardware, the ESP32 sends "+++MW" via USART3 to signal
 # message-waiting. hcom_esp32_network_monitor_thread reads /dev/ttyS2, dispatches
 # to espcp_process_message_waiting_control_signal, which queues a send_response
@@ -107,7 +99,7 @@ cpu AddHook 0x081478b8 $espcp_get_msg_trace
 # a fake send_response message directly into the first mq_receive call.
 # Fake message struct at 0x20030F00: [0]=type(0), [1]=iface(5=transport), [4]=func(1=send_response)
 # Flag at 0x20030FFF: 0=first time, 1=done
-set espcp_mq_inject "from Antmicro.Renode.Peripherals.CPU import RegisterValue; flag = machine.SystemBus.ReadByte(0x20030FFF); first = (flag == 0); machine.SystemBus.WriteByte(0x20030FFF, 1) if first else None; machine.SystemBus.WriteByte(0x20030F00, 0) if first else None; machine.SystemBus.WriteByte(0x20030F01, 5) if first else None; machine.SystemBus.WriteDoubleWord(0x20030F04, 1) if first else None; sp = cpu.GetRegisterUnsafe(13).RawValue if first else 0; machine.SystemBus.WriteDoubleWord(sp + 4, 0x20030F00) if first else None; cpu.SetRegisterUnsafe(0, RegisterValue.Create(4, 32)) if first else None; cpu.PC = RegisterValue.Create(0x0814de4a, 32) if first else cpu.PC; print('ESPCP_INJECT: Injected send_response message into mq_receive') if first else None"
+set espcp_mq_inject "from Antmicro.Renode.Peripherals.CPU import RegisterValue; flag = machine.SystemBus.ReadByte(0x20030FFF); first = (flag == 0); machine.SystemBus.WriteByte(0x20030FFF, 1) if first else None; machine.SystemBus.WriteByte(0x20030F00, 0) if first else None; machine.SystemBus.WriteByte(0x20030F01, 5) if first else None; machine.SystemBus.WriteDoubleWord(0x20030F04, 1) if first else None; sp = cpu.GetRegister(13).RawValue if first else 0; machine.SystemBus.WriteDoubleWord(sp + 4, 0x20030F00) if first else None; cpu.SetRegister(0, RegisterValue.Create(4, 32)) if first else None; cpu.PC = RegisterValue.Create(0x0814de4a, 32) if first else cpu.PC; None"
 cpu AddHook 0x0814de46 $espcp_mq_inject
 
 # Workaround: LSI clock calibration thread polls Timer 5 capture/compare which
