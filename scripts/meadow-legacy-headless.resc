@@ -92,22 +92,10 @@ set spi_lock_skip "cpu.PC = cpu.LR"
 cpu AddHook 0x08147d0c $spi_lock_skip
 cpu AddHook 0x08147d18 $spi_lock_skip
 
-# Workaround: On real hardware, the ESP32 sends "+++MW" via USART3 to signal
-# message-waiting. hcom_esp32_network_monitor_thread reads /dev/ttyS2, dispatches
-# to espcp_process_message_waiting_control_signal, which queues a send_response
-# on the ESPCP thread. Since we don't emulate the ESP32 UART signaling, inject
-# a fake send_response message directly into the first mq_receive call.
-# Fake message struct at 0x20030F00: [0]=type(0), [1]=iface(5=transport), [4]=func(1=send_response)
-# Flag at 0x20030FFF: 0=first time, 1=done
-set espcp_mq_inject "from Antmicro.Renode.Peripherals.CPU import RegisterValue; flag = machine.SystemBus.ReadByte(0x20030FFF); first = (flag == 0); machine.SystemBus.WriteByte(0x20030FFF, 1) if first else None; machine.SystemBus.WriteByte(0x20030F00, 0) if first else None; machine.SystemBus.WriteByte(0x20030F01, 5) if first else None; machine.SystemBus.WriteDoubleWord(0x20030F04, 1) if first else None; sp = cpu.GetRegisterUnsafe(13).RawValue if first else 0; machine.SystemBus.WriteDoubleWord(sp + 4, 0x20030F00) if first else None; cpu.SetRegisterUnsafe(0, RegisterValue.Create(4, 32)) if first else None; cpu.PC = RegisterValue.Create(0x0814de4b, 32) if first else cpu.PC; None"
-cpu AddHook 0x0814de46 $espcp_mq_inject
-
-# Throttle: After the first ESPCP handshake completes, prevent the send_response
-# re-queuing loop from burning all CPU. espcp_queue_message (0x081480ac) is called
-# to re-queue send_response after each iteration. Skip it after the first round so
-# espcp_thread blocks on mq_receive, freeing CPU for HCOM and other threads.
-set espcp_queue_throttle "flag = machine.SystemBus.ReadByte(0x20030FFF); cpu.PC = cpu.LR if flag else cpu.PC"
-cpu AddHook 0x081480ac $espcp_queue_throttle
+# Note: ESPCP mq_inject and message throttle hooks are not needed for basic HCOM
+# operation. The ESPCP thread blocks on mq_receive harmlessly. If full ESPCP SPI
+# handshake emulation is needed later, see conductor/tracks/renode-esp32/ for the
+# mq_inject approach (requires fixing Usage Fault from FPU frame mismatch).
 
 # Workaround: LSI clock calibration thread polls Timer 5 capture/compare which
 # Renode doesn't emulate. Skip the thread function to avoid burning CPU.
