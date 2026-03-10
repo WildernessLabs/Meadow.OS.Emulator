@@ -81,8 +81,12 @@ cpu AddHook 0x08147d18 $spi_lock_skip
 # Workaround: ESP32 control signals are sent via USART3 ("+++MW"), not GPIO EXTI.
 # Since we don't emulate ESP32 UART signaling, inject a fake send_response message.
 
-set espcp_mq_inject "from Antmicro.Renode.Peripherals.CPU import RegisterValue; flag = machine.SystemBus.ReadByte(0x20030FFF); first = (flag == 0); machine.SystemBus.WriteByte(0x20030FFF, 1) if first else None; machine.SystemBus.WriteByte(0x20030F00, 0) if first else None; machine.SystemBus.WriteByte(0x20030F01, 5) if first else None; machine.SystemBus.WriteDoubleWord(0x20030F04, 1) if first else None; sp = cpu.GetRegister(13).RawValue if first else 0; machine.SystemBus.WriteDoubleWord(sp + 4, 0x20030F00) if first else None; cpu.SetRegister(0, RegisterValue.Create(4, 32)) if first else None; cpu.PC = RegisterValue.Create(0x0814de4a, 32) if first else cpu.PC; None"
+set espcp_mq_inject "from Antmicro.Renode.Peripherals.CPU import RegisterValue; flag = machine.SystemBus.ReadByte(0x20030FFF); first = (flag == 0); machine.SystemBus.WriteByte(0x20030FFF, 1) if first else None; machine.SystemBus.WriteByte(0x20030F00, 0) if first else None; machine.SystemBus.WriteByte(0x20030F01, 5) if first else None; machine.SystemBus.WriteDoubleWord(0x20030F04, 1) if first else None; sp = cpu.GetRegister(13).RawValue if first else 0; machine.SystemBus.WriteDoubleWord(sp + 4, 0x20030F00) if first else None; cpu.SetRegister(0, RegisterValue.Create(4, 32)) if first else None; cpu.PC = RegisterValue.Create(0x0814de4b, 32) if first else cpu.PC; None"
 cpu AddHook 0x0814de46 $espcp_mq_inject
+
+# Throttle: Prevent ESPCP send_response re-queuing loop from burning CPU.
+set espcp_queue_throttle "flag = machine.SystemBus.ReadByte(0x20030FFF); cpu.PC = cpu.LR if flag else cpu.PC"
+cpu AddHook 0x081480ac $espcp_queue_throttle
 
 # Workaround: LSI clock calibration thread — skip to avoid burning CPU.
 set lsi_skip "cpu.PC = cpu.LR"
