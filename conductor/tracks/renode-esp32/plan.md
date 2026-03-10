@@ -124,39 +124,39 @@ The stub peripheral implements Renode's `ISPISlave` interface and sits on the ST
   - Set status_code = 0 (OK)
   - Calculate CRC-32
   - Add 4-byte SPI overhead padding
-- [ ] Handle multi-packet messages (payload > 4061 bytes spans multiple SPI frames)
+- [ ] Handle multi-packet messages (payload > 4061 bytes spans multiple SPI frames) — deferred, not needed for current stub
 
 ### A.3 — Implement Interface Handlers
 **Minimum viable set for boot + basic networking:**
 
 **System interface (4) — Required for boot:**
-- [ ] `get_configuration (0)` → return default config (device name, antenna, MAC addresses)
-- [ ] `set_configuration_item (1)` → ACK, store in memory
-- [ ] `logging_configuration (13)` → ACK
-- [ ] `get_battery_charge_level (3)` → return mock value (e.g., 100%)
+- [x] `get_configuration (0)` → return default config (device name, antenna, MAC addresses)
+- [x] `set_configuration_item (1)` → ACK, store in memory
+- [x] `logging_configuration (13)` → ACK
+- [x] `get_battery_charge_level (3)` → return mock value (e.g., 100%)
 
 **Transport interface (5) — Required for handshake:**
-- [ ] `response_ready (0)` → signal that stub is ready
-- [ ] `reset_esp32 (3)` → ACK, re-initialize stub state
+- [x] `response_ready (0)` → signal that stub is ready
+- [x] `reset_esp32 (3)` → ACK, re-initialize stub state
 
-**WiFi interface (1) — Required for networking:**
-- [ ] `start_wi_fi_interface (0)` → return success, fire `start_wi_fi_interface_event (34)`
-- [ ] `stop_wi_fi_interface (1)` → return success
-- [ ] `connect_to_default_access_point (3)` → return success, fire `network_connected_event (36)` with mock IP
-- [ ] `get_access_points (6)` → return empty list or mock AP
-- [ ] `socket (8)` → return mock file descriptor (incrementing int)
-- [ ] `connect (9)` → return success
-- [ ] `write (10)` / `send (19)` → ACK, discard data (or log it)
-- [ ] `read (13)` / `recv_from (16)` → return empty or mock data
-- [ ] `close (14)` → return success
-- [ ] `poll (17)` → return no events ready
-- [ ] `bind (20)`, `listen (21)`, `accept (22)` → return success/mock FD
-- [ ] `set_sock_opt (11)` / `get_sock_opt (12)` → ACK/return defaults
-- [ ] `get_addr_info (27)` → return mock address resolution
+**WiFi interface (1) — Stub responses implemented:**
+- [x] `start_wi_fi_interface (0)` → return success, fire `start_wi_fi_interface_event (34)`
+- [x] `stop_wi_fi_interface (1)` → return success
+- [x] `connect_to_default_access_point (3)` → return success, fire `network_connected_event (36)` with mock IP
+- [x] `get_access_points (6)` → return empty list or mock AP
+- [x] `socket (8)` → return mock file descriptor (incrementing int)
+- [x] `connect (9)` → return success
+- [x] `write (10)` / `send (19)` → ACK, discard data (or log it)
+- [x] `read (13)` / `recv_from (16)` → return empty or mock data
+- [x] `close (14)` → return success
+- [x] `poll (17)` → return no events ready
+- [x] `bind (20)`, `listen (21)`, `accept (22)` → return success/mock FD
+- [x] `set_sock_opt (11)` / `get_sock_opt (12)` → ACK/return defaults
+- [x] `get_addr_info (27)` → return mock address resolution
 
 **Bluetooth interface (2) — Stub only:**
-- [ ] `start (0)` → return success
-- [ ] `stop (1)` → return success
+- [x] `start (0)` → return success
+- [x] `stop (1)` → return success
 
 ### A.4 — Wire Stub into Platform
 - [x] Add to `meadow-f7.repl`:
@@ -171,14 +171,14 @@ The stub peripheral implements Renode's `ISPISlave` interface and sits on the ST
 - [ ] Wire CS line (gpioPortI pin 0 → stub CS input) — deferred, managed by SPI controller
 
 ### A.5 — Test ESPCP Stub
-- [ ] Verify ESPCP init sequence: reset ESP32 → wait for Ready → send first message
-- [ ] Confirm system config exchange works
-- [ ] Test WiFi start → connect → socket create → send/recv cycle
-- [ ] Verify no timeouts or deadlocks in ESPCP message queues
-- [ ] Test graceful handling of unsupported functions (return `espcp_status_codes_not_implemented`)
-- [ ] Add Renode logging for all ESPCP messages (useful for debugging)
+- [x] Verify ESPCP init sequence: reset ESP32 → wait for Ready → send first message
+- [x] Confirm system config exchange works
+- [ ] Test WiFi start → connect → socket create → send/recv cycle (requires Mono app)
+- [x] Verify no timeouts or deadlocks in ESPCP message queues
+- [x] Test graceful handling of unsupported functions (return `espcp_status_codes_not_implemented`)
+- [x] Add Renode logging for all ESPCP messages (useful for debugging)
 
-### A.6 — Network Bridge to Host (Stretch)
+### A.7 — Network Bridge to Host (Stretch)
 - [ ] Investigate bridging mock socket calls to real host networking
 - [ ] If viable: `socket()` in stub creates a real host socket, `send()`/`recv()` proxy to it
 - [ ] This would allow Meadow.OS to make real network connections from emulation
@@ -300,7 +300,7 @@ Renode supports multiple machines in a single simulation with inter-machine conn
 | 2026-03-09 | Stub starts booted (Ready=true) | GPIO reset wiring deferred; Reset() sets booted=true and Ready.Set(true) |
 | 2026-03-10 | mq_receive injection (not GPIO EXTI) | ESPCP control signals use UART (`+++MW` etc. on USART3), not GPIO EXTI. `mint_config_interrupt` is for managed code GPIO interrupts (confirmed by engineer), unrelated to ESPCP. |
 | 2026-03-10 | mq_inject hook at bl sites is inert | Hooks at `bl` instructions: the `bl` still executes after the hook, overriding PC changes. Boot ESPCP works from real queued messages (espcp_late_init). Hook removed. |
-| 2026-03-10 | USART3 needed for post-boot ESPCP | USART3 not compiled into legacy build. Monitor thread can't read control signals. Build change required to enable. |
+| 2026-03-10 | ~~USART3 needed for post-boot ESPCP~~ | SUPERSEDED: mq_intercept hook at mq_receive bypasses the need for UART control signals entirely. UART5 wired to port 4243 but not required. |
 | 2026-03-10 | IronPython conditional register crash documented | `cpu.PC = X if cond else None` assigns None to PC on false branch. Must use list comprehensions: `[cpu.SetRegisterUnsafe(15, val) for _ in [1] if cond]` |
 | 2026-03-10 | READ_ESP_MAC uses esptool protocol | `hcom_esp32_util_read_esp32_mac` puts ESP32 into UART boot mode and reads eFuse registers (0x60000078) — completely different from ESPCP SPI. Not needed for normal operation. |
 
@@ -316,15 +316,17 @@ Renode supports multiple machines in a single simulation with inter-machine conn
 | 2026-03-10 | `scripts/meadow-legacy*.resc` | Removed inert mq_inject hook (bl sites don't skip). Boot ESPCP works from real queued messages. |
 | 2026-03-10 | `README.md` | Moved detailed workarounds to KnownIssues_and_Errata.md, replaced with summary table |
 | 2026-03-10 | `KnownIssues_and_Errata.md` | Updated ESPCP sections, added IronPython crash pattern, documented FPU frame legacy unaffected |
+| 2026-03-10 | `scripts/meadow-legacy*.resc` | Added mq_intercept hook (post-boot polling), espcp_poll_enable hook, UART5 socket terminal (headless only) |
+| 2026-03-10 | `build-meadow.os_legacy-emulated.sh` | Fixed comment: documented ttyS device numbering |
 
 ## Open Questions
 1. **Renode ESP32 support:** Does Renode have an ESP32/Xtensa platform? If so, dual-machine emulation becomes much more viable.
 2. ~~**ESPCP stub fidelity:**~~ RESOLVED — Full ESPCP protocol implemented in EspcpStub.cs (Transport, System, WiFi, BLE).
 3. ~~**Mono runtime gate:**~~ RESOLVED — Bypassed at 0x08057bee (return 0 = not running).
 4. ~~**Ready GPIO propagation:**~~ RESOLVED — `sysbus.spi2.espcpStub Reset` after platform load works; GPIO IDR reflects the input correctly.
-5. ~~**ESPCP polling CPU burn:**~~ RESOLVED — mq_inject removed; espcp_thread blocks on mq_receive harmlessly. If/when ESPCP exchange is triggered, re-queue loop behavior needs testing (EspcpStub clears MessageWaiting GPIO after response consumed, which should prevent re-queue).
-6. **USART3 not in legacy build:** `CONFIG_STM32F7_USART3` must be added to emulator build for post-boot ESPCP commands. This changes ttyS numbering (HCOM moves to ttyS2, needs CONFIG update) and requires full hook address re-scan. **Primary blocker for post-boot ESPCP.**
+5. ~~**ESPCP polling CPU burn:**~~ RESOLVED — mq_intercept hook enables continuous polling; espcp_thread polls EspcpStub via send_response loop. CPU burn is a known issue but doesn't affect stability. Throttle mechanism is a future optimization.
+6. ~~**USART3 not in legacy build:**~~ SUPERSEDED — Post-boot ESPCP polling now uses mq_intercept hook at mq_receive (0x08157130) instead of UART control signals. USART3 is no longer needed. UART5 is wired to port 4243 for control signals but the monitor thread's poll() doesn't wake (Renode limitation, non-blocking).
 7. ~~**MINT system clarification:**~~ RESOLVED — `mint_config_interrupt` is for managed code GPIO interrupts (STM32F7 → Mono/.NET), NOT for ESPCP. Confirmed by engineer.
 8. ~~**mq_inject crash root cause:**~~ RESOLVED — mq_inject hook was inert (bl instruction executes regardless of PC change in hook). The "crash" was unrelated. Boot ESPCP works from real queued messages.
-9. ~~**EspcpStub MessageWaiting GPIO re-queue behavior:**~~ N/A for boot — boot uses real mq messages, not GPIO-triggered re-queues. Post-boot GPIO behavior needs testing after USART3 is enabled.
+9. ~~**EspcpStub MessageWaiting GPIO re-queue behavior:**~~ SUPERSEDED — Post-boot polling uses mq_intercept hook, not GPIO-triggered re-queues. MessageWaiting GPIO is wired but not actively used by the current polling mechanism.
 10. **READ_ESP_MAC uses different protocol:** `hcom_esp32_util_read_esp32_mac` talks to ESP32 via UART boot mode (esptool protocol), reading eFuse registers. Completely separate from ESPCP SPI. Not needed for normal Meadow.CLI operation (MAC addresses come from ESPCP boot exchange).
