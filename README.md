@@ -280,6 +280,10 @@ To revert Meadow.CLI to USB for use with a physical device:
 dotnet meadow.dll config route
 ```
 
+## Known Issues and Errata
+
+See [KnownIssues_and_Errata.md](KnownIssues_and_Errata.md) for a consolidated list of all known Renode bugs, peripheral gaps, ESPCP workarounds, flash limitations, and operational issues.
+
 ## Next Steps
 
 - **Flash persistence** — Investigate Renode `MappedMemory` file backing for persistent QSPI flash contents across runs; pre-populate with filesystem image if needed
