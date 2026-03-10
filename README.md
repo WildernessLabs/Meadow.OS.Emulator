@@ -147,36 +147,24 @@ Simple read-back peripheral used for `PWR_CR1`, `PWR_CSR1`, and `LPTIM1` registe
 
 ## Workarounds
 
-All workarounds use IronPython hooks in the `.resc` scripts. Hook addresses are binary-specific and must be re-scanned after kernel rebuild.
+All workarounds use IronPython hooks in the `.resc` scripts. Hook addresses are binary-specific and must be re-scanned after kernel rebuild. See [KnownIssues_and_Errata.md](KnownIssues_and_Errata.md) for full details on each issue, including severity, upstream tracking, and workaround code.
 
-### SVC-with-PRIMASK Bug
+Summary of active workarounds:
 
-Renode v1.16.1 silently skips `SVC` when `PRIMASK=1`. On real ARMv7-M, this escalates to HardFault (which NuttX handles intentionally). The skip causes `arm_fullcontextrestore()` to fall through and `PANIC()`. Fix: hooks at all 7 `SVC #0` addresses clear PRIMASK before execution.
-
-```bash
-# Re-scan SVC addresses after kernel rebuild:
-arm-none-eabi-objdump -d build/nuttx.elf | grep 'svc\s'
-```
-
-### GPIO Board Version Detection
-
-Unconnected GPIO pins with pull-ups read high (0x0F = UNKNOWN), causing version detection to fail. Fix: hook in `meadow_hw_version_find_device_ver` writes 0x01 (CCMv2) to the stack slot where the GPIO result is stored, bypassing the unconnected pins.
-
-### QUADSPI Transfer Complete Flag
-
-Renode's `STM32H7_QuadSPI` never sets TCF (bit 1) in the Status Register after indirect-mode transactions, causing the firmware to poll forever. Fix: hook at `qspi_waitstatusflags` entry skips the function via `cpu.PC = cpu.LR`.
-
-### QUADSPI DMA Bypass
-
-Renode's `STM32H7_QuadSPI` doesn't drive DMA requests, so DMA transfers to/from QSPI flash never complete (800ms watchdog timeout). Fix: hook at `qspi_memory_dma` entry reads `struct qspi_meminfo_s` from R1 and copies data directly between RAM and flash backing memory (0x90000000). A second hook fixes the return value (writes 0 to the stack slot where the caller stores R0).
-
-### LSI Clock Calibration Skip
-
-The power management subsystem spawns a thread (`pwrmgmt_lsi_calc_prep_thread_func`) that measures the LSI oscillator frequency using Timer 5 input capture. Renode doesn't emulate TIM5 capture/compare, causing the thread to busy-wait forever. Fix: hook at the thread entry point returns immediately with success (R0=0).
-
-### FPU Frame Mismatch (Non-critical)
-
-Renode exception entry always uses standard frames (32 bytes) even when the FPU is active. NuttX always calculates with extended frames (104 bytes). The saved stack pointer is off by 72 bytes but doesn't cause crashes since MSP restore comes from the hardware frame.
+| Issue | Fix | Impact |
+|---|---|---|
+| SVC-with-PRIMASK skipped | PRIMASK=0 hooks at all SVC sites | Critical — prevents PANIC on context restore |
+| GPIO board version | Hook forces CCMv2 (3) | Boot stalls without it |
+| QUADSPI TCF never set | Skip `qspi_waitstatusflags` | Flash I/O hangs without it |
+| QUADSPI DMA not driven | Direct memcpy via SystemBus | LittleFS mount fails without it |
+| RCC ready bits | Custom Python peripheral | Clock init hangs without it |
+| LSI calibration thread | Skip thread entry | CPU burn without it |
+| USB OTG FS | Stub peripheral | Prevents access faults |
+| ESPCP SPI DMA | Bypass with EspcpStub calls | ESPCP init hangs without it |
+| ESPCP SPI lock | Skip lock/unlock | Deadlock without it |
+| ESPCP init gate | Force R5=1 (WiFi) | ESPCP never starts without it |
+| Mono runtime check | Return 0 (not running) | ESP32 HCOM commands blocked without it |
+| FPU frame mismatch | `fix_fpu_frame.py` (new OS only) | Non-critical; legacy build unaffected |
 
 ## NuttX Configuration
 

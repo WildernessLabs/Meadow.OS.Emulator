@@ -40,17 +40,22 @@ Last updated: 2026-03-10
   Legacy addresses: 0x08162f72, 0x081631be, 0x081631ce, 0x081631d8, 0x081631e4, 0x0817b148
 
 ### 1.2 FPU Exception Frame Mismatch
-- **Severity:** Low (non-critical for current boot flow)
+- **Severity:** Low (legacy build unaffected; new OS build has runtime workaround)
 - **Status:** IDENTIFIED | Upstream: `renode-upstream` U.4
 - **Component:** Cortex-M7 exception entry
 - **Description:** Renode exception entry always uses standard frames (32 bytes,
   `EXC_RETURN` bit4=1) even when FPU is active (`CONTROL.FPCA=1`). Should use
   extended frames (104 bytes, bit4=0) per ARMv7-M spec.
-- **Impact:** NuttX's `arm_exception.S` always adds 104 for extended frame,
-  causing saved `REG_R13` to be off by +72 bytes. Doesn't cause crashes because
-  MSP restore uses the hardware frame, but breaks stack pointer verification
-  and FPU register inspection from exception context.
-- **Workaround:** None applied (non-critical).
+- **Impact (new OS only):** NuttX's `arm_exception.S` adds 104 for extended frame
+  (`HW_XCPT_SIZE`), causing saved `REG_R13` to be off by +72 bytes. Doesn't cause
+  crashes because MSP restore uses the hardware frame.
+- **Legacy build:** Unaffected — legacy `exception_common` uses `add.w r2, r2, #32`
+  (standard frame), matching Renode's behavior.
+- **Workaround:** `scripts/pydev/fix_fpu_frame.py` corrects REG_R13 at runtime for
+  the new OS build. Hook address: 0x080009B6 (right before `bl arm_doirq`).
+- **Proper fix:** Requires modifying Renode's native tlib library (C code) to push
+  extended frames when CONTROL.FPCA=1. Estimated 2-4 days effort. Changes the
+  exception entry hot path — needs thorough testing across Cortex-M variants.
 
 ### 1.3 SYSRESETREQ Not Handled
 - **Severity:** Medium
@@ -168,7 +173,7 @@ Last updated: 2026-03-10
 
 ### 3.1 ESPCP Control Signals Use UART, Not GPIO EXTI
 - **Severity:** Medium
-- **Status:** WORKAROUND (mq_receive injection)
+- **Status:** DEFERRED — mq_inject hook removed (causes crash); ESPCP thread blocks harmlessly
 - **Component:** ESPCP driver, USART3
 - **Description:** On real hardware, the ESP32 sends control signal lines via
   USART3 (`/dev/ttyS2`): `+++MW` (message waiting), `+++SIR` (SPI ready),
@@ -179,12 +184,23 @@ Last updated: 2026-03-10
 - **Note:** `mint_config_interrupt` is for managed code GPIO interrupts
   (STM32→Mono/.NET), NOT for ESPCP (confirmed by Wilderness Labs engineer).
 - **Impact:** Without UART signaling emulation, the ESPCP thread blocks on
-  `mq_receive` waiting for a message that never arrives.
-- **Workaround:** Hook at `mq_receive` call (0x0814de46 legacy) injects a fake
-  "transport/send_response" message on the first call. After that, firmware
-  polls continuously (normal behavior).
-- **Future fix:** Emulate ESP32 UART output on virtual USART3 so the firmware's
-  native monitor thread triggers naturally.
+  `mq_receive` waiting for a message that never arrives. WiFi/BT/network
+  operations are unavailable. HCOM device info works fine without it.
+- **Previous approach (removed):** Hook at `mq_receive` (0x0814de46 legacy)
+  injected a fake "transport/send_response" message. This caused a Usage Fault
+  (UNDEFINSTR at PC 0x0814de5f) in EspcpMainThread. Root cause: NOT the FPU
+  frame mismatch (legacy build uses 32-byte standard frames). Likely a stack
+  or register corruption issue within `espcp_get_message` when driven by the
+  injected message. The crash is reproducible and occurs regardless of which
+  throttle/re-queue strategy is used.
+- **Current state:** ESPCP init hooks remain (mono bypass, force init, SPI
+  bypass, SPI lock skip). The thread starts, blocks on mq_receive harmlessly,
+  and doesn't consume CPU. HCOM works.
+- **Future fix options:**
+  1. Emulate ESP32 UART output on virtual USART3 (`+++MW\n`) so the firmware's
+     native monitor thread triggers naturally (avoids mq_receive injection entirely)
+  2. Debug the mq_inject crash root cause (PC 0x0814de5f is between instruction
+     boundaries — stack corruption or misaligned return address)
 
 ### 3.2 ESPCP SPI Lock Deadlock
 - **Severity:** High
@@ -212,15 +228,16 @@ Last updated: 2026-03-10
   check. Since Mono isn't flashed in emulation, this blocks ESPCP HCOM commands.
 - **Workaround:** Hook at 0x08057bee returns 0 (not running) to bypass the check.
 
-### 3.5 ESPCP Continuous Polling CPU Burn
-- **Severity:** Low
-- **Status:** KNOWN | Future optimization
+### 3.5 ESPCP Continuous Polling CPU Burn (Resolved)
+- **Severity:** N/A (no longer applicable)
+- **Status:** RESOLVED — mq_inject removed, thread blocks on mq_receive
 - **Component:** ESPCP thread
-- **Description:** After the initial mq_receive injection, the ESPCP thread
-  continuously re-queues `send_response` messages, creating a tight polling loop.
-  This is normal firmware behavior but burns emulation CPU.
-- **Impact:** Reduced emulation performance, no functional issue.
-- **Future fix:** Throttle the polling loop or add a sleep between iterations.
+- **Description:** When the mq_inject hook was active, the ESPCP thread
+  continuously re-queued `send_response` messages via `espcp_add_message_to_queue`
+  (0x0814dfec), creating a tight polling loop that starved HCOM.
+- **Resolution:** With mq_inject removed, the thread blocks on `mq_receive`
+  and consumes zero CPU. Will need to be revisited if/when full ESPCP SPI
+  handshake emulation is re-enabled.
 
 ---
 
@@ -388,3 +405,24 @@ Last updated: 2026-03-10
   - `cpu.SP + 4` fails — must use `cpu.GetRegisterUnsafe(13).RawValue`
   - `Array[Byte](length)` fails — must use `Array.CreateInstance(Byte, length)`
 - **Workaround:** Documented patterns in MEMORY.md IronPython tips section.
+
+### 7.4 IronPython Conditional Register Assignment Crash
+- **Severity:** Medium
+- **Status:** DOCUMENTED
+- **Description:** The pattern `cpu.PC = X if condition else None` crashes with
+  "expected RegisterValue, got NoneType" when the condition is False. Python
+  evaluates the ternary expression first, then assigns the result — so `None`
+  gets assigned to `cpu.PC`.
+- **Impact:** Cannot use ternary expressions for conditional register writes in
+  IronPython hooks. This was a key blocker for the ESPCP mq_inject/throttle hooks.
+- **Workaround:** Use list comprehensions for conditional register writes:
+  ```python
+  # WRONG — crashes when cond is False:
+  cpu.PC = RegisterValue.Create(addr, 32) if cond else None
+
+  # RIGHT — list comprehension executes body only when cond is True:
+  [cpu.SetRegisterUnsafe(15, RegisterValue.Create(addr, 32)) for _ in [1] if cond]
+  ```
+- **Note:** `cpu.LR` can also return `None` in certain hook contexts, so avoid
+  patterns like `cpu.SetRegisterUnsafe(15, cpu.LR) if flag else None`. Instead,
+  read LR explicitly: `lr = cpu.GetRegisterUnsafe(14).RawValue`.
