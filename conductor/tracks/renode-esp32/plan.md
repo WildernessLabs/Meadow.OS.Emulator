@@ -8,7 +8,51 @@
 
 ## Phase A: ESPCP SPI Stub Peripheral (C# in Renode)
 **Goal:** Create a Renode peripheral that acts as a virtual ESP32, responding to ESPCP messages on SPI2
-**Approach:** C# peripheral (not Python — Python peripherals only handle simple register reads/writes; we need the `ISPISlave` interface for proper SPI frame handling)
+**Approach:** C# peripheral (not Python — Python peripherals only handle simple register reads/writes; we need the `ISPIPeripheral` interface for proper SPI frame handling)
+
+### Current Status (2026-03-10)
+
+**ESPCP SPI communication is WORKING. ✅**
+
+- [x] A.1 — Stub architecture designed
+- [x] A.2 — `peripherals/EspcpStub.cs` created (ISPIPeripheral + IGPIOReceiver)
+- [x] A.3 — All interface handlers implemented (Transport, System, WiFi stubs, BLE stubs)
+- [x] A.4 — Wired into platform (.repl + .resc), SPI DMA bypass hook working
+- [x] A.5 — ESPCP init, thread start, and SPI exchange verified end-to-end
+
+**Workarounds applied to get ESPCP running:**
+1. **Force ESPCP init** — `hcom_nx_setup_mgr` gates `espcp_late_init` on config[8] (selected network type). Hook at 0x08141144 forces R5=1 (WiFi).
+2. **Skip SPI lock/unlock** — SPI semaphore initialized to 0, first `sem_wait` deadlocks. Hooks at 0x08147d0c/0x08147d18 skip since we bypass real SPI.
+3. **Bypass Mono runtime check** — Hook at 0x08057bee returns 0 (not running) to allow ESP32 HCOM ops.
+4. **Inject first mq_receive message** — The ESPCP thread blocks on `mq_receive` until a control signal arrives. On real hardware, the ESP32 sends `+++MW` via USART3 (see below). Hook at 0x0814de46 injects a fake "transport/send_response" message on the first call only.
+5. **SPI DMA bypass** — Hook at 0x08147c94 feeds bytes through EspcpStub directly (Renode STM32SPI lacks DMA).
+6. **Zero-frame skip** — EspcpStub.cs skips frames with protocol byte 0x00 (rx-only SPI exchanges).
+
+**Key discovery: ESPCP control signals use UART, not GPIO EXTI.**
+On real hardware, the ESP32 sends control signal lines via USART3 (`/dev/ttyS2`):
+- `+++MW` → message waiting → `espcp_process_message_waiting_control_signal`
+- `+++SIR` → SPI ready → `espcp_process_spi_ready_control_signal`
+- `+++RDY` → ready → `espcp_process_ready_control_signal`
+- `+++RST` → reset → `espcp_process_reset_control_signal`
+
+The user-space `hcom_esp32_network_monitor_thread` (0x08058f08) reads UART lines,
+dispatches via `espcp_uart_monitor_process_line` which matches the `_control_signals`
+table (0x08185958) and calls the appropriate handler. GPIO pins (PI0, PD2, PI10)
+exist as hardware signals but are NOT interrupt-driven via EXTI.
+
+**Key legacy ELF addresses:**
+- `espcp_early_init`: 0x08147edc
+- `espcp_late_init`: 0x08147f80
+- `espcp_thread`: 0x0814de28 (waits on mq_receive)
+- `espcp_send_message`: 0x0814779c
+- `espcp_send_data_over_spi`: 0x08147c94 (R0=tx, R1=rx, R2=len; either can be NULL)
+- `espcp_queue_message`: 0x081480ac
+- `espcp_get_message`: 0x081478b8
+- `espcp_reset`: 0x08147d64
+- `espcp_process_message_waiting_control_signal`: 0x08178baa
+- `espcp_uart_monitor_process_line`: 0x08178bb2
+- `hcom_esp32_network_monitor_thread`: 0x08058f08 (user-space, reads /dev/ttyS2)
+- `_control_signals` table: 0x08185958 (4 entries × 16 bytes)
 
 ### A.1 — Stub Architecture Design
 The stub peripheral implements Renode's `ISPISlave` interface and sits on the STM32's SPI2 bus. It:
@@ -36,15 +80,15 @@ The stub peripheral implements Renode's `ISPISlave` interface and sits on the ST
 ```
 
 ### A.2 — Create ESPCP Stub C# Peripheral
-- [ ] Create `peripherals/EspcpStub.cs` implementing `ISPISlave`
-- [ ] Implement SPI frame receive/transmit (4092-byte frames)
-- [ ] Parse 27-byte ESPCP message header:
-  - Validate CRC8 (header) and CRC32 (payload)
+- [x] Create `peripherals/EspcpStub.cs` implementing `ISPIPeripheral` (not ISPISlave)
+- [x] Implement SPI frame receive/transmit (4092-byte frames)
+- [x] Parse 27-byte ESPCP message header:
+  - Validate CRC-32 (polynomial 0xedb88320, seed 0xffffffff) — no CRC8 needed
   - Extract interface, function, message_id, payload
-- [ ] Construct response frames:
+- [x] Construct response frames:
   - Set message_type = `0x10` (Response)
-  - Set status_code = `espcp_status_codes_completed_ok` (0)
-  - Calculate CRC8/CRC32
+  - Set status_code = 0 (OK)
+  - Calculate CRC-32
   - Add 4-byte SPI overhead padding
 - [ ] Handle multi-packet messages (payload > 4061 bytes spans multiple SPI frames)
 
@@ -81,19 +125,16 @@ The stub peripheral implements Renode's `ISPISlave` interface and sits on the ST
 - [ ] `stop (1)` → return success
 
 ### A.4 — Wire Stub into Platform
-- [ ] Add to `meadow-f7.repl`:
+- [x] Add to `meadow-f7.repl`:
   ```
   espcpStub: SPI.EspcpStub @ spi2
-      -> gpioPortI@10  // Ready signal to PI10
+      Ready -> gpioPortI@10
   ```
-- [ ] Handle GPIO connections in `.resc`:
-  ```
-  # Wire ESP32 reset line
-  gpioPortF.7 -> espcpStub@0  // Reset from PF7
-  # Wire CS line
-  gpioPortI.0 -> espcpStub@1  // CS from PI0
-  ```
-- [ ] Update `build-emulator.sh` to set `CONFIG_MEADOW_ESPCP_MANAGER=y`
+- [x] Add `include @peripherals/EspcpStub.cs` to both legacy .resc scripts
+- [x] Add `sysbus.spi2.espcpStub Reset` after platform load (Ready GPIO timing fix)
+- [x] Add SPI DMA bypass hook at `espcp_send_data_over_spi` (0x08147c94)
+- [ ] Wire ESP32 reset line (gpioPortF pin 7 → stub reset input) — deferred
+- [ ] Wire CS line (gpioPortI pin 0 → stub CS input) — deferred, managed by SPI controller
 
 ### A.5 — Test ESPCP Stub
 - [ ] Verify ESPCP init sequence: reset ESP32 → wait for Ready → send first message
@@ -218,8 +259,29 @@ Renode supports multiple machines in a single simulation with inter-machine conn
 |------------|----------|-----------|
 | 2026-03-08 | ESP32 coprocessor: stub first, dual-machine later | ESPCP SPI stub unblocks networking tests without needing ESP32 firmware. Dual-machine emulation is a future goal for full-fidelity testing |
 | 2026-03-08 | ESPCP disabled for other tracks | `CONFIG_MEADOW_ESPCP_MANAGER` is already `not set` in defconfig — safe to boot without ESP32 for initial bring-up |
-| 2026-03-08 | C# for ESPCP stub (not Python) | Python peripherals only handle simple register reads/writes; we need the `ISPISlave` interface for proper SPI frame handling |
+| 2026-03-08 | C# for ESPCP stub (not Python) | Python peripherals only handle simple register reads/writes; we need the `ISPIPeripheral` interface for proper SPI frame handling |
+| 2026-03-09 | Target legacy OS for ESPCP bringup | Legacy Meadow (not new OS rebase) because ESP isn't brought up yet on the rebase |
+| 2026-03-09 | ISPIPeripheral (not ISPISlave) | Renode's SPI model uses `ISPIPeripheral` with byte-at-a-time `Transmit(byte)` + `FinishTransmission()` |
+| 2026-03-09 | SPI DMA bypass via IronPython hook | Same pattern as QUADSPI DMA bypass — Renode's STM32SPI doesn't support DMA (TXDMAEN unhandled), so hook reads/writes memory directly and calls peripheral |
+| 2026-03-09 | Stub starts booted (Ready=true) | GPIO reset wiring deferred; Reset() sets booted=true and Ready.Set(true) |
+| 2026-03-10 | mq_receive injection (not GPIO EXTI) | ESPCP control signals use UART (`+++MW` etc. on USART3), not GPIO EXTI. `mint_config_interrupt` is for managed code GPIO interrupts (confirmed by engineer), unrelated to ESPCP. |
+| 2026-03-10 | Future: emulate ESP32 UART signaling | Current mq_receive injection is a workaround. Proper fix: have EspcpStub send `+++MW` on a virtual USART3 so the firmware's `hcom_esp32_network_monitor_thread` triggers naturally. |
+
+## Changes Log
+
+| Date | Files Changed | What & Why |
+|------|---------------|------------|
+| 2026-03-09 | `peripherals/EspcpStub.cs` | Created full ESPCP stub peripheral (ISPIPeripheral + IGPIOReceiver) |
+| 2026-03-09 | `platforms/meadow-f7.repl` | Added `espcpStub: SPI.EspcpStub @ spi2` with Ready → gpioPortI@10 |
+| 2026-03-09 | `scripts/meadow-legacy.resc` | Added EspcpStub include, Reset call, SPI DMA bypass hook, debug traces |
+| 2026-03-09 | `scripts/meadow-legacy-headless.resc` | Same changes as interactive script |
+| 2026-03-09 | `tools/hcom_test.py` | Added `espmac` command (READ_ESP_MAC_ADDRESS 0x0117) for testing |
 
 ## Open Questions
 1. **Renode ESP32 support:** Does Renode have an ESP32/Xtensa platform? If so, dual-machine emulation becomes much more viable.
 2. **ESPCP stub fidelity:** How much of the ESPCP protocol needs to be stubbed for Meadow.OS to boot with networking enabled? Minimum viable: system status + WiFi init responses.
+3. ~~**Mono runtime gate:**~~ RESOLVED — Bypassed at 0x08057bee (return 0 = not running).
+4. ~~**Ready GPIO propagation:**~~ RESOLVED — `sysbus.spi2.espcpStub Reset` after platform load works; GPIO IDR reflects the input correctly.
+5. **ESPCP polling CPU burn:** `espcp_thread` continuously re-queues `send_response` after the initial injection. This is normal firmware behavior but wastes emulation CPU. Consider throttling or sleeping the thread when idle.
+6. **ESP32 UART control signal emulation:** Current mq_receive injection is a one-shot workaround. For full fidelity, EspcpStub should send `+++MW` on a virtual USART3 so the firmware's `hcom_esp32_network_monitor_thread` triggers naturally. This would also enable `+++SIR` (SPI ready) and `+++RDY` (ready) signaling.
+7. **MINT system clarification:** `mint_config_interrupt` is for managed code GPIO interrupts (STM32F7 → Mono/.NET), NOT for ESPCP. Confirmed by engineer: "has nothing to do with ESPCP. It has to do with the code that sends interrupts from the STM32F7 to managed code."
