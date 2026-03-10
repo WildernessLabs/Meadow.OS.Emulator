@@ -11,13 +11,17 @@ Full hardware emulation of Meadow.OS (NuttX RTOS on STM32F777ZIT6) using the [Re
 - **ARM toolchain** — `arm-none-eabi-gcc` (install via `brew install --cask gcc-arm-embedded`)
 - **GNU Make 4.x+** — macOS ships Make 3.81; install `gmake` via `brew install make`
 - **Meadow.OS source** — Must be checked out as a sibling directory (`../Meadow.OS/`)
+- **Meadow (legacy) source** — For legacy OS emulation, checked out as `../Meadow/`
+- **Meadow.CLI** — For CLI interaction with the emulator, checked out and built (see [Using Meadow.CLI](#using-meadowcli))
 
 ## Project Structure
 
 ```
 Meadow.OS.Emulator/
-├── build/                    # Build output (nuttx.bin, nuttx_user.bin, nuttx.elf)
-├── build-emulator.sh         # Builds NuttX with the emulator defconfig
+├── build/                    # Build output (new OS)
+├── build/legacy/             # Build output (legacy OS)
+├── build-meadow.os-emulated.sh    # Builds new Meadow.OS with emulator defconfig
+├── build-meadow.os_legacy-emulated.sh  # Builds legacy Meadow with emulator tweaks
 ├── run.sh                    # Launches Renode with a given script
 ├── platforms/
 │   ├── stm32f777.repl        # STM32F777 chip-level platform (all on-die peripherals)
@@ -31,6 +35,8 @@ Meadow.OS.Emulator/
 │   ├── meadow-os-diag.resc   # Diagnostic script with SVC/context-switch logging hooks
 │   ├── meadow-os-test.resc   # Test script with verbose logging
 │   ├── meadow-nsh.resc       # NSH-only flat build (no user binary, no workarounds)
+│   ├── meadow-legacy.resc    # Legacy OS — interactive mode
+│   ├── meadow-legacy-headless.resc  # Legacy OS — headless mode
 │   └── pydev/                # Python peripherals and hook references
 │       ├── rcc.py            # RCC clock controller (ready-bit handling)
 │       ├── otg_fs.py         # USB OTG FS stub (GRSTCTL/AHBIDL)
@@ -44,31 +50,41 @@ Meadow.OS.Emulator/
 
 ## Building
 
-The build script configures and compiles NuttX using the emulator-specific defconfig:
+### New OS (Meadow.OS)
 
 ```bash
-./build-emulator.sh
+./build-meadow.os-emulated.sh
 ```
 
-This will:
-1. Configure NuttX with `stm32f777zit6-meadow:meadow_os_emu`
-2. Build in protected mode (two-pass: pass2 + mbedTLS + pass1 + final link)
-3. Copy `nuttx.bin`, `nuttx_user.bin`, and `nuttx.elf` to `build/`
+Configures NuttX with `stm32f777zit6-meadow:meadow_os_emu`, builds in protected mode, and copies artifacts to `build/`.
 
 For a flat NSH-only build:
 ```bash
-./build-emulator.sh nsh
+./build-meadow.os-emulated.sh nsh
 ```
+
+### Legacy OS (Meadow)
+
+```bash
+./build-meadow.os_legacy-emulated.sh
+```
+
+Builds from the legacy `Meadow/` repo (NuttX 7.x, `mono` defconfig) with emulator kconfig tweaks applied at build time. Outputs split binaries to `build/legacy/` (vectors, kernel, and user loaded separately to avoid zero-fill issues in the protected-mode memory layout).
+
+Requires the legacy `Meadow/` repo checked out as a sibling directory and ARM GCC 10.3 installed at `/Applications/ARM/bin`.
 
 ## Running
 
 ```bash
-./run.sh                    # Interactive mode (default: meadow-os)
+./run.sh                    # Interactive mode (default: new OS)
+./run.sh --legacy           # Interactive mode (legacy OS)
 ./run.sh meadow-os-gdb      # GDB mode (paused, GDB server on port 3333)
 ./run.sh meadow-os-diag     # Diagnostic mode with SVC/context logging
 ```
 
 The script auto-detects Renode on `PATH` or in `/Applications/Renode.app` (macOS).
+
+HCOM is exposed as a TCP socket on port 4242 for both OS variants.
 
 ### GDB Debugging
 
@@ -199,13 +215,69 @@ Remaining:
 
 ## HCOM Communication
 
-HCOM is the host-to-device protocol used by Meadow CLI. In the emulator, HCOM is redirected from USB CDC-ACM to UART4, which is exposed as a TCP socket on port 4242.
+HCOM is the host-to-device protocol used by Meadow.CLI. In the emulator, HCOM is redirected from USB CDC-ACM to UART4, which is exposed as a TCP socket on port 4242.
 
 ```bash
 # Test HCOM communication (emulator must be running):
 python3 tools/hcom_test.py info       # Get device information
 python3 tools/hcom_test.py name       # Get device name
 python3 tools/hcom_test.py listen     # Listen for unsolicited messages
+```
+
+## Using Meadow.CLI
+
+Meadow.CLI can connect to the emulated device over the HCOM TCP socket instead of USB. This requires the `SocketConnection` support in Meadow.CLI (available on the `feature/TCP_Socket_Connection_for_EMU` branch or later).
+
+### Setup
+
+1. Build Meadow.CLI (one time):
+   ```bash
+   cd ../Meadow.CLI
+   dotnet build
+   ```
+
+2. From the build output directory (e.g., `Source/Meadow.CLI/bin/Debug/net8.0/`), configure the socket route:
+   ```bash
+   dotnet meadow.dll config route socket://localhost:4242
+   ```
+
+   This persists the connection setting — you only need to do it once.
+
+3. Make sure the emulator is running, then use Meadow.CLI as normal:
+   ```bash
+   dotnet meadow.dll device info
+   ```
+
+### Example Output
+
+```
+Getting device info...
+Meadow by Wilderness Labs
+Board Information
+    Model: F7Micro
+    Hardware version: F7CoreComputeV2
+    Device name: MeadowF7
+
+Hardware Information
+    Processor type: STM32F777IIK6
+    ID: 00-00-00-00-00-00-00-00-00-00-00-00
+    Serial number: 0000000A0000
+    Coprocessor type: ESP32
+
+Firmware Versions
+    OS:
+    Runtime:
+    Coprocessor:
+    Protocol: 8
+```
+
+Firmware versions are blank because the emulator injects placeholder version numbers (0.0.0.0) and the Mono runtime is not flashed.
+
+### Switching Back to USB
+
+To revert Meadow.CLI to USB for use with a physical device:
+```bash
+dotnet meadow.dll config route
 ```
 
 ## Next Steps

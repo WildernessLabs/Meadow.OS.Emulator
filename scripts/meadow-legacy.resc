@@ -9,14 +9,17 @@ machine PyDevFromFile @scripts/pydev/rcc.py 0x40023800 0x400 true "rcc"
 # USB OTG FS stub — handles GRSTCTL polling (AHBIDL bit)
 machine PyDevFromFile @scripts/pydev/otg_fs.py 0x50000000 0x40000 true "otg_fs"
 
-# Load kernel at link-time address (0x08000000)
-sysbus LoadBinary @build/legacy/nuttx.bin 0x08000000
-# Load user binary at 0x08100000 (CONFIG_NUTTX_USERSPACE — same as new OS)
-sysbus LoadBinary @build/legacy/nuttx_user.bin 0x08100000
+# Legacy memory layout:
+#   vectors at 0x08040000 (uflash), kernel text at 0x08140000 (kflash),
+#   user code at 0x08040200+ (uflash, after 512-byte vector table gap)
+# Load user binary first, then overlay vector table on top (first 504 bytes)
+sysbus LoadBinary @build/legacy/nuttx_user.bin 0x08040000
+sysbus LoadBinary @build/legacy/nuttx_vectors.bin 0x08040000
+sysbus LoadBinary @build/legacy/nuttx_kernel.bin 0x08140000
 
-sysbus.cpu VectorTableOffset 0x08000000
+sysbus.cpu VectorTableOffset 0x08040000
 
-# USART1: Console/syslog output to file
+# USART1: Console/syslog output
 showAnalyzer usart1
 
 # UART4: HCOM transport — exposed as TCP socket on port 4242
@@ -24,26 +27,37 @@ emulation CreateServerSocketTerminal 4242 "hcom" false
 connector Connect sysbus.uart4 hcom
 
 # =============================================================================
-# IronPython hooks — see meadow-legacy-headless.resc for details.
-# Addresses must be extracted from legacy ELF after first build.
+# IronPython hooks
+# Addresses extracted from: arm-none-eabi-nm build/legacy/nuttx.elf
 # =============================================================================
 
-# set svc_fix "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.PRIMASK = RegisterValue.Create(0, 32)"
-# cpu AddHook 0x???????? $svc_fix
+# Workaround: Renode skips SVC when PRIMASK=1 instead of escalating to HardFault.
+set svc_fix "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.PRIMASK = RegisterValue.Create(0, 32)"
+cpu AddHook 0x08162f72 $svc_fix
+cpu AddHook 0x081631be $svc_fix
+cpu AddHook 0x081631ce $svc_fix
+cpu AddHook 0x081631d8 $svc_fix
+cpu AddHook 0x081631e4 $svc_fix
+cpu AddHook 0x0817b148 $svc_fix
 
-# set gpio_ver_fix "sp = cpu.GetRegisterUnsafe(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 12, 0x01)"
-# cpu AddHook 0x???????? $gpio_ver_fix
+# Workaround: Force GPIO board version to CCMv2 (3).
+# Hook meadow_hw_version_find_device_ver (0x08140d64) at entry.
+set gpio_ver_fix "machine.SystemBus.WriteByte(0x20020ce4, 1); machine.SystemBus.WriteDoubleWord(0x20020ce8, 3); cpu.PC = cpu.LR"
+cpu AddHook 0x08140d64 $gpio_ver_fix
 
-# set qspi_wait_skip "cpu.PC = cpu.LR"
-# cpu AddHook 0x???????? $qspi_wait_skip
+# Workaround: Renode's STM32H7_QuadSPI doesn't set TCF in SR.
+set qspi_wait_skip "cpu.PC = cpu.LR"
+cpu AddHook 0x0816135e $qspi_wait_skip
+cpu AddHook 0x08161270 $qspi_wait_skip
 
-# set qspi_dma_bypass "meminfo = cpu.GetRegisterUnsafe(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 8); faddr = machine.SystemBus.ReadDoubleWord(meminfo + 12); buf = machine.SystemBus.ReadDoubleWord(meminfo + 20); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
-# cpu AddHook 0x???????? $qspi_dma_bypass
+# Workaround: QUADSPI doesn't drive DMA requests — bypass qspi_memory with direct memcpy.
+# struct qspi_meminfo_s: flags(+0,u8) addrlen(+1) dummies(+2) pad(+3)
+#   buflen(+4,u16) cmd(+6,u16) addr(+8,u32) key(+12,u32) buffer(+16,ptr)
+set qspi_dma_bypass "meminfo = cpu.GetRegisterUnsafe(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 4) & 0xFFFF; faddr = machine.SystemBus.ReadDoubleWord(meminfo + 8); buf = machine.SystemBus.ReadDoubleWord(meminfo + 16); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
+cpu AddHook 0x0816136a $qspi_dma_bypass
 
-# set qspi_dma_fixret "sp = cpu.GetRegisterUnsafe(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 44, 0)"
-# cpu AddHook 0x???????? $qspi_dma_fixret
-
-# set lsi_skip "cpu.PC = cpu.LR"
-# cpu AddHook 0x???????? $lsi_skip
+# Workaround: LSI clock calibration thread — skip to avoid burning CPU.
+set lsi_skip "cpu.PC = cpu.LR"
+cpu AddHook 0x0814d0d8 $lsi_skip
 
 start
