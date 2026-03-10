@@ -28,6 +28,10 @@ HCOM_COBS_DELIMITER = 0x00
 # Request types (host → device)
 HCOM_MDOW_REQUEST_GET_DEVICE_INFORMATION = 0x0112
 HCOM_MDOW_REQUEST_GET_DEVICE_NAME = 0x011F
+HCOM_MDOW_REQUEST_MONO_DISABLE = 0x010F
+HCOM_MDOW_REQUEST_MONO_ENABLE = 0x0110
+HCOM_MDOW_REQUEST_READ_ESP_MAC_ADDRESS = 0x0117
+HCOM_MDOW_REQUEST_RESTART_ESP32 = 0x0118
 
 # Response types (device → host)
 HCOM_HOST_REQUEST_TEXT_DEVICE_INFO = 0x030A
@@ -195,6 +199,25 @@ def cmd_name(sock: socket.socket):
                 print(f"  Payload (hex): {payload.hex()}")
 
 
+def cmd_espmac(sock: socket.socket):
+    """Send READ_ESP_MAC_ADDRESS directly (Mono check bypassed by emulator hook)."""
+    packet = build_packet(HCOM_MDOW_REQUEST_READ_ESP_MAC_ADDRESS)
+    print(f"Sending READ_ESP_MAC_ADDRESS ({len(packet)} bytes on wire)")
+    print(f"  Wire: {packet.hex()}")
+    sock.sendall(packet)
+
+    print("Waiting for ESP MAC response...")
+    for header, payload in receive_packets(sock, timeout=15.0):
+        seq, ver, rtype, extra, udata = header
+        name = RESPONSE_NAMES.get(rtype, f"0x{rtype:04X}")
+        print(f"  Response: type={name} seq={seq} ver={ver} extra={extra} userData=0x{udata:08X}")
+        if payload:
+            try:
+                print(f"  Payload (text): {payload.decode('utf-8', errors='replace')}")
+            except Exception:
+                print(f"  Payload (hex): {payload.hex()}")
+
+
 def cmd_listen(sock: socket.socket):
     """Listen for any unsolicited messages from the device."""
     print("Listening for messages (Ctrl+C to stop)...")
@@ -215,7 +238,7 @@ def cmd_listen(sock: socket.socket):
 def main():
     parser = argparse.ArgumentParser(description='HCOM protocol test tool')
     parser.add_argument('command', nargs='?', default='info',
-                        choices=['info', 'name', 'listen'],
+                        choices=['info', 'name', 'espmac', 'listen'],
                         help='Command to send (default: info)')
     parser.add_argument('--port', type=int, default=4242,
                         help='HCOM socket port (default: 4242)')
@@ -237,6 +260,7 @@ def main():
         commands = {
             'info': cmd_info,
             'name': cmd_name,
+            'espmac': cmd_espmac,
             'listen': cmd_listen,
         }
         commands[args.command](sock)

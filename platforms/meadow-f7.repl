@@ -17,3 +17,8 @@ qspiFlashMem: Memory.MappedMemory @ sysbus 0x90000000
 
 w25q: SPI.Winbond_W25QXXXJV @ quadspi
     underlyingMemory: qspiFlashMem
+
+// ESP32 coprocessor stub — virtual ESPCP peripheral on SPI2
+espcpStub: SPI.EspcpStub @ spi2
+    Ready -> gpioPortI@10
+    MessageWaiting -> gpioPortI@0

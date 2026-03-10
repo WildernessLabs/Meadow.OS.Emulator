@@ -1,5 +1,6 @@
 using sysbus
 include @peripherals/Winbond_W25QXXXJV.cs
+include @peripherals/EspcpStub.cs
 mach create "meadow-legacy"
 machine LoadPlatformDescription @platforms/meadow-f7.repl
 
@@ -8,6 +9,10 @@ machine PyDevFromFile @scripts/pydev/rcc.py 0x40023800 0x400 true "rcc"
 
 # USB OTG FS stub — handles GRSTCTL polling (AHBIDL bit)
 machine PyDevFromFile @scripts/pydev/otg_fs.py 0x50000000 0x40000 true "otg_fs"
+
+# ESP32 coprocessor stub — starts booted and ready for SPI
+# Re-trigger Reset after platform load so Ready/MessageWaiting GPIOs propagate
+sysbus.spi2.espcpStub Reset
 
 # Legacy memory layout:
 #   vectors at 0x08040000 (uflash), kernel text at 0x08140000 (kflash),
@@ -41,7 +46,6 @@ cpu AddHook 0x081631e4 $svc_fix
 cpu AddHook 0x0817b148 $svc_fix
 
 # Workaround: Force GPIO board version to CCMv2 (3).
-# Hook meadow_hw_version_find_device_ver (0x08140d64) at entry.
 set gpio_ver_fix "machine.SystemBus.WriteByte(0x20020ce4, 1); machine.SystemBus.WriteDoubleWord(0x20020ce8, 3); cpu.PC = cpu.LR"
 cpu AddHook 0x08140d64 $gpio_ver_fix
 
@@ -51,10 +55,34 @@ cpu AddHook 0x0816135e $qspi_wait_skip
 cpu AddHook 0x08161270 $qspi_wait_skip
 
 # Workaround: QUADSPI doesn't drive DMA requests — bypass qspi_memory with direct memcpy.
-# struct qspi_meminfo_s: flags(+0,u8) addrlen(+1) dummies(+2) pad(+3)
-#   buflen(+4,u16) cmd(+6,u16) addr(+8,u32) key(+12,u32) buffer(+16,ptr)
 set qspi_dma_bypass "meminfo = cpu.GetRegisterUnsafe(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 4) & 0xFFFF; faddr = machine.SystemBus.ReadDoubleWord(meminfo + 8); buf = machine.SystemBus.ReadDoubleWord(meminfo + 16); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
 cpu AddHook 0x0816136a $qspi_dma_bypass
+
+# Workaround: Firmware gates ESP32 operations behind Mono runtime state. Bypass the
+# "is Mono running" check to always return 0 (not running).
+set mono_check_bypass "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
+cpu AddHook 0x08057bee $mono_check_bypass
+
+# Workaround: STM32SPI doesn't drive DMA — bypass espcp_send_data_over_spi with direct
+# peripheral calls.
+set espcp_spi_bypass "from System import Array, Byte; stub = [p.Peripheral for p in machine.GetRegisteredPeripherals() if type(p.Peripheral).__name__ == 'EspcpStub'][0]; tx = cpu.GetRegisterUnsafe(0).RawValue; rx = cpu.GetRegisterUnsafe(1).RawValue; length = int(cpu.GetRegisterUnsafe(2).RawValue); txdata = machine.SystemBus.ReadBytes(tx, length) if tx else Array.CreateInstance(Byte, length); rxarr = Array.CreateInstance(Byte, length); [rxarr.__setitem__(i, stub.Transmit(txdata[i])) for i in range(length)]; stub.FinishTransmission(); machine.SystemBus.WriteBytes(rxarr, rx) if rx else None; cpu.PC = cpu.LR"
+cpu AddHook 0x08147c94 $espcp_spi_bypass
+
+# Workaround: Force ESPCP initialization by setting selected network type to WiFi (1).
+# hcom_nx_setup_mgr gates espcp_late_init on config[8] & 0xFF — if 0, ESPCP is skipped.
+set espcp_force_init "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(5, RegisterValue.Create(1, 32))"
+cpu AddHook 0x08141144 $espcp_force_init
+
+# Workaround: ESPCP SPI lock semaphore starts at 0 — skip lock/unlock since we bypass SPI.
+set spi_lock_skip "cpu.PC = cpu.LR"
+cpu AddHook 0x08147d0c $spi_lock_skip
+cpu AddHook 0x08147d18 $spi_lock_skip
+
+# Workaround: ESP32 control signals are sent via USART3 ("+++MW"), not GPIO EXTI.
+# Since we don't emulate ESP32 UART signaling, inject a fake send_response message.
+
+set espcp_mq_inject "from Antmicro.Renode.Peripherals.CPU import RegisterValue; flag = machine.SystemBus.ReadByte(0x20030FFF); first = (flag == 0); machine.SystemBus.WriteByte(0x20030FFF, 1) if first else None; machine.SystemBus.WriteByte(0x20030F00, 0) if first else None; machine.SystemBus.WriteByte(0x20030F01, 5) if first else None; machine.SystemBus.WriteDoubleWord(0x20030F04, 1) if first else None; sp = cpu.GetRegisterUnsafe(13).RawValue if first else 0; machine.SystemBus.WriteDoubleWord(sp + 4, 0x20030F00) if first else None; cpu.SetRegisterUnsafe(0, RegisterValue.Create(4, 32)) if first else None; cpu.PC = RegisterValue.Create(0x0814de4a, 32) if first else cpu.PC; None"
+cpu AddHook 0x0814de46 $espcp_mq_inject
 
 # Workaround: LSI clock calibration thread — skip to avoid burning CPU.
 set lsi_skip "cpu.PC = cpu.LR"
