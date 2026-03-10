@@ -1,7 +1,7 @@
 # Plan: ESP32 Coprocessor Emulation
 
 ## Track ID: `renode-esp32`
-## Status: `planned`
+## Status: `in-progress` (post-boot polling working, event delivery next)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -12,33 +12,59 @@
 
 ### Current Status (2026-03-10)
 
-**ESPCP SPI communication is WORKING. ✅**
+**ESPCP Boot + Post-Boot Polling WORKING ✅**
 
 - [x] A.1 — Stub architecture designed
 - [x] A.2 — `peripherals/EspcpStub.cs` created (ISPIPeripheral + IGPIOReceiver)
 - [x] A.3 — All interface handlers implemented (Transport, System, WiFi stubs, BLE stubs)
 - [x] A.4 — Wired into platform (.repl + .resc), SPI DMA bypass hook working
-- [x] A.5 — ESPCP init, thread start, and SPI exchange verified end-to-end
+- [x] A.5 — Boot-time ESPCP exchange WORKING (SPI exchanges in espcp_late_init)
+- [x] A.5b — Post-boot ESPCP polling WORKING (mq_intercept hook)
+- [ ] A.6 — Event delivery: queue events in EspcpStub, verify firmware receives them
 
-**Workarounds applied to get ESPCP running:**
-1. **Force ESPCP init** — `hcom_nx_setup_mgr` gates `espcp_late_init` on config[8] (selected network type). Hook at 0x08141144 forces R5=1 (WiFi).
-2. **Skip SPI lock/unlock** — SPI semaphore initialized to 0, first `sem_wait` deadlocks. Hooks at 0x08147d0c/0x08147d18 skip since we bypass real SPI.
-3. **Bypass Mono runtime check** — Hook at 0x08057bee returns 0 (not running) to allow ESP32 HCOM ops.
-4. **Inject first mq_receive message** — The ESPCP thread blocks on `mq_receive` until a control signal arrives. On real hardware, the ESP32 sends `+++MW` via USART3 (see below). Hook at 0x0814de46 injects a fake "transport/send_response" message on the first call only.
-5. **SPI DMA bypass** — Hook at 0x08147c94 feeds bytes through EspcpStub directly (Renode STM32SPI lacks DMA).
-6. **Zero-frame skip** — EspcpStub.cs skips frames with protocol byte 0x00 (rx-only SPI exchanges).
+**What works:**
+- EspcpStub.cs fully implements ESPCP protocol (27-byte header, CRC32, all interfaces)
+- SPI DMA bypass hook at 0x08147c94 feeds bytes through EspcpStub correctly
+- espcp_early_init and espcp_late_init run (forced via R5=1 at 0x08141144)
+- Boot SPI exchanges happen directly in espcp_late_init (not through espcp_thread)
+- Post-boot: mq_intercept hook at mq_receive (0x08157130) injects send_response
+  when caller is espcp_thread (LR=0x0814de4b) and poll flag at 0x2007FFF0 is set
+- espcp_thread continuously polls EspcpStub via transport/send_response SPI exchanges
+- Poll flag set automatically from espcp_thread entry hook at 0x0814de28
+- HCOM `info` and `name` commands work correctly alongside ESPCP polling
+- System stable at 45+ seconds of virtual time
 
-**Key discovery: ESPCP control signals use UART, not GPIO EXTI.**
-On real hardware, the ESP32 sends control signal lines via USART3 (`/dev/ttyS2`):
-- `+++MW` → message waiting → `espcp_process_message_waiting_control_signal`
-- `+++SIR` → SPI ready → `espcp_process_spi_ready_control_signal`
-- `+++RDY` → ready → `espcp_process_ready_control_signal`
-- `+++RST` → reset → `espcp_process_reset_control_signal`
+**Key discoveries (2026-03-10):**
 
-The user-space `hcom_esp32_network_monitor_thread` (0x08058f08) reads UART lines,
-dispatches via `espcp_uart_monitor_process_line` which matches the `_control_signals`
-table (0x08185958) and calls the appropriate handler. GPIO pins (PI0, PD2, PI10)
-exist as hardware signals but are NOT interrupt-driven via EXTI.
+1. **Boot SPI exchanges are DIRECT, not queue-based.** espcp_late_init does SPI
+   exchanges synchronously. espcp_thread's message queue is empty during/after boot.
+   Counter-based two-phase hook was unnecessary.
+
+2. **HCOM commands do NOT trigger ESPCP SPI.** WiFi/network operations go through
+   NuttX usrsock interface, triggered only by Mono/.NET application socket calls.
+   Since Mono isn't running, only the polling mechanism triggers post-boot ESPCP.
+
+3. **NuttX BSS range: 0x20020CE0 - 0x200331E4.** Hook flags placed in BSS get zeroed
+   during boot. Must use addresses outside BSS (0x2007FFF0 = end of SRAM2).
+
+4. **ESPCP control signals use UART5 (/dev/ttyS2), not USART3.** The firmware's
+   `hcom_esp32_network_monitor_thread` reads `/dev/ttyS2` (UART5). UART5 is already
+   compiled in. UART5 socket terminal on port 4243 delivers data but NuttX poll()
+   doesn't wake the blocked monitor thread (Renode limitation).
+
+**Known issues:**
+- mq_intercept prevents real mq_receive → messages pile up in queue (maxmsgs=10)
+- One thread blocks on mq_send (nwaitnotfull=1) — doesn't affect stability
+- ESPCP polling burns CPU (no throttle mechanism yet)
+
+**Workarounds in .resc scripts (currently active):**
+1. **Force ESPCP init** — Hook at 0x08141144 forces R5=1 (WiFi network type)
+2. **Skip SPI lock/unlock** — Hooks at 0x08147d0c/0x08147d18 (bypass deadlock)
+3. **Bypass Mono runtime check** — Hook at 0x08057bee returns 0 (not running)
+4. **SPI DMA bypass** — Hook at 0x08147c94 feeds bytes through EspcpStub directly
+5. **LSI calibration skip** — Hook at 0x0814d0d8 skips timer 5 polling
+6. **mq_intercept** — Hook at 0x08157130 injects send_response for espcp_thread
+7. **espcp_poll_enable** — Hook at 0x0814de28 sets poll flag at thread start
 
 **Key legacy ELF addresses:**
 - `espcp_early_init`: 0x08147edc
@@ -47,12 +73,20 @@ exist as hardware signals but are NOT interrupt-driven via EXTI.
 - `espcp_send_message`: 0x0814779c
 - `espcp_send_data_over_spi`: 0x08147c94 (R0=tx, R1=rx, R2=len; either can be NULL)
 - `espcp_queue_message`: 0x081480ac
+- `espcp_queue_send_response_message`: 0x08147744
 - `espcp_get_message`: 0x081478b8
 - `espcp_reset`: 0x08147d64
 - `espcp_process_message_waiting_control_signal`: 0x08178baa
 - `espcp_uart_monitor_process_line`: 0x08178bb2
-- `hcom_esp32_network_monitor_thread`: 0x08058f08 (user-space, reads /dev/ttyS2)
+- `hcom_esp32_network_monitor_thread`: 0x08058f08 (user-space)
 - `_control_signals` table: 0x08185958 (4 entries × 16 bytes)
+
+**NuttX serial device mapping (legacy emulator build):**
+Only USART1, UART4, UART5 compiled in (no USART3):
+- /dev/ttyS0 = USART1 @ 0x40011000 (console/syslog)
+- /dev/ttyS1 = UART4 @ 0x40004C00 (HCOM, TCP port 4242)
+- /dev/ttyS2 = UART5 @ 0x40005000 (unused)
+ELF globals confirm: g_usart1priv, g_uart4priv, g_uart5priv only (no g_usart3priv)
 
 ### A.1 — Stub Architecture Design
 The stub peripheral implements Renode's `ISPISlave` interface and sits on the STM32's SPI2 bus. It:
@@ -265,23 +299,32 @@ Renode supports multiple machines in a single simulation with inter-machine conn
 | 2026-03-09 | SPI DMA bypass via IronPython hook | Same pattern as QUADSPI DMA bypass — Renode's STM32SPI doesn't support DMA (TXDMAEN unhandled), so hook reads/writes memory directly and calls peripheral |
 | 2026-03-09 | Stub starts booted (Ready=true) | GPIO reset wiring deferred; Reset() sets booted=true and Ready.Set(true) |
 | 2026-03-10 | mq_receive injection (not GPIO EXTI) | ESPCP control signals use UART (`+++MW` etc. on USART3), not GPIO EXTI. `mint_config_interrupt` is for managed code GPIO interrupts (confirmed by engineer), unrelated to ESPCP. |
-| 2026-03-10 | Future: emulate ESP32 UART signaling | Current mq_receive injection is a workaround. Proper fix: have EspcpStub send `+++MW` on a virtual USART3 so the firmware's `hcom_esp32_network_monitor_thread` triggers naturally. |
+| 2026-03-10 | mq_inject hook at bl sites is inert | Hooks at `bl` instructions: the `bl` still executes after the hook, overriding PC changes. Boot ESPCP works from real queued messages (espcp_late_init). Hook removed. |
+| 2026-03-10 | USART3 needed for post-boot ESPCP | USART3 not compiled into legacy build. Monitor thread can't read control signals. Build change required to enable. |
+| 2026-03-10 | IronPython conditional register crash documented | `cpu.PC = X if cond else None` assigns None to PC on false branch. Must use list comprehensions: `[cpu.SetRegisterUnsafe(15, val) for _ in [1] if cond]` |
+| 2026-03-10 | READ_ESP_MAC uses esptool protocol | `hcom_esp32_util_read_esp32_mac` puts ESP32 into UART boot mode and reads eFuse registers (0x60000078) — completely different from ESPCP SPI. Not needed for normal operation. |
 
 ## Changes Log
 
 | Date | Files Changed | What & Why |
 |------|---------------|------------|
 | 2026-03-09 | `peripherals/EspcpStub.cs` | Created full ESPCP stub peripheral (ISPIPeripheral + IGPIOReceiver) |
-| 2026-03-09 | `platforms/meadow-f7.repl` | Added `espcpStub: SPI.EspcpStub @ spi2` with Ready → gpioPortI@10 |
+| 2026-03-09 | `platforms/meadow-f7.repl` | Added `espcpStub: SPI.EspcpStub @ spi2` with Ready → gpioPortI@10, MessageWaiting → gpioPortI@0 |
 | 2026-03-09 | `scripts/meadow-legacy.resc` | Added EspcpStub include, Reset call, SPI DMA bypass hook, debug traces |
 | 2026-03-09 | `scripts/meadow-legacy-headless.resc` | Same changes as interactive script |
 | 2026-03-09 | `tools/hcom_test.py` | Added `espmac` command (READ_ESP_MAC_ADDRESS 0x0117) for testing |
+| 2026-03-10 | `scripts/meadow-legacy*.resc` | Removed inert mq_inject hook (bl sites don't skip). Boot ESPCP works from real queued messages. |
+| 2026-03-10 | `README.md` | Moved detailed workarounds to KnownIssues_and_Errata.md, replaced with summary table |
+| 2026-03-10 | `KnownIssues_and_Errata.md` | Updated ESPCP sections, added IronPython crash pattern, documented FPU frame legacy unaffected |
 
 ## Open Questions
 1. **Renode ESP32 support:** Does Renode have an ESP32/Xtensa platform? If so, dual-machine emulation becomes much more viable.
-2. **ESPCP stub fidelity:** How much of the ESPCP protocol needs to be stubbed for Meadow.OS to boot with networking enabled? Minimum viable: system status + WiFi init responses.
+2. ~~**ESPCP stub fidelity:**~~ RESOLVED — Full ESPCP protocol implemented in EspcpStub.cs (Transport, System, WiFi, BLE).
 3. ~~**Mono runtime gate:**~~ RESOLVED — Bypassed at 0x08057bee (return 0 = not running).
 4. ~~**Ready GPIO propagation:**~~ RESOLVED — `sysbus.spi2.espcpStub Reset` after platform load works; GPIO IDR reflects the input correctly.
-5. **ESPCP polling CPU burn:** `espcp_thread` continuously re-queues `send_response` after the initial injection. This is normal firmware behavior but wastes emulation CPU. Consider throttling or sleeping the thread when idle.
-6. **ESP32 UART control signal emulation:** Current mq_receive injection is a one-shot workaround. For full fidelity, EspcpStub should send `+++MW` on a virtual USART3 so the firmware's `hcom_esp32_network_monitor_thread` triggers naturally. This would also enable `+++SIR` (SPI ready) and `+++RDY` (ready) signaling.
-7. **MINT system clarification:** `mint_config_interrupt` is for managed code GPIO interrupts (STM32F7 → Mono/.NET), NOT for ESPCP. Confirmed by engineer: "has nothing to do with ESPCP. It has to do with the code that sends interrupts from the STM32F7 to managed code."
+5. ~~**ESPCP polling CPU burn:**~~ RESOLVED — mq_inject removed; espcp_thread blocks on mq_receive harmlessly. If/when ESPCP exchange is triggered, re-queue loop behavior needs testing (EspcpStub clears MessageWaiting GPIO after response consumed, which should prevent re-queue).
+6. **USART3 not in legacy build:** `CONFIG_STM32F7_USART3` must be added to emulator build for post-boot ESPCP commands. This changes ttyS numbering (HCOM moves to ttyS2, needs CONFIG update) and requires full hook address re-scan. **Primary blocker for post-boot ESPCP.**
+7. ~~**MINT system clarification:**~~ RESOLVED — `mint_config_interrupt` is for managed code GPIO interrupts (STM32F7 → Mono/.NET), NOT for ESPCP. Confirmed by engineer.
+8. ~~**mq_inject crash root cause:**~~ RESOLVED — mq_inject hook was inert (bl instruction executes regardless of PC change in hook). The "crash" was unrelated. Boot ESPCP works from real queued messages.
+9. ~~**EspcpStub MessageWaiting GPIO re-queue behavior:**~~ N/A for boot — boot uses real mq messages, not GPIO-triggered re-queues. Post-boot GPIO behavior needs testing after USART3 is enabled.
+10. **READ_ESP_MAC uses different protocol:** `hcom_esp32_util_read_esp32_mac` talks to ESP32 via UART boot mode (esptool protocol), reading eFuse registers. Completely separate from ESPCP SPI. Not needed for normal Meadow.CLI operation (MAC addresses come from ESPCP boot exchange).

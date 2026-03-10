@@ -75,7 +75,7 @@ kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_BOARDCTL_USBDEVCTRL
 kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_USBDEV
 
 # Redirect HCOM from USB CDC-ACM to UART4
-# (UART4 is already enabled in legacy mono defconfig)
+# Device numbering: ttyS0=USART1 (console), ttyS1=UART4, ttyS2=UART5
 kconfig-tweak --file "$NUTTX_CONFIG" --set-str CONFIG_HCOM_COMMS_DEVICE_NAME /dev/ttyS1
 
 # Route syslog to serial console on USART1

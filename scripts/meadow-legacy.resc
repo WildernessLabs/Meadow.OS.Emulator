@@ -78,11 +78,20 @@ set spi_lock_skip "cpu.PC = cpu.LR"
 cpu AddHook 0x08147d0c $spi_lock_skip
 cpu AddHook 0x08147d18 $spi_lock_skip
 
-# Note: ESPCP mq_inject and throttle hooks removed — ESPCP thread blocks on
-# mq_receive harmlessly. HCOM works without triggering the SPI handshake.
-
 # Workaround: LSI clock calibration thread — skip to avoid burning CPU.
 set lsi_skip "cpu.PC = cpu.LR"
 cpu AddHook 0x0814d0d8 $lsi_skip
+
+# Post-boot ESPCP polling via mq_receive intercept.
+# Hook at mq_receive (0x08157130). When caller is espcp_thread (LR=0x0814de4b) and
+# poll flag at 0x2007FFF0 is set: inject send_response, espcp_thread polls EspcpStub.
+# Boot SPI exchanges happen through espcp_late_init directly (not through the queue).
+# To stop polling: sysbus WriteByte 0x2007FFF0 0
+set mq_intercept "from Antmicro.Renode.Peripherals.CPU import RegisterValue; lr = cpu.LR.RawValue; poll = machine.SystemBus.ReadByte(0x2007FFF0); [machine.SystemBus.WriteDoubleWord(cpu.GetRegisterUnsafe(1).RawValue, 0x2007C010), cpu.SetRegisterUnsafe(0, RegisterValue.Create(4, 32)), setattr(cpu, 'PC', cpu.LR)] if (lr == 0x0814de4b and poll == 1) else None"
+cpu AddHook 0x08157130 $mq_intercept
+
+# Enable ESPCP post-boot polling — set flag from espcp_thread entry (after BSS init).
+set espcp_poll_enable "machine.SystemBus.WriteByte(0x2007FFF0, 1)"
+cpu AddHook 0x0814de28 $espcp_poll_enable
 
 start

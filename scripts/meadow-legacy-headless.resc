@@ -31,6 +31,13 @@ usart1 CreateFileBackend @/tmp/renode-uart-legacy.txt true
 emulation CreateServerSocketTerminal 4242 "hcom" false
 connector Connect sysbus.uart4 hcom
 
+# UART5: ESP32 control signal channel — exposed as TCP socket on port 4243
+# Firmware's hcom_esp32_network_monitor_thread reads /dev/ttyS2 (UART5) for
+# control signals: +++MW (message waiting), +++SIR (SPI ready), +++RDY, +++RST
+emulation CreateServerSocketTerminal 4243 "esp32ctrl" false
+connector Connect sysbus.uart5 esp32ctrl
+
+
 # =============================================================================
 # IronPython hooks
 # Addresses extracted from: arm-none-eabi-nm build/legacy/nuttx.elf
@@ -60,7 +67,7 @@ cpu AddHook 0x0816135e $qspi_wait_skip
 cpu AddHook 0x08161270 $qspi_wait_skip
 
 # Workaround: QUADSPI doesn't drive DMA requests — bypass qspi_memory with direct memcpy.
-# qspi_memory = 0x0816136a
+# qspi_memory = 0x0816136a (entry point of qspi_memory function)
 # struct qspi_meminfo_s layout: flags(+0,u8) addrlen(+1,u8) dummies(+2,u8) pad(+3)
 #   buflen(+4,u16) cmd(+6,u16) addr(+8,u32) key(+12,u32) buffer(+16,ptr)
 # QSPIMEM_WRITE = 0x04
@@ -92,15 +99,27 @@ set spi_lock_skip "cpu.PC = cpu.LR"
 cpu AddHook 0x08147d0c $spi_lock_skip
 cpu AddHook 0x08147d18 $spi_lock_skip
 
-# Note: ESPCP mq_inject and message throttle hooks are not needed for basic HCOM
-# operation. The ESPCP thread blocks on mq_receive harmlessly. If full ESPCP SPI
-# handshake emulation is needed later, see conductor/tracks/renode-esp32/ for the
-# mq_inject approach (requires fixing Usage Fault from FPU frame mismatch).
-
 # Workaround: LSI clock calibration thread polls Timer 5 capture/compare which
 # Renode doesn't emulate. Skip the thread function to avoid burning CPU.
 # pwrmgmt_lsi_calc_prep_thread_func = 0x0814d0d8
 set lsi_skip "cpu.PC = cpu.LR"
 cpu AddHook 0x0814d0d8 $lsi_skip
+
+# Post-boot ESPCP polling via mq_receive intercept.
+# Hook at mq_receive (0x08157130) — fires for ALL mq_receive calls system-wide.
+# When caller is espcp_thread (LR=0x0814de4b) and poll flag at 0x2007FFF0 is set:
+#   inject send_response message (0x2007C010), set R0=4, return immediately.
+# espcp_thread continuously polls EspcpStub via SPI. EspcpStub returns events or "no data".
+# Boot SPI exchanges happen through espcp_late_init directly (not through the queue),
+# so this hook doesn't interfere with boot — espcp_thread's queue is empty during boot.
+# To stop polling: sysbus WriteByte 0x2007FFF0 0 (espcp_thread blocks on next mq_receive)
+set mq_intercept "from Antmicro.Renode.Peripherals.CPU import RegisterValue; lr = cpu.LR.RawValue; poll = machine.SystemBus.ReadByte(0x2007FFF0); [machine.SystemBus.WriteDoubleWord(cpu.GetRegisterUnsafe(1).RawValue, 0x2007C010), cpu.SetRegisterUnsafe(0, RegisterValue.Create(4, 32)), setattr(cpu, 'PC', cpu.LR)] if (lr == 0x0814de4b and poll == 1) else None"
+cpu AddHook 0x08157130 $mq_intercept
+
+# Enable ESPCP post-boot polling — set flag from espcp_thread entry (after BSS init).
+# espcp_thread (0x0814de28) starts after espcp_late_init runs boot SPI exchanges.
+# Flag is in upper SRAM2 (0x2007FFF0) — safe from BSS init but may overlap heap.
+set espcp_poll_enable "machine.SystemBus.WriteByte(0x2007FFF0, 1)"
+cpu AddHook 0x0814de28 $espcp_poll_enable
 
 start
