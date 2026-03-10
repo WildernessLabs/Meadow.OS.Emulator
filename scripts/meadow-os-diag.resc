@@ -20,13 +20,13 @@ emulation CreateServerSocketTerminal 4242 "hcom" false
 connector Connect sysbus.uart4 hcom
 
 # Hook arm_svcall to log cmd, R1, R2
-cpu AddHook 0x08002260 "regs = cpu.GetRegister(1).RawValue; cmd = machine.SystemBus.ReadDoubleWord(regs + 0x70); r1v = machine.SystemBus.ReadDoubleWord(regs + 0x74); r2v = machine.SystemBus.ReadDoubleWord(regs + 0x78); cpu.Log(LogLevel.Error, 'SVC cmd={0} R1=0x{1:X8} R2=0x{2:X8}'.format(cmd, r1v, r2v))"
+cpu AddHook 0x08002260 "regs = cpu.GetRegisterUnsafe(1).RawValue; cmd = machine.SystemBus.ReadDoubleWord(regs + 0x70); r1v = machine.SystemBus.ReadDoubleWord(regs + 0x74); r2v = machine.SystemBus.ReadDoubleWord(regs + 0x78); cpu.Log(LogLevel.Error, 'SVC cmd={0} R1=0x{1:X8} R2=0x{2:X8}'.format(cmd, r1v, r2v))"
 
 # Hook nxtask_start - also dump the PC from saved context to verify it's nxtask_start
-cpu AddHook 0x0801f168 "cpu.Log(LogLevel.Error, 'nxtask_start SP=0x{0:X8} R0=0x{1:X8}'.format(cpu.SP.RawValue, cpu.GetRegister(0).RawValue))"
+cpu AddHook 0x0801f168 "cpu.Log(LogLevel.Error, 'nxtask_start SP=0x{0:X8} R0=0x{1:X8}'.format(cpu.SP.RawValue, cpu.GetRegisterUnsafe(0).RawValue))"
 
 # Workaround: Force GPIO board version to CCMv2 (0x01).
-set gpio_ver_fix "sp = cpu.GetRegister(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 12, 0x01)"
+set gpio_ver_fix "sp = cpu.GetRegisterUnsafe(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 12, 0x01)"
 cpu AddHook 0x08002c60 $gpio_ver_fix
 
 # Workaround: Renode's STM32H7_QuadSPI doesn't set Transfer Complete Flag (TCF) in SR,
@@ -37,12 +37,12 @@ cpu AddHook 0x08033f74 $qspi_wait_skip
 # Workaround: QUADSPI doesn't drive DMA requests, so DMA transfers never complete.
 # Hook qspi_memory_dma to copy data directly from flash backing memory (0x90000000).
 # struct qspi_meminfo_s: flags(+0,u8) addrlen(+1,u8) dummies(+2,u8) cmd(+4,u16) buflen(+8,u32) addr(+12,u32) key(+16,u32) buffer(+20,ptr)
-set qspi_dma_bypass "meminfo = cpu.GetRegister(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 8); faddr = machine.SystemBus.ReadDoubleWord(meminfo + 12); buf = machine.SystemBus.ReadDoubleWord(meminfo + 20); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
+set qspi_dma_bypass "meminfo = cpu.GetRegisterUnsafe(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 8); faddr = machine.SystemBus.ReadDoubleWord(meminfo + 12); buf = machine.SystemBus.ReadDoubleWord(meminfo + 20); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
 cpu AddHook 0x0803415c $qspi_dma_bypass
 
 # Fix return value: qspi_memory_dma returns priv (non-zero) via R0.
 # Overwrite the stack slot where the caller stores R0 with 0 (success).
-set qspi_dma_fixret "sp = cpu.GetRegister(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 44, 0)"
+set qspi_dma_fixret "sp = cpu.GetRegisterUnsafe(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 44, 0)"
 cpu AddHook 0x080346c8 $qspi_dma_fixret
 
 # Workaround: LSI clock calibration thread polls Timer 5 capture/compare which
@@ -53,4 +53,4 @@ cpu AddHook 0x0800e07c $lsi_skip
 # Hook arm_doirq to detect context switch (when return value differs from input)
 # Can't easily hook return, but let's hook the ldmia to see what context is restored
 # Hook arm_doirq entry to log IRQ dispatch and context switches
-cpu AddHook 0x08001a18 "ctx = cpu.GetRegister(0).RawValue; cpu.Log(LogLevel.Error, 'arm_doirq IRQ={0} regs=0x{1:X8}'.format(ctx, cpu.GetRegister(1).RawValue))"
+cpu AddHook 0x08001a18 "ctx = cpu.GetRegisterUnsafe(0).RawValue; cpu.Log(LogLevel.Error, 'arm_doirq IRQ={0} regs=0x{1:X8}'.format(ctx, cpu.GetRegisterUnsafe(1).RawValue))"

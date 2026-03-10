@@ -34,7 +34,7 @@ cpu AddHook 0x080368bc $svc_fix
 cpu AddHook 0x080616a2 $svc_fix
 
 # Workaround: Force GPIO board version to CCMv2 (0x01).
-set gpio_ver_fix "sp = cpu.GetRegister(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 12, 0x01)"
+set gpio_ver_fix "sp = cpu.GetRegisterUnsafe(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 12, 0x01)"
 cpu AddHook 0x08002c60 $gpio_ver_fix
 
 # Workaround: Renode's STM32H7_QuadSPI doesn't set TCF in SR.
@@ -42,11 +42,11 @@ set qspi_wait_skip "cpu.PC = cpu.LR"
 cpu AddHook 0x08033f74 $qspi_wait_skip
 
 # Workaround: QUADSPI doesn't drive DMA requests.
-set qspi_dma_bypass "meminfo = cpu.GetRegister(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 8); faddr = machine.SystemBus.ReadDoubleWord(meminfo + 12); buf = machine.SystemBus.ReadDoubleWord(meminfo + 20); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
+set qspi_dma_bypass "meminfo = cpu.GetRegisterUnsafe(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 8); faddr = machine.SystemBus.ReadDoubleWord(meminfo + 12); buf = machine.SystemBus.ReadDoubleWord(meminfo + 20); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
 cpu AddHook 0x0803415c $qspi_dma_bypass
 
 # Fix return value for DMA bypass.
-set qspi_dma_fixret "sp = cpu.GetRegister(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 44, 0)"
+set qspi_dma_fixret "sp = cpu.GetRegisterUnsafe(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 44, 0)"
 cpu AddHook 0x080346c8 $qspi_dma_fixret
 
 # Workaround: LSI clock calibration thread polls Timer 5 capture/compare which
