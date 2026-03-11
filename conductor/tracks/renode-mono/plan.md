@@ -1,7 +1,7 @@
 # Plan: Mono Runtime Bring-Up in Emulator
 
 ## Track ID: `renode-mono`
-## Status: `in-progress` (Phase 2.5 — Mono JIT running but emulation too slow for full boot)
+## Status: `in-progress` (Phase 2.6 — need to switch Mono to interpreter mode)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -74,13 +74,41 @@
 - [x] **NEW BLOCKER**: Renode instruction emulation speed — 0.147s virtual time in 10 min real time
 - [ ] Estimated 16+ hours for Mono to complete JIT boot (15s emulated time needed)
 
-### 2.6 — Emulation Speed Solutions (TODO)
-- [ ] Option A: AOT compilation — pre-compile assemblies to native ARM code, skip JIT entirely
-- [ ] Option B: Pre-load JIT cache — snapshot Mono's compiled output after first run
-- [ ] Option C: Renode translation cache / block translation optimization
-- [ ] Option D: Use Mono --aot=full during build to produce native images
-- [ ] Option E: Run Mono's soft-float build (may avoid FPU emulation overhead)
-- [ ] Decision needed: which approach is most practical
+### 2.6 — Switch to Interpreter Mode (NEXT)
+Mono was running interpreted before JIT was enabled. Interpreter skips the native code
+generation phase entirely (no JIT compilation = no billions of ARM instructions for codegen).
+This should cut Mono boot from 16+ hours to minutes.
+
+- [ ] Find how Mono interpreter is enabled in the Meadow build (config flag, runtime arg, or build option)
+- [ ] Check if `mono_main_driver` accepts `--interpreter` or if there's a build-time `MONO_USE_INTERPRETER`
+- [ ] Check Meadow Mono build scripts for interpreter vs JIT config
+- [ ] Enable interpreter mode and test boot time
+- [ ] Verify assembly loading still works in interpreter mode
+- [ ] Verify UART/HCOM output from interpreted Mono
+
+### 2.7 — AOT Compilation (FUTURE)
+Ahead-of-time compilation pre-compiles IL → native ARM at build time. Longer-term goal that
+pairs well with the interpreter: AOT for the hot path, interpreter as fallback for anything
+that can't be AOT'd (generics, reflection, dynamic code).
+
+**Context**: Older Mono AOT has significant limitations — no dynamic generics, limited
+reflection support, no `Reflection.Emit`. Newer .NET/Mono versions fix much of this.
+The plan is to eventually move to newer .NET, which has better AOT + interpreter hybrid support.
+
+- [ ] Investigate Meadow Mono build config for AOT cross-compiler support
+- [ ] Determine if `mono --aot=full --aot-options=mtriple=armv7-...` works with Meadow's Mono fork
+- [ ] Identify which assemblies are AOT-safe vs need interpreter fallback
+- [ ] Build AOT native images for BCL assemblies (mscorlib, System, System.Core)
+- [ ] Deploy AOT images alongside IL assemblies in LittleFS
+- [ ] Test AOT + interpreter hybrid boot
+
+### 2.8 — Overnight JIT Validation Run (OPTIONAL)
+Let the JIT emulator run for 16+ hours to validate the full JIT path works end-to-end.
+Low priority — only useful as a correctness check, not a practical workflow.
+
+- [ ] Run emulator overnight with full JIT
+- [ ] Verify Mono completes initialization
+- [ ] Capture any errors or hangs beyond the JIT phase
 
 ## Phase 3: Application Execution
 
@@ -173,3 +201,6 @@ cc -o build_lfs_v1_image tools/build_lfs_v1_image.c /tmp/littlefs/lfs.c /tmp/lit
 | 2026-03-11 | C# SVC fix | `SvcPrimaskFix.cs` replaces IronPython svc_fix. Was the "stuck" bottleneck. |
 | 2026-03-11 | C# mq_intercept | `MqReceiveIntercept.cs` replaces IronPython. Fires on all mq_receive calls. |
 | 2026-03-11 | Emulation speed blocker | 0.147s virtual time in 10 min. Need AOT or cache solution for Mono JIT. |
+| 2026-03-11 | Interpreter first, AOT later | Mono ran interpreted before JIT was enabled — switch back for emulator. AOT is longer-term; older Mono AOT has limitations (no dynamic generics, limited reflection). Newer .NET/Mono fixes these. Plan: interpreter now, AOT + interpreter hybrid later. |
+| 2026-03-11 | No Renode state save | Rejected machine state snapshots — fragile across versions, not a real solution. |
+| 2026-03-11 | Overnight JIT run optional | Low priority correctness check only. Not blocking interpreter work. |
