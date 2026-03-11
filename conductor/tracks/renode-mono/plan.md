@@ -95,16 +95,28 @@ that can't be AOT'd (generics, reflection, dynamic code).
 reflection support, no `Reflection.Emit`. Newer .NET/Mono versions fix much of this.
 The plan is to eventually move to newer .NET, which has better AOT + interpreter hybrid support.
 
-- [ ] Investigate Meadow Mono build config for AOT cross-compiler support
+**Investigation findings (2026-03-11):** The Meadow firmware already whitelists AOT-related
+Mono runtime options in `hcom_mono_control.c`:
+- `--aot` — Ahead-of-time compiled assemblies
+- `--llvmonly` — LLVM-only compilation backend
+- `--llvmonly-interp` — LLVM with interpreter fallback (hybrid mode, ideal for emulator)
+These are passed through `meadow.config.yaml` `MonoControl.Options` field.
+The runtime parsing is ready; the gap is building AOT native images for the target assemblies.
+
+- [x] Investigate Meadow Mono build config for AOT cross-compiler support
+  - Runtime supports `--aot`, `--llvmonly`, `--llvmonly-interp` options (whitelisted)
+  - No AOT cross-compiler build infrastructure in repo yet (Mono binary is pre-built)
+  - Mono source/build scripts not in Meadow.OS repo — binary deployed directly
+- [ ] Find or build Mono AOT cross-compiler for ARMv7 (needs Mono source with `--enable-llvm`)
 - [ ] Determine if `mono --aot=full --aot-options=mtriple=armv7-...` works with Meadow's Mono fork
 - [ ] Identify which assemblies are AOT-safe vs need interpreter fallback
 - [ ] Build AOT native images for BCL assemblies (mscorlib, System, System.Core)
 - [ ] Deploy AOT images alongside IL assemblies in LittleFS
-- [ ] Test AOT + interpreter hybrid boot
+- [ ] Test `--llvmonly-interp` hybrid boot (AOT + interpreter fallback)
 
-### 2.8 — Overnight JIT Validation Run (OPTIONAL)
-Let the JIT emulator run for 16+ hours to validate the full JIT path works end-to-end.
-Low priority — only useful as a correctness check, not a practical workflow.
+### 2.8 — Overnight Interpreter Validation Run (IN PROGRESS)
+Running emulator with `--interp` mode to validate interpreter boot end-to-end.
+Started 2026-03-11, logging to `/tmp/renode-mono-overnight.log` and `/tmp/renode-uart-legacy.txt`.
 
 - [ ] Run emulator overnight with full JIT
 - [ ] Verify Mono completes initialization
@@ -204,3 +216,5 @@ cc -o build_lfs_v1_image tools/build_lfs_v1_image.c /tmp/littlefs/lfs.c /tmp/lit
 | 2026-03-11 | Interpreter first, AOT later | Mono ran interpreted before JIT was enabled — switch back for emulator. AOT is longer-term; older Mono AOT has limitations (no dynamic generics, limited reflection). Newer .NET/Mono fixes these. Plan: interpreter now, AOT + interpreter hybrid later. |
 | 2026-03-11 | No Renode state save | Rejected machine state snapshots — fragile across versions, not a real solution. |
 | 2026-03-11 | Overnight JIT run optional | Low priority correctness check only. Not blocking interpreter work. |
+| 2026-03-11 | AOT runtime support confirmed | Firmware whitelists `--aot`, `--llvmonly`, `--llvmonly-interp`. No AOT cross-compiler built yet. |
+| 2026-03-11 | Started overnight interpreter run | `--interp` via `meadow.config.yaml` in LFS image. Logging to `/tmp/renode-mono-overnight.log`. |
