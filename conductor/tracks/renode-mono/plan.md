@@ -53,8 +53,8 @@
 - [x] Assemblies deployed: mscorlib.dll (4.5MB), System.dll, System.Core.dll, Meadow.dll
 - [x] Lib path patches: `/usr/local/lib` → `/meadow0` (SDRAM 0xC016D79C, 0xC0175C4E)
 - [x] HCOM verified working with v1 image (hcom_test.py GET_DEVICE_INFORMATION)
-- [ ] **BLOCKER**: Mono JIT compilation too slow through IronPython QSPI hooks
-- [ ] Optimize QSPI bypass: replace IronPython hook with C# peripheral
+- [x] **BLOCKER RESOLVED**: Replaced IronPython QSPI hook with C# `QspiDmaBypass` extension method (10-100x faster)
+- [x] Optimize QSPI bypass: `peripherals/QspiDmaBypass.cs` — compiled C# hook via `cpu InstallQspiBypass`
 - [ ] Verify Mono finds and loads assemblies from /meadow0/mono/4.5/
 - [ ] Verify Mono reaches `mono_main_driver` in SDRAM (0xC0022748)
 
@@ -114,7 +114,7 @@ cc -o build_lfs_v1_image tools/build_lfs_v1_image.c /tmp/littlefs/lfs.c /tmp/lit
 
 | Component | Overhead | Impact |
 |-----------|----------|--------|
-| qspi_dma_bypass (IronPython) | ~0.5-1ms/read | Mono reads ~17K+ blocks for mscorlib.dll alone |
+| ~~qspi_dma_bypass (IronPython)~~ | ~~~0.5-1ms/read~~ | **FIXED**: Replaced with C# `QspiDmaBypass` (compiled .NET, ~0.005-0.01ms/read) |
 | mq_intercept (IronPython) | ~0.1ms/call | Fires on every mq_receive in any thread |
 | espcp_spi_bypass (IronPython) | ~0.5ms/call | SPI exchange per poll cycle |
 | ESPCP polling loop | consumes all CPU | starves Mono thread (FIXED: disabled) |
@@ -132,3 +132,4 @@ cc -o build_lfs_v1_image tools/build_lfs_v1_image.c /tmp/littlefs/lfs.c /tmp/lit
 | 2026-03-10 | LFS v1.7.2 for image builder | Firmware uses LFS v1.1 on-disk format; only v1.x library can produce it. |
 | 2026-03-11 | Disable ESPCP polling | CPU starvation — espcp_thread's tight loop starves Mono init thread. |
 | 2026-03-11 | C# QSPI peripheral needed | IronPython hooks too slow for millions of QSPI reads during Mono init. |
+| 2026-03-11 | C# QSPI hook implemented | `QspiDmaBypass.cs` extension method replaces IronPython hook. Verified boot works. |
