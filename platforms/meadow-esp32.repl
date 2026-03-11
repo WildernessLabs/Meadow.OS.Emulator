@@ -9,7 +9,7 @@
 // Reset vector is at 0x40000400
 // ============================================================================
 rom: Memory.MappedMemory @ sysbus 0x40000000
-    size: 0x60000
+    size: 0x70000
 
 // Internal ROM 1 — used by ROM code
 rom1: Memory.MappedMemory @ sysbus 0x3FF90000
@@ -38,13 +38,26 @@ sram1Inst: Memory.MappedMemory @ sysbus 0x400A0000
 sram2: Memory.MappedMemory @ sysbus 0x3FFAE000
     size: 0x32000
 
+// Extended DRAM lower — covers 0x3FDC0000 - 0x3FF8FFFF
+// On real hardware, this is SRAM accessible via data bus when cache is configured.
+// ESP-IDF uses this region for heap, task stacks, and FreeRTOS data structures.
+sram2extLow: Memory.MappedMemory @ sysbus 0x3FDC0000
+    size: 0x140000
+
+// Extended DRAM upper — covers 0x3FFA0000 - 0x3FFADFFF
+// Bridges the gap between rom1 (0x3FF90000-0x3FF9FFFF) and sram2 (0x3FFAE000)
+sram2extHigh: Memory.MappedMemory @ sysbus 0x3FFA0000
+    size: 0xE000
+
 // ============================================================================
 // RTC Memory
 // ============================================================================
 
-// RTC FAST memory — 8KB (data bus)
+// RTC FAST memory + padding — covers 0x3FF80000 - 0x3FF8FFFF
+// Real RTC FAST is 8KB (0x3FF80000-0x3FF81FFF), but firmware accesses
+// up to 0x3FF8FFFF (heap metadata / stack spill). Extend to fill gap before rom1.
 rtcFastData: Memory.MappedMemory @ sysbus 0x3FF80000
-    size: 0x2000
+    size: 0x10000
 
 // RTC FAST memory — instruction bus alias
 rtcFastInst: Memory.MappedMemory @ sysbus 0x400C0000
@@ -89,9 +102,8 @@ uart0: UART.ESP32_UART @ sysbus 0x3FF40000
 // ============================================================================
 
 // DPORT registers (system/clock/reset control + interrupt matrix)
-// Covers 0x3FF00000 - 0x3FF00FFF — includes DPORT and interrupt matrix registers
-dport: Memory.MappedMemory @ sysbus 0x3FF00000
-    size: 0x1000
+// Custom peripheral: auto-sets cache flush done bits
+dport: Miscellaneous.ESP32_DPORT @ sysbus 0x3FF00000
 
 // GPIO registers
 gpio: Memory.MappedMemory @ sysbus 0x3FF44000
@@ -102,16 +114,15 @@ ioMux: Memory.MappedMemory @ sysbus 0x3FF49000
     size: 0x1000
 
 // RTC_CNTL registers (RTC control, power management, brown-out)
-rtcCntl: Memory.MappedMemory @ sysbus 0x3FF48000
-    size: 0x1000
+// Custom peripheral: auto-sets TIME_VALID bit when TIME_UPDATE is polled
+rtcCntl: Miscellaneous.ESP32_RTC_CNTL @ sysbus 0x3FF48000
 
 // Timer Group 0
-timerGroup0: Memory.MappedMemory @ sysbus 0x3FF5F000
-    size: 0x1000
+// Custom peripheral: auto-sets RTC_CALI_RDY bit for clock calibration
+timerGroup0: Timers.ESP32_TimerGroup @ sysbus 0x3FF5F000
 
 // Timer Group 1
-timerGroup1: Memory.MappedMemory @ sysbus 0x3FF60000
-    size: 0x1000
+timerGroup1: Timers.ESP32_TimerGroup @ sysbus 0x3FF60000
 
 // SPI0 controller (flash interface)
 spi0: Memory.MappedMemory @ sysbus 0x3FF43000

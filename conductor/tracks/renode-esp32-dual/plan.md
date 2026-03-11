@@ -1,7 +1,7 @@
 # Plan: Dual-Machine ESP32 Emulation
 
 ## Track ID: `renode-esp32-dual`
-## Status: `in-progress` (Phase 1.1 ✅, Phase 1.2 ✅, Phase 1.3 partially complete)
+## Status: `in-progress` (Phase 1.1 ✅, Phase 1.2 ✅, Phase 1.3 in-progress — ROM loaded, firmware reaches start_cpu0_default)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -46,11 +46,26 @@
   - RTC FAST: 100 bytes at 0x3FF80000
 - [x] Created window init trampoline at 0x4009F000 (inits WINDOWBASE/START/PS, call0 → entry point)
 - [x] Firmware executes without crashes or bus errors (no WARNING/ERROR in 3s of execution)
-- [ ] Firmware ends at 0x400003C0 (ROM region — exception/reset vector, ROM is empty)
-  - Need to populate ROM with bootloader or add exception handler stubs
-- [ ] Catalog all hardware accesses that fail (WiFi, BLE, flash controller, etc.)
-- [ ] Determine minimum set of peripheral stubs needed
-- [ ] Add proper startup (ESP32 ROM bootloader code or equivalent init sequence)
+- [x] Loaded real ESP32 ROM binary (esp32-v3-rom.bin from Espressif's QEMU repo)
+  - ROM provides exception vectors, window handlers, ets_printf, cache control, etc.
+  - 445KB at 0x40000000, documented in `roms/README.md`
+- [x] Created custom C# peripherals for reactive status bits:
+  - `ESP32_RTC_CNTL.cs` — auto-sets TIME_VALID when TIME_UPDATE polled
+  - `ESP32_TimerGroup.cs` — auto-sets RTC_CALI_RDY for clock calibration
+  - `ESP32_DPORT.cs` — auto-sets CACHE_FLUSH_DONE for cache operations
+- [x] Extended DRAM regions to cover firmware heap/stack usage (0x3FDC0000-0x3FFADFFF)
+- [x] Binary patches in boot script for Renode Xtensa limitations:
+  - FPU user registers (rur/wur f64r_lo/hi/f64s) — Renode doesn't implement, patched with ret.n
+  - External register read (rer) — Renode doesn't support, replaced with movi a2, 0
+  - ets_delay_us — patched to return immediately (CCOUNT-based delays stall emulator)
+- [x] Pre-initialized g_ticks_per_us (240 for 240MHz — normally set by ROM bootloader)
+- [x] Hook to set app_cpu_started flag (BSS clearing zeros pre-set values)
+- [x] Firmware boot reaches `start_cpu0_default` (heap init, clock init, cache flush all pass)
+- [ ] Crash in first `malloc` call within `esp_setup_syscall_table`
+  - Likely: interrupt/lock subsystem not properly initialized for FreeRTOS mutexes
+  - Next: debug malloc → spinlock → interrupt path to find missing peripheral stub
+- [ ] No UART output yet (crash happens before UART init completes)
+- [ ] Catalog all remaining hardware accesses that fail
 
 ## Phase 2: SPI Bridge Peripheral
 
@@ -144,6 +159,10 @@
 | 2026-03-10 | Trampoline for ESP-IDF ELF loading | ESP-IDF ELF entry point (`call_start_cpu0` at 0x40081BBC) uses `entry` instruction. Can't set window registers via Renode API — must use a code trampoline at 0x4009F000. |
 | 2026-03-10 | IRAM +1KB patch for emulator build | Meadow firmware overflows IRAM by 652 bytes with toolchain `esp-2020r3`. Patching `esp32_out.ld` to extend `iram0_0_seg` by 1KB works. Root cause likely: slightly different code generation vs production build env. |
 | 2026-03-10 | CMake 3.28 required | CMake 4.x removed compatibility with `cmake_minimum_required(VERSION 2.6)` used by ESP-IDF 4.2.4's mbedtls. Downloaded CMake 3.28.6 to `/tmp/`. |
+| 2026-03-10 | Use real ESP32 ROM binary | Espressif distributes ROM in their QEMU fork (github.com/espressif/qemu, esp-develop branch). Provides full exception vectors, ROM utility functions. Much better than hand-writing stubs. |
+| 2026-03-10 | Custom C# peripherals for status bits | MappedMemory can't auto-set "done" flags. Created ESP32_RTC_CNTL, ESP32_TimerGroup, ESP32_DPORT with reactive reads. Pattern: return stored value OR'd with required status bits. |
+| 2026-03-10 | Patch ets_delay_us to NOP | CCOUNT-based delays stall emulator indefinitely. ROM delay function patched with immediate retw.n. Acceptable for boot bring-up; may need refinement for timing-sensitive code. |
+| 2026-03-10 | Hook for app_cpu_started | BSS clearing zeros any pre-set values. Used CPU hook at polling loop to set flag dynamically. Single-core emulation needs this to skip APP CPU wait. |
 
 ## Changes Log
 
@@ -157,3 +176,9 @@
 | 2026-03-10 | ESP-IDF toolchain | Installed xtensa-esp32-elf-gcc 8.4.0 at `~/.espressif/tools/`, cmake+ninja via Homebrew. ESP-IDF v4.2.4 cloned to `~/esp/esp-idf-v4.2.4/` (Python venv fixed, build works) |
 | 2026-03-10 | Meadow ESP32 firmware | Built MeadowComms.elf (17MB) + MeadowComms.bin (1.3MB) + bootloader.bin (25KB). Required stub `build_info.h` and IRAM size patch. |
 | 2026-03-10 | `/tmp/trampoline.elf` | Window register init trampoline at 0x4009F000 — loaded alongside MeadowComms.elf, PC set to 0x4009F008 |
+| 2026-03-10 | `roms/` directory | Downloaded esp32-v3-rom.bin (445KB) + esp32-v3-rom-app.bin from Espressif QEMU. Added .gitignore (bins not redistributable) + README.md with download instructions |
+| 2026-03-10 | `peripherals/ESP32_RTC_CNTL.cs` | Custom peripheral: auto-sets RTC_CNTL_TIME_VALID (bit 30 of TIME_UPDATE_REG) on read |
+| 2026-03-10 | `peripherals/ESP32_TimerGroup.cs` | Custom peripheral: auto-sets TIMG_RTC_CALI_RDY (bit 15 of RTCCALICFG_REG) on read |
+| 2026-03-10 | `peripherals/ESP32_DPORT.cs` | Custom peripheral: auto-sets CACHE_FLUSH_DONE (bit 5) on PRO/APP CACHE_CTRL reads |
+| 2026-03-10 | `scripts/esp32-meadow-boot.resc` | New boot script: loads ROM + firmware + trampoline, patches FPU/rer/delay instructions, hooks app_cpu_started |
+| 2026-03-10 | `platforms/meadow-esp32.repl` | Expanded ROM to 0x70000, added sram2extLow/High, replaced DPORT/RTC_CNTL/TimerGroup MappedMemory with custom C# peripherals |

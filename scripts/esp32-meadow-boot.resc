@@ -1,0 +1,76 @@
+## ESP32 Meadow Firmware Boot — loads real ROM + Meadow ESP-IDF firmware
+##
+## Prerequisites:
+##   1. ROM binary: roms/esp32-v3-rom.bin (see roms/README.md)
+##   2. Meadow firmware: build MeadowComms.elf from Meadow.OS/esp32/
+##
+## Usage (headless):
+##   cd /path/to/Meadow.OS.Emulator-esp32-dual
+##   mono /Applications/Renode.app/Contents/MacOS/bin/Renode.exe --console --disable-xwt \
+##     -e 'include @scripts/esp32-meadow-boot.resc; start'
+##
+## Usage (GUI):
+##   mono /Applications/Renode.app/Contents/MacOS/bin/Renode.exe \
+##     -e 'include @scripts/esp32-meadow-boot.resc; start'
+
+using sysbus
+
+# Compile custom C# peripherals
+include @peripherals/ESP32_RTC_CNTL.cs
+include @peripherals/ESP32_TimerGroup.cs
+include @peripherals/ESP32_DPORT.cs
+
+# Create the ESP32 machine
+mach create "esp32"
+machine LoadPlatformDescription @platforms/meadow-esp32.repl
+
+# Set up UART terminal on port 4245
+emulation CreateServerSocketTerminal 4245 "esp32uart" false
+connector Connect uart0 esp32uart
+
+# Load the ESP32 ROM binary at 0x40000000
+# This provides exception vectors, window handlers, and ROM utility functions
+sysbus LoadBinary @roms/esp32-v3-rom.bin 0x40000000
+
+# Load the Meadow ESP32 firmware ELF
+# Sections: DROM @ 0x3F400020, DRAM @ 0x3FFBDB60, IRAM @ 0x40080000, IROM @ 0x400D0020
+sysbus LoadELF @/Users/bryancostanich/Git_Repos/Wilderness_Labs/Meadow.OS/esp32/build/MeadowComms.elf
+
+# Set PC to the firmware entry point (call_start_cpu0)
+# The ROM has proper window handlers now, so we can use the trampoline
+# to initialize window registers then jump to the entry point.
+sysbus LoadELF @/tmp/trampoline.elf
+cpu PC 0x4009F008
+
+# Patch unimplemented FPU user register instructions (rur/wur f64r_lo/hi, f64s)
+# Renode's Xtensa CPU doesn't support these. Insert early ret.n before FPU instructions.
+# xthal_save_extra_nw: insert ret.n at 0x40094499 (before rur.f64r_lo)
+sysbus WriteByte 0x40094499 0x0D
+sysbus WriteByte 0x4009449A 0xF0
+# xthal_restore_extra_nw: insert ret.n at 0x40094459 (before l32i.n/wur.f64r_lo)
+sysbus WriteByte 0x40094459 0x0D
+sysbus WriteByte 0x4009445A 0xF0
+# esp_cpu_in_ocd_debug_mode: replace rer a2,a2 with movi a2, 0 (not in debug mode)
+sysbus WriteByte 0x40081452 0x00
+sysbus WriteByte 0x40081453 0xA0
+sysbus WriteByte 0x40081454 0x22
+
+# Patch ets_delay_us in ROM to return immediately.
+# Without this, CCOUNT-based delays in clock init stall the emulator.
+# ets_delay_us at 0x40008534: replace entry+body with entry+retw.n
+# entry a1, 32 (3 bytes) + retw.n (2 bytes)
+sysbus WriteByte 0x40008537 0x1D
+sysbus WriteByte 0x40008538 0xF0
+
+# Initialize g_ticks_per_us (normally set by ROM bootloader)
+# 240 MHz CPU = 240 ticks per microsecond
+# g_ticks_per_us_pro @ 0x3FFE01E0, g_ticks_per_us_app @ 0x3FFE40F0
+sysbus WriteDoubleWord 0x3FFE01E0 0x000000F0
+sysbus WriteDoubleWord 0x3FFE40F0 0x000000F0
+
+# Hook: set app_cpu_started flag when firmware reaches the polling loop.
+# Can't pre-set because BSS clearing zeros it. Set it at the check point.
+# 0x40081D50: l8ui a4, a2, 0 (reads app_cpu_started before bnez check)
+cpu AddHook 0x40081D50 "self.Bus.WriteByte(0x3FFC91A8, 1)"
+
+log "ESP32 Meadow boot ready (ROM + firmware loaded). Use 'start' to run."
