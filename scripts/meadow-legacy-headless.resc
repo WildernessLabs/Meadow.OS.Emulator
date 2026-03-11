@@ -25,11 +25,28 @@ sysbus LoadBinary @build/legacy/nuttx_user.bin 0x08040000
 sysbus LoadBinary @build/legacy/nuttx_vectors.bin 0x08040000
 sysbus LoadBinary @build/legacy/nuttx_kernel.bin 0x08140000
 
-# Mono runtime — load into BOTH QSPI flash (0x90000000) for kernel signature check
-# and SDRAM (0xC0000000) where it actually executes. On real hardware, the firmware
-# reads from QSPI flash and copies to SDRAM. Here we pre-load both.
+# Mono runtime — load into QSPI flash and SDRAM.
+# nuttx_mono.bin starts with the .mono code section (ELF linker address 0xC0000020) and does
+# NOT include the 32-byte .mono_signature header. Load original binary into QSPI (for kernel
+# reads), and the aligned binary (32 zero bytes prepended) into SDRAM so code lands at the
+# correct ELF addresses. Then fill the 32-byte signature gap at 0xC0000000 with the first
+# bytes of the original binary so the firmware's Mono presence check sees non-zero data.
 sysbus LoadBinary @build/legacy/nuttx_mono.bin 0x90000000
-sysbus LoadBinary @build/legacy/nuttx_mono.bin 0xC0000000
+sysbus LoadBinary @build/legacy/nuttx_mono_aligned.bin 0xC0000000
+# Fill the 32-byte signature gap at 0xC0000000
+sysbus WriteDoubleWord 0xC0000000 0x477008C0
+sysbus WriteDoubleWord 0xC0000004 0x6849680B
+sysbus WriteDoubleWord 0xC0000008 0x4718681B
+sysbus WriteDoubleWord 0xC000000C 0x21002201
+sysbus WriteDoubleWord 0xC0000010 0xBB71F004
+sysbus WriteDoubleWord 0xC0000014 0xE92D4B23
+sysbus WriteDoubleWord 0xC0000018 0xF8D341F0
+sysbus WriteDoubleWord 0xC000001C 0x250030F0
+
+# LittleFS filesystem image — pre-populated with Mono BCL assemblies
+# File System partition starts at QSPI offset 0x500000 (see UART: "File System - Offset:0x00500000")
+# Built by: tools/build_lfs_v1_image (LFS v1.7.2 format, compatible with legacy firmware)
+sysbus LoadBinary @build/legacy/littlefs.bin 0x90500000
 
 sysbus.cpu VectorTableOffset 0x08040000
 
@@ -158,10 +175,32 @@ cpu AddHook 0x0814dbe8 $lsi_skip
 set mq_intercept "from Antmicro.Renode.Peripherals.CPU import RegisterValue; lr = cpu.LR.RawValue; poll = machine.SystemBus.ReadByte(0x2007FFF0); [machine.SystemBus.WriteDoubleWord(cpu.GetRegisterUnsafe(1).RawValue, 0x2007C010), cpu.SetRegisterUnsafe(0, RegisterValue.Create(4, 32)), setattr(cpu, 'PC', cpu.LR)] if (lr == 0x0814e95b and poll == 1) else None"
 cpu AddHook 0x08157c40 $mq_intercept
 
-# Enable ESPCP post-boot polling — set flag from espcp_thread entry (after BSS init).
-# espcp_thread (0x0814e938) starts after espcp_late_init runs boot SPI exchanges.
-# Flag is in upper SRAM2 (0x2007FFF0) — safe from BSS init but may overlap heap.
-set espcp_poll_enable "machine.SystemBus.WriteByte(0x2007FFF0, 1)"
-cpu AddHook 0x0814e938 $espcp_poll_enable
+# ESPCP post-boot polling disabled during Mono init to avoid CPU starvation.
+# Enable later via: sysbus WriteByte 0x2007FFF0 1
+# set espcp_poll_enable "machine.SystemBus.WriteByte(0x2007FFF0, 1)"
+# cpu AddHook 0x0814e938 $espcp_poll_enable
+
+# Workaround: Mono was built with --prefix=/usr/local (default), so its compiled-in lib
+# directory is "/usr/local/lib" and it looks for BCL at /usr/local/lib/mono/4.5/.
+# Patch the string in SDRAM to "/meadow0" so Mono looks at /meadow0/mono/4.5/ instead.
+# The LittleFS image has assemblies at /mono/4.5/ which maps to /meadow0/mono/4.5/.
+# String "/usr/local/lib\0" at SDRAM 0xC016D79C → "/meadow0\0\0\0\0\0\0\0"
+sysbus WriteDoubleWord 0xC016D79C 0x61656D2F
+sysbus WriteDoubleWord 0xC016D7A0 0x30776F64
+sysbus WriteDoubleWord 0xC016D7A4 0x00000000
+sysbus WriteByte 0xC016D7A8 0x00
+sysbus WriteByte 0xC016D7A9 0x00
+# Also patch "/usr/local/etc\0" at SDRAM 0xC0175C4E → "/meadow0\0"
+sysbus WriteDoubleWord 0xC0175C4E 0x61656D2F
+sysbus WriteDoubleWord 0xC0175C52 0x30776F64
+sysbus WriteDoubleWord 0xC0175C56 0x00000000
+
+# Workaround: Prevent LittleFS format from wiping pre-populated filesystem data.
+# The firmware tries mount first (NULL options); if that fails with -EFAULT/-EINVAL,
+# it retries with "forceformat" which calls lfs_format() before lfs_mount().
+# Skip lfs_format entirely (return 0 = LFS_ERR_OK) to preserve our BCL assemblies.
+# lfs_format = 0x08171df6
+set lfs_format_skip "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
+cpu AddHook 0x08171df6 $lfs_format_skip
 
 start
