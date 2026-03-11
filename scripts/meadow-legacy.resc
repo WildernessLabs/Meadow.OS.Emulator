@@ -10,6 +10,9 @@ machine PyDevFromFile @scripts/pydev/rcc.py 0x40023800 0x400 true "rcc"
 # USB OTG FS stub — handles GRSTCTL polling (AHBIDL bit)
 machine PyDevFromFile @scripts/pydev/otg_fs.py 0x50000000 0x40000 true "otg_fs"
 
+# FMC (Flexible Memory Controller) stub — SDRAM init writes to 0xA0000000
+machine PyDevFromFile @scripts/pydev/fmc.py 0xA0000000 0x1000 true "fmc"
+
 # ESP32 coprocessor stub — starts booted and ready for SPI
 # Re-trigger Reset after platform load so Ready/MessageWaiting GPIOs propagate
 sysbus.spi2.espcpStub Reset
@@ -21,6 +24,12 @@ sysbus.spi2.espcpStub Reset
 sysbus LoadBinary @build/legacy/nuttx_user.bin 0x08040000
 sysbus LoadBinary @build/legacy/nuttx_vectors.bin 0x08040000
 sysbus LoadBinary @build/legacy/nuttx_kernel.bin 0x08140000
+
+# Mono runtime — load into BOTH QSPI flash (0x90000000) for kernel signature check
+# and SDRAM (0xC0000000) where it actually executes. On real hardware, the firmware
+# reads from QSPI flash and copies to SDRAM. Here we pre-load both.
+sysbus LoadBinary @build/legacy/nuttx_mono.bin 0x90000000
+sysbus LoadBinary @build/legacy/nuttx_mono.bin 0xC0000000
 
 sysbus.cpu VectorTableOffset 0x08040000
 
@@ -38,60 +47,76 @@ connector Connect sysbus.uart4 hcom
 
 # Workaround: Renode skips SVC when PRIMASK=1 instead of escalating to HardFault.
 set svc_fix "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.PRIMASK = RegisterValue.Create(0, 32)"
-cpu AddHook 0x08162f72 $svc_fix
-cpu AddHook 0x081631be $svc_fix
-cpu AddHook 0x081631ce $svc_fix
-cpu AddHook 0x081631d8 $svc_fix
-cpu AddHook 0x081631e4 $svc_fix
-cpu AddHook 0x0817b148 $svc_fix
+cpu AddHook 0x08163b5a $svc_fix
+cpu AddHook 0x08163da6 $svc_fix
+cpu AddHook 0x08163db6 $svc_fix
+cpu AddHook 0x08163dc0 $svc_fix
+cpu AddHook 0x08163dcc $svc_fix
+cpu AddHook 0x0817bd30 $svc_fix
 
 # Workaround: Force GPIO board version to CCMv2 (3).
-set gpio_ver_fix "machine.SystemBus.WriteByte(0x20020ce4, 1); machine.SystemBus.WriteDoubleWord(0x20020ce8, 3); cpu.PC = cpu.LR"
-cpu AddHook 0x08140d64 $gpio_ver_fix
+set gpio_ver_fix "machine.SystemBus.WriteByte(0x20020e74, 1); machine.SystemBus.WriteDoubleWord(0x20020e78, 3); cpu.PC = cpu.LR"
+cpu AddHook 0x08141970 $gpio_ver_fix
 
 # Workaround: Renode's STM32H7_QuadSPI doesn't set TCF in SR.
 set qspi_wait_skip "cpu.PC = cpu.LR"
-cpu AddHook 0x0816135e $qspi_wait_skip
-cpu AddHook 0x08161270 $qspi_wait_skip
+cpu AddHook 0x08161f46 $qspi_wait_skip
+cpu AddHook 0x08161e58 $qspi_wait_skip
 
 # Workaround: QUADSPI doesn't drive DMA requests — bypass qspi_memory with direct memcpy.
 set qspi_dma_bypass "meminfo = cpu.GetRegisterUnsafe(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 4) & 0xFFFF; faddr = machine.SystemBus.ReadDoubleWord(meminfo + 8); buf = machine.SystemBus.ReadDoubleWord(meminfo + 16); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
-cpu AddHook 0x0816136a $qspi_dma_bypass
+cpu AddHook 0x08161f52 $qspi_dma_bypass
+
+# Workaround: Mono runtime binary is pre-loaded into SDRAM via LoadBinary, but the firmware
+# tries to copy it from QSPI flash (which is empty). Bypass the copy function to return 0 (success).
+# hcom_via_nx_copy_mono_runtime_to_ram = 0x0805ebf0
+set mono_copy_bypass "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
+cpu AddHook 0x0805ebf0 $mono_copy_bypass
+
+# Workaround: Mono version check reads from QSPI flash MTD device (not memory-mapped).
+# The MTD read goes through SPI commands to the GenericSpiFlash model, which may not see
+# our LoadBinary data. Bypass hcom_nx_config_refresh_mono_version to write matching
+# version info (firmware version) directly into the config struct.
+# R0 = config pointer. config+0x5C = mono_version struct (44 bytes).
+# Write firmware version (0.0.0.0) to make version match check succeed.
+# config+0x30..0x3C = firmware version, config+0x5C..0x68 = mono version — must match.
+set mono_ver_bypass "r0 = cpu.GetRegisterUnsafe(0).RawValue; fw30 = machine.SystemBus.ReadDoubleWord(r0 + 0x30); fw34 = machine.SystemBus.ReadDoubleWord(r0 + 0x34); fw38 = machine.SystemBus.ReadDoubleWord(r0 + 0x38); fw3c = machine.SystemBus.ReadDoubleWord(r0 + 0x3c); machine.SystemBus.WriteDoubleWord(r0 + 0x5c, fw30); machine.SystemBus.WriteDoubleWord(r0 + 0x60, fw34); machine.SystemBus.WriteDoubleWord(r0 + 0x64, fw38); machine.SystemBus.WriteDoubleWord(r0 + 0x68, fw3c); cpu.PC = cpu.LR"
+cpu AddHook 0x08143590 $mono_ver_bypass
 
 # Workaround: Firmware gates ESP32 operations behind Mono runtime state. Bypass the
 # "is Mono running" check to always return 0 (not running).
 set mono_check_bypass "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
-cpu AddHook 0x08057bee $mono_check_bypass
+cpu AddHook 0x080618e6 $mono_check_bypass
 
 # Workaround: STM32SPI doesn't drive DMA — bypass espcp_send_data_over_spi with direct
 # peripheral calls.
 set espcp_spi_bypass "from System import Array, Byte; stub = [p.Peripheral for p in machine.GetRegisteredPeripherals() if type(p.Peripheral).__name__ == 'EspcpStub'][0]; tx = cpu.GetRegisterUnsafe(0).RawValue; rx = cpu.GetRegisterUnsafe(1).RawValue; length = int(cpu.GetRegisterUnsafe(2).RawValue); txdata = machine.SystemBus.ReadBytes(tx, length) if tx else Array.CreateInstance(Byte, length); rxarr = Array.CreateInstance(Byte, length); [rxarr.__setitem__(i, stub.Transmit(txdata[i])) for i in range(length)]; stub.FinishTransmission(); machine.SystemBus.WriteBytes(rxarr, rx) if rx else None; cpu.PC = cpu.LR"
-cpu AddHook 0x08147c94 $espcp_spi_bypass
+cpu AddHook 0x081488a0 $espcp_spi_bypass
 
 # Workaround: Force ESPCP initialization by setting selected network type to WiFi (1).
 # hcom_nx_setup_mgr gates espcp_late_init on config[8] & 0xFF — if 0, ESPCP is skipped.
 set espcp_force_init "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(5, RegisterValue.Create(1, 32))"
-cpu AddHook 0x08141144 $espcp_force_init
+cpu AddHook 0x08141d50 $espcp_force_init
 
 # Workaround: ESPCP SPI lock semaphore starts at 0 — skip lock/unlock since we bypass SPI.
 set spi_lock_skip "cpu.PC = cpu.LR"
-cpu AddHook 0x08147d0c $spi_lock_skip
-cpu AddHook 0x08147d18 $spi_lock_skip
+cpu AddHook 0x08148918 $spi_lock_skip
+cpu AddHook 0x08148924 $spi_lock_skip
 
 # Workaround: LSI clock calibration thread — skip to avoid burning CPU.
 set lsi_skip "cpu.PC = cpu.LR"
-cpu AddHook 0x0814d0d8 $lsi_skip
+cpu AddHook 0x0814dbe8 $lsi_skip
 
 # Post-boot ESPCP polling via mq_receive intercept.
-# Hook at mq_receive (0x08157130). When caller is espcp_thread (LR=0x0814de4b) and
+# Hook at mq_receive (0x08157c40). When caller is espcp_thread (LR=0x0814e95b) and
 # poll flag at 0x2007FFF0 is set: inject send_response, espcp_thread polls EspcpStub.
 # Boot SPI exchanges happen through espcp_late_init directly (not through the queue).
 # To stop polling: sysbus WriteByte 0x2007FFF0 0
-set mq_intercept "from Antmicro.Renode.Peripherals.CPU import RegisterValue; lr = cpu.LR.RawValue; poll = machine.SystemBus.ReadByte(0x2007FFF0); [machine.SystemBus.WriteDoubleWord(cpu.GetRegisterUnsafe(1).RawValue, 0x2007C010), cpu.SetRegisterUnsafe(0, RegisterValue.Create(4, 32)), setattr(cpu, 'PC', cpu.LR)] if (lr == 0x0814de4b and poll == 1) else None"
-cpu AddHook 0x08157130 $mq_intercept
+set mq_intercept "from Antmicro.Renode.Peripherals.CPU import RegisterValue; lr = cpu.LR.RawValue; poll = machine.SystemBus.ReadByte(0x2007FFF0); [machine.SystemBus.WriteDoubleWord(cpu.GetRegisterUnsafe(1).RawValue, 0x2007C010), cpu.SetRegisterUnsafe(0, RegisterValue.Create(4, 32)), setattr(cpu, 'PC', cpu.LR)] if (lr == 0x0814e95b and poll == 1) else None"
+cpu AddHook 0x08157c40 $mq_intercept
 
 # Enable ESPCP post-boot polling — set flag from espcp_thread entry (after BSS init).
 set espcp_poll_enable "machine.SystemBus.WriteByte(0x2007FFF0, 1)"
-cpu AddHook 0x0814de28 $espcp_poll_enable
+cpu AddHook 0x0814e938 $espcp_poll_enable
 
 start
