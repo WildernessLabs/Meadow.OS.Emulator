@@ -74,19 +74,22 @@ set mono_copy_bypass "from Antmicro.Renode.Peripherals.CPU import RegisterValue;
 cpu AddHook 0x0805ebf0 $mono_copy_bypass
 
 # Workaround: Mono version check reads from QSPI flash MTD device (not memory-mapped).
-# The MTD read goes through SPI commands to the GenericSpiFlash model, which may not see
-# our LoadBinary data. Bypass hcom_nx_config_refresh_mono_version to write matching
-# version info (firmware version) directly into the config struct.
-# R0 = config pointer. config+0x5C = mono_version struct (44 bytes).
-# Write firmware version (0.0.0.0) to make version match check succeed.
-# config+0x30..0x3C = firmware version, config+0x5C..0x68 = mono version — must match.
-set mono_ver_bypass "r0 = cpu.GetRegisterUnsafe(0).RawValue; fw30 = machine.SystemBus.ReadDoubleWord(r0 + 0x30); fw34 = machine.SystemBus.ReadDoubleWord(r0 + 0x34); fw38 = machine.SystemBus.ReadDoubleWord(r0 + 0x38); fw3c = machine.SystemBus.ReadDoubleWord(r0 + 0x3c); machine.SystemBus.WriteDoubleWord(r0 + 0x5c, fw30); machine.SystemBus.WriteDoubleWord(r0 + 0x60, fw34); machine.SystemBus.WriteDoubleWord(r0 + 0x64, fw38); machine.SystemBus.WriteDoubleWord(r0 + 0x68, fw3c); cpu.PC = cpu.LR"
+# Bypass hcom_nx_config_refresh_mono_version to write matching version info directly.
+# R0 = config pointer. Copy firmware version numbers (+0x30) to mono version (+0x5c),
+# and firmware version string pointer (+0x54) to mono version string (+0x80/+0x84).
+set mono_ver_bypass "r0 = cpu.GetRegisterUnsafe(0).RawValue; fw30 = machine.SystemBus.ReadDoubleWord(r0 + 0x30); fw34 = machine.SystemBus.ReadDoubleWord(r0 + 0x34); fw38 = machine.SystemBus.ReadDoubleWord(r0 + 0x38); fw3c = machine.SystemBus.ReadDoubleWord(r0 + 0x3c); machine.SystemBus.WriteDoubleWord(r0 + 0x5c, fw30); machine.SystemBus.WriteDoubleWord(r0 + 0x60, fw34); machine.SystemBus.WriteDoubleWord(r0 + 0x64, fw38); machine.SystemBus.WriteDoubleWord(r0 + 0x68, fw3c); fwstr = machine.SystemBus.ReadDoubleWord(r0 + 0x54); machine.SystemBus.WriteDoubleWord(r0 + 0x80, fwstr); machine.SystemBus.WriteDoubleWord(r0 + 0x84, fwstr); cpu.PC = cpu.LR"
 cpu AddHook 0x08143590 $mono_ver_bypass
 
-# Workaround: Firmware gates ESP32 operations behind Mono runtime state. Bypass the
-# "is Mono running" check to always return 0 (not running).
-set mono_check_bypass "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
-cpu AddHook 0x080618e6 $mono_check_bypass
+# Note: hcom_mono_ctrl_is_mono_enabled (0x080618e6) checks BBR bit 0x800.
+# With BBR defaulting to 0, it naturally returns 1 (enabled) — no bypass needed.
+
+# Workaround: Patch mono version string in deep-copied config (see headless for details).
+set mono_str_fix "r0 = cpu.GetRegisterUnsafe(0).RawValue; monostr = machine.SystemBus.ReadDoubleWord(r0 + 0x80); fwstr = machine.SystemBus.ReadDoubleWord(r0 + 0x54); [machine.SystemBus.WriteDoubleWord(r0 + 0x80, fwstr), machine.SystemBus.WriteDoubleWord(r0 + 0x84, fwstr)] if monostr == 0 else None"
+cpu AddHook 0x08061940 $mono_str_fix
+
+# Workaround: Bypass .NET assembly DLL check (none deployed yet).
+set asm_scan_bypass "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(4, RegisterValue.Create(0, 32))"
+cpu AddHook 0x08061a74 $asm_scan_bypass
 
 # Workaround: STM32SPI doesn't drive DMA — bypass espcp_send_data_over_spi with direct
 # peripheral calls.

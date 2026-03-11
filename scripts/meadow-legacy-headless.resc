@@ -93,16 +93,33 @@ cpu AddHook 0x0805ebf0 $mono_copy_bypass
 # The MTD read goes through SPI commands to the GenericSpiFlash model, which may not see
 # our LoadBinary data. Bypass hcom_nx_config_refresh_mono_version to write matching
 # version info (firmware version) directly into the config struct.
-# R0 = config pointer. config+0x5C = mono_version struct (44 bytes).
-# Write firmware version (0.0.0.0) to make version match check succeed.
-# config+0x30..0x3C = firmware version, config+0x5C..0x68 = mono version — must match.
-set mono_ver_bypass "r0 = cpu.GetRegisterUnsafe(0).RawValue; fw30 = machine.SystemBus.ReadDoubleWord(r0 + 0x30); fw34 = machine.SystemBus.ReadDoubleWord(r0 + 0x34); fw38 = machine.SystemBus.ReadDoubleWord(r0 + 0x38); fw3c = machine.SystemBus.ReadDoubleWord(r0 + 0x3c); machine.SystemBus.WriteDoubleWord(r0 + 0x5c, fw30); machine.SystemBus.WriteDoubleWord(r0 + 0x60, fw34); machine.SystemBus.WriteDoubleWord(r0 + 0x64, fw38); machine.SystemBus.WriteDoubleWord(r0 + 0x68, fw3c); cpu.PC = cpu.LR"
+# R0 = config pointer. Config layout:
+#   +0x30..0x3C = firmware version numbers (4 dwords)
+#   +0x54       = firmware short version string pointer
+#   +0x5C..0x68 = mono version numbers (must match firmware)
+#   +0x80       = mono short version string pointer (must be non-NULL)
+#   +0x84       = mono long version string pointer
+# Copy firmware version numbers to mono version, and copy firmware version string
+# pointer to mono version string pointer so the NULL check in start_mono_main passes.
+set mono_ver_bypass "r0 = cpu.GetRegisterUnsafe(0).RawValue; fw30 = machine.SystemBus.ReadDoubleWord(r0 + 0x30); fw34 = machine.SystemBus.ReadDoubleWord(r0 + 0x34); fw38 = machine.SystemBus.ReadDoubleWord(r0 + 0x38); fw3c = machine.SystemBus.ReadDoubleWord(r0 + 0x3c); machine.SystemBus.WriteDoubleWord(r0 + 0x5c, fw30); machine.SystemBus.WriteDoubleWord(r0 + 0x60, fw34); machine.SystemBus.WriteDoubleWord(r0 + 0x64, fw38); machine.SystemBus.WriteDoubleWord(r0 + 0x68, fw3c); fwstr = machine.SystemBus.ReadDoubleWord(r0 + 0x54); machine.SystemBus.WriteDoubleWord(r0 + 0x80, fwstr); machine.SystemBus.WriteDoubleWord(r0 + 0x84, fwstr); cpu.PC = cpu.LR"
 cpu AddHook 0x08143590 $mono_ver_bypass
 
-# Workaround: Firmware gates ESP32 operations behind Mono runtime state. Bypass the
-# "is Mono running" check to always return 0 (not running), allowing ESP32 HCOM commands.
-set mono_check_bypass "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
-cpu AddHook 0x080618e6 $mono_check_bypass
+# Note: hcom_mono_ctrl_is_mono_enabled (0x080618e6) checks BBR bit 0x800.
+# With BBR defaulting to 0, it naturally returns 1 (enabled) — no bypass needed.
+
+# Workaround: hcom_mono_ctrl_start_mono_main checks config+0x80 (mono version string).
+# The deep_copy_config doesn't copy our bypass-written value, so patch it directly.
+# Hook at 0x08061940 (after deep_copy_config returns non-NULL in R0/R4):
+# If config+0x80 is NULL, copy config+0x54 (firmware version string) to config+0x80.
+set mono_str_fix "r0 = cpu.GetRegisterUnsafe(0).RawValue; monostr = machine.SystemBus.ReadDoubleWord(r0 + 0x80); fwstr = machine.SystemBus.ReadDoubleWord(r0 + 0x54); [machine.SystemBus.WriteDoubleWord(r0 + 0x80, fwstr), machine.SystemBus.WriteDoubleWord(r0 + 0x84, fwstr)] if monostr == 0 else None"
+cpu AddHook 0x08061940 $mono_str_fix
+
+# Workaround: start_mono_main scans for .NET assembly DLLs on the filesystem.
+# Since no assemblies are deployed yet, bypass the check by forcing r4=0 (no missing files)
+# at the end of the scan loop. This lets Mono start even without assemblies.
+# hcom_mono_ctrl_start_mono_main+0x17c = 0x08061a74 (after scan loop, cmp r4, #0)
+set asm_scan_bypass "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(4, RegisterValue.Create(0, 32))"
+cpu AddHook 0x08061a74 $asm_scan_bypass
 
 # Workaround: STM32SPI doesn't drive DMA — bypass espcp_send_data_over_spi with direct
 # peripheral calls. Reads TX buffer from memory, feeds each byte through EspcpStub.Transmit(),
