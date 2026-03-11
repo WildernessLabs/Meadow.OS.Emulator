@@ -1,6 +1,7 @@
 using sysbus
 include @peripherals/Winbond_W25QXXXJV.cs
 include @peripherals/EspcpStub.cs
+include @peripherals/QspiDmaBypass.cs
 mach create "meadow-legacy"
 machine LoadPlatformDescription @platforms/meadow-f7.repl
 
@@ -94,11 +95,9 @@ cpu AddHook 0x08161e58 $qspi_wait_skip
 
 # Workaround: QUADSPI doesn't drive DMA requests — bypass qspi_memory with direct memcpy.
 # qspi_memory = 0x08161f52 (entry point of qspi_memory function)
-# struct qspi_meminfo_s layout: flags(+0,u8) addrlen(+1,u8) dummies(+2,u8) pad(+3)
-#   buflen(+4,u16) cmd(+6,u16) addr(+8,u32) key(+12,u32) buffer(+16,ptr)
-# QSPIMEM_WRITE = 0x04
-set qspi_dma_bypass "meminfo = cpu.GetRegisterUnsafe(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 4) & 0xFFFF; faddr = machine.SystemBus.ReadDoubleWord(meminfo + 8); buf = machine.SystemBus.ReadDoubleWord(meminfo + 16); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
-cpu AddHook 0x08161f52 $qspi_dma_bypass
+# Uses compiled C# hook (QspiDmaBypass.cs) instead of IronPython for 10-100x speedup.
+# Critical for Mono JIT which makes millions of QSPI reads during assembly loading.
+cpu InstallQspiBypass 0x08161f52 0x90000000
 
 # Workaround: Mono runtime binary is pre-loaded into SDRAM via LoadBinary, but the firmware
 # tries to copy it from QSPI flash (which is empty). Bypass the copy function to return 0 (success).
