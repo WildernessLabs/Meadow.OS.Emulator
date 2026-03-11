@@ -88,8 +88,14 @@ kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_SYSLOG_CONSOLE
 kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_SYSLOG_SERIAL_CONSOLE
 kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_SYSLOG_WRITE
 
-# Disable Mono app — requires cross-compiled Mono runtime (build separately)
-kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_EXAMPLES_MONO
+# Verify Mono runtime libraries exist (must be pre-built via Meadow/build-mono.sh)
+MONO_DIR="$MEADOW_DIR/mono/mono"
+if [ ! -f "$MONO_DIR/sgen/.libs/libmonosgen.a" ]; then
+    echo "ERROR: Mono runtime libraries not found at $MONO_DIR/sgen/.libs/"
+    echo "       Build Mono first: cd $MEADOW_DIR && ./build-mono.sh"
+    exit 1
+fi
+echo "--- Mono runtime libraries found ---"
 
 # Prevent reset loops in emulator
 kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_BOARD_RESET_ON_ASSERT 0
@@ -106,20 +112,6 @@ if [ -d "$MBEDTLS_DIR/library" ] && [ ! -f "$MBEDTLS_DIR/library/libmbedcrypto.a
             -I$NUTTX_DIR/include -I$NUTTX_DIR/include/nuttx/lib \
             -I$NUTTX_DIR/include/sys -nostdinc -nostdlib -fno-builtin -fno-common -Os"
 fi
-
-# Create mono_main stub (HCOM app calls it unconditionally but Mono isn't built)
-MONO_STUB_DIR="$SCRIPT_DIR/build/legacy"
-mkdir -p "$MONO_STUB_DIR"
-MONO_STUB_C="$MONO_STUB_DIR/mono_main_stub.c"
-MONO_STUB_O="$MONO_STUB_DIR/mono_main_stub.o"
-cat > "$MONO_STUB_C" << 'STUBEOF'
-/* Stub: mono_main is not available without the Mono runtime. */
-int mono_main(int argc, char *argv[]) { return 0; }
-STUBEOF
-echo "--- Compiling mono_main stub ---"
-arm-none-eabi-gcc -c -mthumb -mcpu=cortex-m7 -mfpu=fpv5-d16 -mfloat-abi=hard \
-    -I"$NUTTX_DIR/include" -o "$MONO_STUB_O" "$MONO_STUB_C"
-arm-none-eabi-ar rcs "$MONO_STUB_DIR/libmonostub.a" "$MONO_STUB_O"
 
 # Compute git hash for version injection
 GIT_HASH=$(git -C "$MEADOW_DIR" rev-parse --short HEAD 2>/dev/null || echo "00000000")
@@ -172,23 +164,10 @@ if grep -q '###VERSION_MAJOR###' "$USER_LD" 2>/dev/null; then
         -e "s/###BUILD_MINUTE###/$((10#$(date -u +%M)))/g" \
         -e "s/###BUILD_SECOND###/$((10#$(date -u +%S)))/g" \
         -e "s/###BUILD_HASH###/0x${GIT_HASH:-00000000}/g" \
-        -e 's/###MONO_GIT_REF###/\/\* mono not built \*\//g' \
+        -e "s/###MONO_GIT_REF###/$(git -C "$MEADOW_DIR/mono" rev-parse --short HEAD 2>/dev/null || echo 'emulator')/g" \
         "$USER_LD"
     rm -f "$USER_LD.bak"
     RESTORE_USER_LD=true
-fi
-
-# Patch kernel Makefile: add MBEDTLS_AOBJS fallback (not set when CONFIG_EXAMPLES_MONO=n)
-# and mono stub library. Keep LD=ld.lld — it's the correct linker (from toolchain/macos).
-KERNEL_MAKEFILE="$NUTTX_DIR/configs/stm32f777zit6-meadow/kernel/Makefile"
-MBEDTLS_LIB_DIR="$MEADOW_DIR/mbedtls/library"
-if ! grep -q 'MBEDTLS_AOBJS ?=' "$KERNEL_MAKEFILE" 2>/dev/null; then
-    echo "--- Patching kernel Makefile: adding MBEDTLS_AOBJS fallback ---"
-    cp "$KERNEL_MAKEFILE" "$KERNEL_MAKEFILE.emubak"
-    sed -i.bak "/^LD=ld.lld/a\\
-MBEDTLS_AOBJS ?= $MBEDTLS_LIB_DIR/libmbedcrypto.a $MBEDTLS_LIB_DIR/libmbedtls.a $MBEDTLS_LIB_DIR/libmbedx509.a $MONO_STUB_DIR/libmonostub.a" "$KERNEL_MAKEFILE"
-    rm -f "$KERNEL_MAKEFILE.bak"
-    RESTORE_KERNEL_MAKEFILE=true
 fi
 
 # Cleanup function to restore modified files
@@ -199,21 +178,19 @@ cleanup() {
     if [ "$RESTORE_USER_LD" = true ] && [ -f "$USER_LD.emubak" ]; then
         mv "$USER_LD.emubak" "$USER_LD"
     fi
-    if [ "$RESTORE_KERNEL_MAKEFILE" = true ] && [ -f "$KERNEL_MAKEFILE.emubak" ]; then
-        mv "$KERNEL_MAKEFILE.emubak" "$KERNEL_MAKEFILE"
-    fi
 }
 trap cleanup EXIT
 
-# Parallel job count — set MEADOW_ADDITIONAL_MAKE_OPTIONS=-j1 if link phase fails
+# Parallel job count — set MEADOW_ADDITIONAL_MAKE_OPTIONS=-j1 if all passes should be single-threaded
 JOBS="${MEADOW_ADDITIONAL_MAKE_OPTIONS:--j$(sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 
 # Build — legacy uses protected mode (pass2 → pass1deps → pass1)
 echo "--- Building mksyscall ---"
 $MAKE -C "$NUTTX_DIR/tools" -f Makefile.host mksyscall 2>/dev/null || true
 
+# pass2 uses -j1 to avoid ar race condition when building mono example into libapps.a
 echo "--- Building (PROTECTED mode, pass 2) ---"
-$MAKE $JOBS pass2
+$MAKE -j1 pass2
 
 echo "--- Building pass1 dependencies ---"
 $MAKE $JOBS pass1deps
@@ -248,6 +225,21 @@ arm-none-eabi-objcopy -O binary \
     --remove-section=.mono_bss \
     "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_user.bin"
 echo "--- Created nuttx_user.bin (mono sections stripped)"
+
+# 3a. Extract Mono runtime sections for SDRAM loading (0xC0000000)
+# These sections contain the Mono JIT/interpreter runtime linked at SDRAM addresses.
+# Renode loads them separately into the emulated SDRAM region.
+if arm-none-eabi-objdump -h "$NUTTX_DIR/nuttx_user.elf" | grep -q '\.mono '; then
+    arm-none-eabi-objcopy -O binary \
+        --only-section=.mono_signature \
+        --only-section=.mono \
+        --only-section=.mono_data \
+        --only-section=.mono_comment \
+        "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_mono.bin"
+    echo "--- Created nuttx_mono.bin (Mono runtime for SDRAM at 0xC0000000)"
+else
+    echo "--- WARNING: No .mono sections found in nuttx_user.elf"
+fi
 
 # 4. Also keep the full nuttx.bin for reference (production-style single binary)
 cp "$NUTTX_DIR/nuttx.bin" "$BUILD_DIR/nuttx.bin"
