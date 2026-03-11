@@ -44,6 +44,9 @@ namespace Antmicro.Renode.Hooks
             }
 
             var bus = machine.SystemBus;
+            long callCount = 0;
+            long totalBytes = 0;
+            var startTime = DateTime.UtcNow;
 
             cpu.AddHook(hookAddress, (ICpuSupportingGdb cpuArg, ulong pc) =>
             {
@@ -68,6 +71,19 @@ namespace Antmicro.Renode.Hooks
                         var data = bus.ReadBytes(flashBase + faddr, buflen);
                         bus.WriteBytes(data, buf);
                     }
+                }
+
+                callCount++;
+                totalBytes += buflen;
+
+                // Log stats every 1000 calls
+                if(callCount % 1000 == 0)
+                {
+                    var elapsed = (DateTime.UtcNow - startTime).TotalSeconds;
+                    var lr = arm.LR.RawValue;
+                    arm.Log(LogLevel.Info,
+                        "QspiDmaBypass: {0} calls, {1} KB transferred, {2:F1}s wall time, last flash addr=0x{3:X}, LR=0x{4:X8}",
+                        callCount, totalBytes / 1024, elapsed, faddr, lr);
                 }
 
                 // Return from function — set PC = LR

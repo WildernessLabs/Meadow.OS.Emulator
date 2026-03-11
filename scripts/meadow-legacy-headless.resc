@@ -2,6 +2,8 @@ using sysbus
 include @peripherals/Winbond_W25QXXXJV.cs
 include @peripherals/EspcpStub.cs
 include @peripherals/QspiDmaBypass.cs
+include @peripherals/SvcPrimaskFix.cs
+include @peripherals/MqReceiveIntercept.cs
 mach create "meadow-legacy"
 machine LoadPlatformDescription @platforms/meadow-f7.repl
 
@@ -72,13 +74,9 @@ connector Connect sysbus.uart5 esp32ctrl
 
 # Workaround: Renode skips SVC when PRIMASK=1 instead of escalating to HardFault.
 # SVC instruction addresses from: arm-none-eabi-objdump -d build/legacy/nuttx.elf | grep svc
-set svc_fix "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.PRIMASK = RegisterValue.Create(0, 32)"
-cpu AddHook 0x08163b5a $svc_fix
-cpu AddHook 0x08163da6 $svc_fix
-cpu AddHook 0x08163db6 $svc_fix
-cpu AddHook 0x08163dc0 $svc_fix
-cpu AddHook 0x08163dcc $svc_fix
-cpu AddHook 0x0817bd30 $svc_fix
+# Uses compiled C# hook (SvcPrimaskFix.cs) instead of IronPython for performance.
+# Critical for Mono JIT which makes thousands of syscalls/sec during assembly loading.
+cpu InstallSvcFix 0x08163b5a 0x08163da6 0x08163db6 0x08163dc0 0x08163dcc 0x0817bd30
 
 # Workaround: Force GPIO board version to CCMv2 (3).
 # Hook meadow_hw_version_find_device_ver (0x08141970) at entry.
@@ -164,15 +162,9 @@ set lsi_skip "cpu.PC = cpu.LR"
 cpu AddHook 0x0814dbe8 $lsi_skip
 
 # Post-boot ESPCP polling via mq_receive intercept.
-# Hook at mq_receive (0x08157c40) — fires for ALL mq_receive calls system-wide.
-# When caller is espcp_thread (LR=0x0814e95b) and poll flag at 0x2007FFF0 is set:
-#   inject send_response message (0x2007C010), set R0=4, return immediately.
-# espcp_thread continuously polls EspcpStub via SPI. EspcpStub returns events or "no data".
-# Boot SPI exchanges happen through espcp_late_init directly (not through the queue),
-# so this hook doesn't interfere with boot — espcp_thread's queue is empty during boot.
-# To stop polling: sysbus WriteByte 0x2007FFF0 0 (espcp_thread blocks on next mq_receive)
-set mq_intercept "from Antmicro.Renode.Peripherals.CPU import RegisterValue; lr = cpu.LR.RawValue; poll = machine.SystemBus.ReadByte(0x2007FFF0); [machine.SystemBus.WriteDoubleWord(cpu.GetRegisterUnsafe(1).RawValue, 0x2007C010), cpu.SetRegisterUnsafe(0, RegisterValue.Create(4, 32)), setattr(cpu, 'PC', cpu.LR)] if (lr == 0x0814e95b and poll == 1) else None"
-cpu AddHook 0x08157c40 $mq_intercept
+# Uses compiled C# hook (MqReceiveIntercept.cs) instead of IronPython for performance.
+# Fires on ALL mq_receive calls system-wide; must be fast.
+cpu InstallMqIntercept 0x08157c40 0x0814e95b 0x2007C010 0x2007FFF0
 
 # ESPCP post-boot polling disabled during Mono init to avoid CPU starvation.
 # Enable later via: sysbus WriteByte 0x2007FFF0 1
