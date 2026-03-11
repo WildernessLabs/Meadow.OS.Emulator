@@ -1,7 +1,7 @@
 # Plan: Mono Runtime Bring-Up in Emulator
 
 ## Track ID: `renode-mono`
-## Status: `in-progress` (Phase 2.2 — Mono task starts, crashes in assembly path setup)
+## Status: `in-progress` (Phase 2.3 — LFS v1 image with assemblies mounts, Mono init too slow)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -25,6 +25,7 @@
 - [x] Add SDRAM emulation to Renode platform (already in meadow-f7.repl)
 - [x] Add FMC stub (`scripts/pydev/fmc.py`) for SDRAM initialization sequence
 - [x] Mono binary loaded at both 0x90000000 (QSPI flash) and 0xC0000000 (SDRAM)
+- [x] Fix 32-byte alignment: `nuttx_mono_aligned.bin` (32 zero bytes prepended)
 - [ ] Check FPU requirements (Mono may use floating-point heavily)
 
 ## Phase 2: Boot Mono
@@ -41,14 +42,27 @@
 - [x] Bypass .NET assembly DLL presence check (`asm_scan_bypass`)
 - [x] Mono task (PID 13) successfully created via `task_create`
 - [x] `mono_main_proxy` → `mono_main` reached
-- [ ] Fix crash in `mono_set_assemblies_path` (MMFAR: 0xFFFFFFFC, invalid path pointer)
-- [ ] Get Mono to print runtime version or initialization success
+- [x] Fix crash in `mono_set_assemblies_path` — was caused by shifted binary (32-byte offset)
+- [x] Solution: `nuttx_mono_aligned.bin` puts code at correct ELF addresses
+- [x] Mono now executes real code (JIT compilation visible via I-cache invalidations)
 
-### 2.3 — Assembly Loading
-- [ ] Deploy .NET assemblies to LittleFS filesystem (mscorlib.dll, System.Core.dll, etc.)
-- [ ] Provide a test assembly (simple Meadow.NET app)
-- [ ] Verify Mono finds and loads assemblies
+### 2.3 — Assembly Loading (IN PROGRESS)
+- [x] Discover: legacy firmware uses LittleFS **v1.1** (disk version 0x00010001), NOT v2
+- [x] Build `tools/build_lfs_v1_image.c` using littlefs v1.7.2 library
+- [x] LFS v1 image mounts successfully on first try (no format needed)
+- [x] Assemblies deployed: mscorlib.dll (4.5MB), System.dll, System.Core.dll, Meadow.dll
+- [x] Lib path patches: `/usr/local/lib` → `/meadow0` (SDRAM 0xC016D79C, 0xC0175C4E)
+- [x] HCOM verified working with v1 image (hcom_test.py GET_DEVICE_INFORMATION)
+- [ ] **BLOCKER**: Mono JIT compilation too slow through IronPython QSPI hooks
+- [ ] Optimize QSPI bypass: replace IronPython hook with C# peripheral
+- [ ] Verify Mono finds and loads assemblies from /meadow0/mono/4.5/
 - [ ] Verify Mono reaches `mono_main_driver` in SDRAM (0xC0022748)
+
+### 2.4 — ESPCP CPU Starvation Fix
+- [x] Identified: ESPCP polling thread starves Mono of CPU time
+- [x] Disabled `espcp_poll_enable` hook during Mono init
+- [ ] Re-enable ESPCP polling AFTER Mono initialization completes
+- [ ] Consider throttled polling (sleep between polls)
 
 ## Phase 3: Application Execution
 
@@ -68,6 +82,24 @@
 
 ---
 
+## LittleFS Discovery Details
+
+**Root cause of all previous LFS mount failures:** The legacy firmware uses LittleFS v1.1 format (disk version 0x00010001). The NuttX repo's `lfs.c` was updated to v2.5 AFTER the legacy firmware was compiled. All v2-format images (from `tools/build_littlefs_image.py`, `tools/build_littlefs_image.c`, or littlefs-python) are incompatible.
+
+**Evidence:**
+- Firmware traces showed `lfs_mount` returning -EFAULT (-14, mapped from LFS_ERR_CORRUPT -84)
+- Captured firmware's `lfs_format` output: superblock has `version=0x00010001`, v1 metadata structure
+- All upstream LFS v2 versions (2.0.5 through 2.5.1) produce identical v2 format — none are v1 compatible
+- LFS v1 on-disk format: `rev(4) + size(4) + tail[2](8) + entries(type/elen/alen/nlen + data + name) + CRC(4)`
+
+**Solution:** `tools/build_lfs_v1_image.c` uses littlefs v1.7.2 library (checked out at `/tmp/littlefs/` from GitHub). Requires the v1.7.2 source to compile:
+```bash
+git clone --branch v1.7.2 https://github.com/littlefs-project/littlefs.git /tmp/littlefs
+cc -o build_lfs_v1_image tools/build_lfs_v1_image.c /tmp/littlefs/lfs.c /tmp/littlefs/lfs_util.c \
+  -I/tmp/littlefs -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR -DLFS_NO_ASSERT -O2
+./build_lfs_v1_image build/legacy/assemblies build/legacy/littlefs.bin
+```
+
 ## Hooks Required for Mono Startup
 
 | Hook | Address | Purpose |
@@ -76,25 +108,17 @@
 | `mono_ver_bypass` | 0x08143590 | Copy fw version to mono version fields + string ptrs |
 | `mono_str_fix` | 0x08061940 | Patch deep-copied config's mono version string (+0x80) |
 | `asm_scan_bypass` | 0x08061a74 | Skip .NET assembly DLL presence check |
+| `lfs_format_skip` | 0x08171df6 | Prevent LFS format from wiping pre-populated image |
 
-Config struct layout:
-- +0x30..0x3C = firmware version numbers (4 dwords)
-- +0x54 = firmware short version string pointer
-- +0x5C..0x68 = mono version numbers (must match firmware)
-- +0x80 = mono short version string pointer (must be non-NULL)
-- +0x84 = mono long version string pointer
+## Performance Analysis
 
-## Current Crash Details
-
-```
-up_memfault: PANIC!!! Memory Management Fault:
-  CFAULTS: 00000082 MMFAR: fffffffc
-  Data access violation
-  task: Mono (PID 13)
-  PC: c00d42e6 (mono_set_assemblies_path, assembly.c:458)
-  LR: 08068c8d (mono_main, mono_main.c:279)
-  R5: fffffffc (the invalid address being accessed)
-```
+| Component | Overhead | Impact |
+|-----------|----------|--------|
+| qspi_dma_bypass (IronPython) | ~0.5-1ms/read | Mono reads ~17K+ blocks for mscorlib.dll alone |
+| mq_intercept (IronPython) | ~0.1ms/call | Fires on every mq_receive in any thread |
+| espcp_spi_bypass (IronPython) | ~0.5ms/call | SPI exchange per poll cycle |
+| ESPCP polling loop | consumes all CPU | starves Mono thread (FIXED: disabled) |
+| Mono JIT compilation | billions of instructions | Hours of real time at emulated speed |
 
 ## Decision Log
 
@@ -104,3 +128,7 @@ up_memfault: PANIC!!! Memory Management Fault:
 | 2026-03-10 | Research-first approach | Mono build system is complex and may have undocumented dependencies. |
 | 2026-03-10 | Bypass assembly check | No DLLs deployed to filesystem yet; firmware refuses to start Mono otherwise. |
 | 2026-03-10 | Remove mono_check_bypass | Was returning "mono disabled" — same function used for is_mono_enabled check. |
+| 2026-03-10 | Use nuttx_mono_aligned.bin | 32-byte prepend puts code at correct ELF addresses (0xC0000020+). |
+| 2026-03-10 | LFS v1.7.2 for image builder | Firmware uses LFS v1.1 on-disk format; only v1.x library can produce it. |
+| 2026-03-11 | Disable ESPCP polling | CPU starvation — espcp_thread's tight loop starves Mono init thread. |
+| 2026-03-11 | C# QSPI peripheral needed | IronPython hooks too slow for millions of QSPI reads during Mono init. |
