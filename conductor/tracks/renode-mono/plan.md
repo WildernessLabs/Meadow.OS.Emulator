@@ -1,7 +1,7 @@
 # Plan: Mono Runtime Bring-Up in Emulator
 
 ## Track ID: `renode-mono`
-## Status: `in-progress` (Phase 2.3 — LFS v1 image with assemblies mounts, Mono init too slow)
+## Status: `in-progress` (Phase 2.5 — Mono JIT running but emulation too slow for full boot)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -46,7 +46,7 @@
 - [x] Solution: `nuttx_mono_aligned.bin` puts code at correct ELF addresses
 - [x] Mono now executes real code (JIT compilation visible via I-cache invalidations)
 
-### 2.3 — Assembly Loading (IN PROGRESS)
+### 2.3 — Assembly Loading
 - [x] Discover: legacy firmware uses LittleFS **v1.1** (disk version 0x00010001), NOT v2
 - [x] Build `tools/build_lfs_v1_image.c` using littlefs v1.7.2 library
 - [x] LFS v1 image mounts successfully on first try (no format needed)
@@ -55,14 +55,32 @@
 - [x] HCOM verified working with v1 image (hcom_test.py GET_DEVICE_INFORMATION)
 - [x] **BLOCKER RESOLVED**: Replaced IronPython QSPI hook with C# `QspiDmaBypass` extension method (10-100x faster)
 - [x] Optimize QSPI bypass: `peripherals/QspiDmaBypass.cs` — compiled C# hook via `cpu InstallQspiBypass`
-- [ ] Verify Mono finds and loads assemblies from /meadow0/mono/4.5/
-- [ ] Verify Mono reaches `mono_main_driver` in SDRAM (0xC0022748)
+- [x] Mono reads 13MB from LittleFS (22K QSPI calls in 4 seconds) — assemblies loaded
+- [x] Verify Mono reaches `mono_main_driver` in SDRAM (0xC0022748) — confirmed
 
 ### 2.4 — ESPCP CPU Starvation Fix
 - [x] Identified: ESPCP polling thread starves Mono of CPU time
 - [x] Disabled `espcp_poll_enable` hook during Mono init
 - [ ] Re-enable ESPCP polling AFTER Mono initialization completes
 - [ ] Consider throttled polling (sleep between polls)
+
+### 2.5 — SVC Hook Performance (IN PROGRESS)
+- [x] Diagnosed: Mono appeared "stuck" after assembly loading — was actually throttled by IronPython SVC hook
+- [x] dispatch_syscall SVC at 0x08163b5a fires for every kernel→user transition
+- [x] IronPython SVC hook: ~3ms overhead × hundreds/sec = system nearly frozen
+- [x] Created `peripherals/SvcPrimaskFix.cs` — compiled C# SVC PRIMASK fix
+- [x] Created `peripherals/MqReceiveIntercept.cs` — compiled C# mq_receive intercept
+- [x] Mono JIT now making progress: 25K SVCs in 477s, I-cache invalidations confirm JIT active
+- [x] **NEW BLOCKER**: Renode instruction emulation speed — 0.147s virtual time in 10 min real time
+- [ ] Estimated 16+ hours for Mono to complete JIT boot (15s emulated time needed)
+
+### 2.6 — Emulation Speed Solutions (TODO)
+- [ ] Option A: AOT compilation — pre-compile assemblies to native ARM code, skip JIT entirely
+- [ ] Option B: Pre-load JIT cache — snapshot Mono's compiled output after first run
+- [ ] Option C: Renode translation cache / block translation optimization
+- [ ] Option D: Use Mono --aot=full during build to produce native images
+- [ ] Option E: Run Mono's soft-float build (may avoid FPU emulation overhead)
+- [ ] Decision needed: which approach is most practical
 
 ## Phase 3: Application Execution
 
@@ -110,15 +128,35 @@ cc -o build_lfs_v1_image tools/build_lfs_v1_image.c /tmp/littlefs/lfs.c /tmp/lit
 | `asm_scan_bypass` | 0x08061a74 | Skip .NET assembly DLL presence check |
 | `lfs_format_skip` | 0x08171df6 | Prevent LFS format from wiping pre-populated image |
 
+## C# Performance Hooks
+
+| Hook | File | Purpose |
+|------|------|---------|
+| `InstallQspiBypass` | `peripherals/QspiDmaBypass.cs` | QSPI DMA bypass — direct memcpy via SystemBus |
+| `InstallSvcFix` | `peripherals/SvcPrimaskFix.cs` | Clear PRIMASK before SVC instructions |
+| `InstallMqIntercept` | `peripherals/MqReceiveIntercept.cs` | ESPCP polling via mq_receive interception |
+
 ## Performance Analysis
 
 | Component | Overhead | Impact |
 |-----------|----------|--------|
-| ~~qspi_dma_bypass (IronPython)~~ | ~~~0.5-1ms/read~~ | **FIXED**: Replaced with C# `QspiDmaBypass` (compiled .NET, ~0.005-0.01ms/read) |
-| mq_intercept (IronPython) | ~0.1ms/call | Fires on every mq_receive in any thread |
-| espcp_spi_bypass (IronPython) | ~0.5ms/call | SPI exchange per poll cycle |
+| ~~qspi_dma_bypass (IronPython)~~ | ~~0.5-1ms/read~~ | **FIXED**: C# `QspiDmaBypass` (~0.005-0.01ms/read) |
+| ~~svc_fix (IronPython)~~ | ~~3ms/call~~ | **FIXED**: C# `SvcPrimaskFix` (negligible) |
+| ~~mq_intercept (IronPython)~~ | ~~0.1ms/call~~ | **FIXED**: C# `MqReceiveIntercept` (negligible) |
+| espcp_spi_bypass (IronPython) | ~0.5ms/call | SPI exchange per poll cycle (disabled during Mono init) |
 | ESPCP polling loop | consumes all CPU | starves Mono thread (FIXED: disabled) |
-| Mono JIT compilation | billions of instructions | Hours of real time at emulated speed |
+| **Renode ARM emulation** | **~250K instr/sec** | **CURRENT BLOCKER**: Mono JIT needs billions of instructions |
+
+## Emulation Speed Measurements
+
+| Metric | Value |
+|--------|-------|
+| Virtual time after 10 min | 0.147 seconds |
+| Emulation ratio | ~0.00025x real-time |
+| SVC rate (declining) | 188 → 52 hits/sec over 8 min |
+| QSPI reads (assembly load) | 22K calls, 13MB, 4 seconds real time |
+| Estimated Mono boot time | 16+ hours (at current emulation speed) |
+| Real hardware Mono boot | ~15-30 seconds |
 
 ## Decision Log
 
@@ -131,5 +169,7 @@ cc -o build_lfs_v1_image tools/build_lfs_v1_image.c /tmp/littlefs/lfs.c /tmp/lit
 | 2026-03-10 | Use nuttx_mono_aligned.bin | 32-byte prepend puts code at correct ELF addresses (0xC0000020+). |
 | 2026-03-10 | LFS v1.7.2 for image builder | Firmware uses LFS v1.1 on-disk format; only v1.x library can produce it. |
 | 2026-03-11 | Disable ESPCP polling | CPU starvation — espcp_thread's tight loop starves Mono init thread. |
-| 2026-03-11 | C# QSPI peripheral needed | IronPython hooks too slow for millions of QSPI reads during Mono init. |
-| 2026-03-11 | C# QSPI hook implemented | `QspiDmaBypass.cs` extension method replaces IronPython hook. Verified boot works. |
+| 2026-03-11 | C# QSPI hook | `QspiDmaBypass.cs` replaces IronPython hook. 10-100x faster. |
+| 2026-03-11 | C# SVC fix | `SvcPrimaskFix.cs` replaces IronPython svc_fix. Was the "stuck" bottleneck. |
+| 2026-03-11 | C# mq_intercept | `MqReceiveIntercept.cs` replaces IronPython. Fires on all mq_receive calls. |
+| 2026-03-11 | Emulation speed blocker | 0.147s virtual time in 10 min. Need AOT or cache solution for Mono JIT. |
