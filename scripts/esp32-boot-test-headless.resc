@@ -1,0 +1,34 @@
+## ESP32 Boot Spike — Headless test script
+## Validates ESP32 platform definition, CPU execution, and UART output.
+##
+## Usage:
+##   cd /path/to/Meadow.OS.Emulator
+##   mono /Applications/Renode.app/Contents/MacOS/bin/Renode.exe --console --disable-xwt \
+##     -e 'include @scripts/esp32-boot-test-headless.resc; start; sleep 2; cpu PC; quit'
+##
+## Expected output:
+##   - 35 "read from empty FIFO" warnings (= "Hello from ESP32 Xtensa on Renode!\n")
+##   - CPU PC should end at 0x40080050 (spin loop after UART output)
+##
+## What this validates:
+##   1. meadow-esp32.repl loads correctly (all memory regions + peripheral stubs)
+##   2. Xtensa CPU with esp32 cpuType executes windowed-ABI code
+##   3. ESP32_UART receives data from CPU-executed code
+
+using sysbus
+
+# Create the ESP32 machine
+mach create "esp32"
+machine LoadPlatformDescription @platforms/meadow-esp32.repl
+
+# Set up UART terminal on port 4245
+emulation CreateServerSocketTerminal 4245 "esp32uart" false
+connector Connect uart0 esp32uart
+
+# Load bare-metal hello-world ELF (built with xtensa-esp32-elf-gcc)
+sysbus LoadELF @tests/esp32-hello/esp32-hello.elf
+
+# Set PC to _start (after literal pool)
+cpu PC 0x40080010
+
+log "ESP32 boot spike ready. Use 'start' to run."
