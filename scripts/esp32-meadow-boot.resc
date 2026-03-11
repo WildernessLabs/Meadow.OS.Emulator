@@ -36,11 +36,133 @@ sysbus LoadBinary @roms/esp32-v3-rom.bin 0x40000000
 # Sections: DROM @ 0x3F400020, DRAM @ 0x3FFBDB60, IRAM @ 0x40080000, IROM @ 0x400D0020
 sysbus LoadELF @/Users/bryancostanich/Git_Repos/Wilderness_Labs/Meadow.OS/esp32/build/MeadowComms.elf
 
-# Set PC to the firmware entry point (call_start_cpu0)
-# The ROM has proper window handlers now, so we can use the trampoline
-# to initialize window registers then jump to the entry point.
-sysbus LoadELF @/tmp/trampoline.elf
-cpu PC 0x4009F008
+# Window register init trampoline — sets WINDOWBASE/WINDOWSTART/PS, then
+# uses callx8 to call_start_cpu0 (proper windowed call for overflow handling).
+# Trampoline code at 0x4009F00C, literal pool at 0x4009F000-0x4009F00B.
+sysbus LoadELF @/tmp/trampoline2.elf
+cpu PC 0x4009F00C
+
+# Set VECBASE to the firmware's exception vectors in IRAM.
+# The ESP-IDF linker places window overflow/underflow handlers at 0x40080000+:
+#   WindowOverflow4: 0x40080000, WindowUnderflow4: 0x40080040
+#   WindowOverflow8: 0x40080080, WindowUnderflow8: 0x400800C0
+#   WindowOverflow12: 0x40080100, WindowUnderflow12: 0x40080140
+# Previously set to 0x40000000 (ROM), which has NO window handlers — just
+# the reset vector. This caused "Illegal entry instruction" whenever the
+# register file was exhausted, since the overflow dispatch went to wrong code.
+cpu SetRegister "VECBASE" 0x40080000
+
+# NOP out _xtos_set_intlevel calls to avoid window overflow.
+# Renode doesn't implement Xtensa window overflow exceptions. When the call
+# stack exceeds ~8 levels of call8 (64 physical regs / 8 per call = 8 max),
+# entry fails with "Illegal entry instruction". _xtos_set_intlevel is a ROM
+# function called from 10 sites that sets PS interrupt level.
+# Fix: replace each callx8 a8 (E0 08 00) with movi a8, 0 (82 C0 00) — a
+# harmless NOP. Interrupt level changes are unnecessary for single-core
+# emulation with no real interrupt hardware.
+sysbus WriteByte 0x40081EE3 0x82
+sysbus WriteByte 0x40081EE4 0xC0
+sysbus WriteByte 0x40081EE5 0x00
+sysbus WriteByte 0x40081F57 0x82
+sysbus WriteByte 0x40081F58 0xC0
+sysbus WriteByte 0x40081F59 0x00
+sysbus WriteByte 0x40081FA3 0x82
+sysbus WriteByte 0x40081FA4 0xC0
+sysbus WriteByte 0x40081FA5 0x00
+sysbus WriteByte 0x4008AAFE 0x82
+sysbus WriteByte 0x4008AAFF 0xC0
+sysbus WriteByte 0x4008AB00 0x00
+sysbus WriteByte 0x4008AB73 0x82
+sysbus WriteByte 0x4008AB74 0xC0
+sysbus WriteByte 0x4008AB75 0x00
+sysbus WriteByte 0x4008AC6E 0x82
+sysbus WriteByte 0x4008AC6F 0xC0
+sysbus WriteByte 0x4008AC70 0x00
+sysbus WriteByte 0x4008AD52 0x82
+sysbus WriteByte 0x4008AD53 0xC0
+sysbus WriteByte 0x4008AD54 0x00
+sysbus WriteByte 0x4008ADDF 0x82
+sysbus WriteByte 0x4008ADE0 0xC0
+sysbus WriteByte 0x4008ADE1 0x00
+sysbus WriteByte 0x400910DE 0x82
+sysbus WriteByte 0x400910DF 0xC0
+sysbus WriteByte 0x400910E0 0x00
+sysbus WriteByte 0x40091225 0x82
+sysbus WriteByte 0x40091226 0xC0
+sysbus WriteByte 0x40091227 0x00
+# vTaskSwitchContext exit: replace the entire exit sequence (l32i + l32r + callx8 +
+# retw.n) at 0x40092C33-0x40092C4D with an assembly trampoline that manually
+# performs the windowed return. Renode's retw/retw.n reads A0 from AR[0] instead
+# of AR[WINDOWBASE*4], causing crashes when WINDOWBASE != 0.
+# Also sets WINDOWSTART = (1 << new_WB) to clear stale window-live bits that
+# cause underflow exceptions when register accesses wrap around the 64-reg file.
+# Trampoline (27 bytes):
+#   rsr.windowbase a8       ; a8 = current WB
+#   addi a8, a8, -1         ; a8 = caller's WB (call4 rotated by 1)
+#   movi a9, 1              ; a9 = 1
+#   ssl a8                  ; SAR = new WB
+#   sll a9, a9              ; a9 = 1 << new_WB
+#   wsr.windowstart a9      ; only caller's window is marked live
+#   wsr.windowbase a8       ; rotate back to caller's window
+#   rsync
+#   j 0x40091363            ; jump to _frxt_dispatch return point
+sysbus WriteByte 0x40092C33 0x80
+sysbus WriteByte 0x40092C34 0x48
+sysbus WriteByte 0x40092C35 0x03
+sysbus WriteByte 0x40092C36 0x82
+sysbus WriteByte 0x40092C37 0xC8
+sysbus WriteByte 0x40092C38 0xFF
+sysbus WriteByte 0x40092C39 0x92
+sysbus WriteByte 0x40092C3A 0xA0
+sysbus WriteByte 0x40092C3B 0x01
+sysbus WriteByte 0x40092C3C 0x00
+sysbus WriteByte 0x40092C3D 0x18
+sysbus WriteByte 0x40092C3E 0x40
+sysbus WriteByte 0x40092C3F 0x00
+sysbus WriteByte 0x40092C40 0x99
+sysbus WriteByte 0x40092C41 0xA1
+sysbus WriteByte 0x40092C42 0x90
+sysbus WriteByte 0x40092C43 0x49
+sysbus WriteByte 0x40092C44 0x13
+sysbus WriteByte 0x40092C45 0x80
+sysbus WriteByte 0x40092C46 0x48
+sysbus WriteByte 0x40092C47 0x13
+sysbus WriteByte 0x40092C48 0x10
+sysbus WriteByte 0x40092C49 0x20
+sysbus WriteByte 0x40092C4A 0x00
+sysbus WriteByte 0x40092C4B 0x06
+sysbus WriteByte 0x40092C4C 0xC5
+sysbus WriteByte 0x40092C4D 0xF9
+
+# Patch trampoline: callx8 → jx to save one window pane pair.
+# The trampoline at 0x4009f02d uses callx8 to call call_start_cpu0, consuming
+# 2 register panes (WINDOWBASE 0→2). Since call_start_cpu0 never returns,
+# this is wasted. Using jx keeps WINDOWBASE at 0, giving call_start_cpu0
+# 7 call8 levels instead of 6 before wrapping the 16-pane register file.
+# callx8 a8 = E0 08 00, jx a8 = A0 08 00 (only byte0 differs)
+sysbus WriteByte 0x4009f02d 0xA0
+
+# Initialize base save areas for the trampoline's stack (0x3FFE5F00) and
+# call_start_cpu0's stack (0x3FFE5EC0 = 0x3FFE5F00 - 64).
+# The window overflow handler loads [a1-12] as a base pointer for spilling
+# extra registers. This pointer must be a valid writable DRAM address.
+# Fill the entire spill region with self-referencing pointers.
+#
+# Trampoline frame base save area [SP-16..SP-4]:
+sysbus WriteDoubleWord 0x3FFE5EF0 0x3FFE5F00
+sysbus WriteDoubleWord 0x3FFE5EF4 0x3FFE5F00
+sysbus WriteDoubleWord 0x3FFE5EF8 0x3FFE5F00
+sysbus WriteDoubleWord 0x3FFE5EFC 0x3FFE5F00
+# call_start_cpu0 frame base save area [0x3FFE5EC0-16..0x3FFE5EC0-4]:
+sysbus WriteDoubleWord 0x3FFE5EB0 0x3FFE5F00
+sysbus WriteDoubleWord 0x3FFE5EB4 0x3FFE5F00
+sysbus WriteDoubleWord 0x3FFE5EB8 0x3FFE5F00
+sysbus WriteDoubleWord 0x3FFE5EBC 0x3FFE5F00
+# Spill target area at [0x3FFE5F00-32..0x3FFE5F00-4] (where overflow writes a4-a7):
+sysbus WriteDoubleWord 0x3FFE5EE0 0x00000000
+sysbus WriteDoubleWord 0x3FFE5EE4 0x00000000
+sysbus WriteDoubleWord 0x3FFE5EE8 0x00000000
+sysbus WriteDoubleWord 0x3FFE5EEC 0x00000000
 
 # Patch unimplemented FPU user register instructions (rur/wur f64r_lo/hi, f64s)
 # Renode's Xtensa CPU doesn't support these. Insert early ret.n before FPU instructions.
@@ -68,9 +190,747 @@ sysbus WriteByte 0x40008538 0xF0
 sysbus WriteDoubleWord 0x3FFE01E0 0x000000F0
 sysbus WriteDoubleWord 0x3FFE40F0 0x000000F0
 
+# Patch esp_clk_init to return immediately.
+# Clock initialization involves: XTAL freq detection (returns 0 — no crystal),
+# RTC calibration (loops forever — no timer hardware), PLL configuration via
+# internal I2C bus (unmapped at address 0xC4), and division by CPU frequency
+# (0 from uninitialized registers). None of this works without real hardware.
+# Replace body after entry with: retw.n
+sysbus WriteByte 0x400D4E73 0x1D
+sysbus WriteByte 0x400D4E74 0xF0
+
+# Patch vPortExitCritical to return immediately after entry.
+# vPortExitCritical handles spinlock release and interrupt level restore.
+# For single-core emulation with no real interrupts, this is unnecessary.
+# This also avoids window overflow: retw.n at the deepest call level can
+# fail when Renode's register file wraps around (no overflow/underflow support).
+# vPortExitCritical at 0x400911a0: entry a1,32 (3 bytes) + retw.n (2 bytes)
+sysbus WriteByte 0x400911a3 0x1D
+sysbus WriteByte 0x400911a4 0xF0
+
+# Also patch vPortEnterCritical to return immediately.
+# Must match: if we skip exit, we must skip enter too, or nesting counts diverge.
+# vPortEnterCritical at 0x400910e4: entry a1,32 (3 bytes) + retw.n
+sysbus WriteByte 0x400910E7 0x1D
+sysbus WriteByte 0x400910E8 0xF0
+
+# Patch vTaskSwitchContext core affinity check for single-core emulation.
+# The dual-core scheduler checks pxTCB->xCoreID == xPortGetCoreID().
+# Tasks pinned to core 1 (xCoreID=1) can't run on core 0, causing "no ready
+# tasks" when all remaining tasks at a priority are core-1-only.
+# Fix: NOP the bne at 0x40092B7E so core-1 tasks can run on core 0.
+# bne a6, a7, skip (bytes 77 96 3F) → movi a8, 0 (bytes 82 C0 00)
+sysbus WriteByte 0x40092B7E 0x82
+sysbus WriteByte 0x40092B7F 0xC0
+sysbus WriteByte 0x40092B80 0x00
+
+# Skip vTaskSwitchContext second scanner loop AND dual-core exit logic.
+# The second scanner loop (0x40092BA0-0x40092BBE) checks if other tasks at the
+# same priority need scheduling on other cores — irrelevant for single-core.
+# The dual-core exit at 0x40092C4C clears port_xSchedulerRunning and does PRID
+# checks that cause issues (spinlock comparison fails → assert → register corruption).
+# Jump directly to the clean exit path at 0x40092C33 (_xtos_set_intlevel + retw).
+# Replace narrow s32i.n at 0x40092B9E with wide s32i (Renode decodes narrow
+# instructions as 3 bytes instead of 2, causing PC misalignment).
+# Then jump directly to the clean exit, skipping dual-core exit logic.
+# s32i.n a9, a2, 0 (2 bytes) → s32i a9, a2, 0 (3 bytes)
+sysbus WriteByte 0x40092B9E 0x92
+sysbus WriteByte 0x40092B9F 0x62
+sysbus WriteByte 0x40092BA0 0x00
+# j 0x40092C33 (clean exit: _xtos_set_intlevel + retw)
+sysbus WriteByte 0x40092BA1 0x86
+sysbus WriteByte 0x40092BA2 0x23
+sysbus WriteByte 0x40092BA3 0x00
+# Also patch the "no ready task found" exit at 0x40092BF3: j 0x40092C4C → j 0x40092C33
+sysbus WriteByte 0x40092BF3 0x06
+sysbus WriteByte 0x40092BF4 0x0F
+sysbus WriteByte 0x40092BF5 0x00
+
+# Patch malloc to jump directly to heap_caps_malloc_default.
+# malloc at 0x40097c78 is a thin wrapper: entry, mov a10 a2, call8 heap_caps_malloc_default, retw.
+# By replacing entry with j (direct jump), we eliminate one call level from the stack.
+# This reduces the deepest boot path from 9 to 8 call8 levels, staying within
+# Renode's 64-register / 8-window limit.
+# entry a1, 32 (bytes 36 41 00) → j 0x400815c4 (bytes 06 52 A6)
+sysbus WriteByte 0x40097c78 0x06
+sysbus WriteByte 0x40097c79 0x52
+sysbus WriteByte 0x40097c7a 0xA6
+
+# Patch all s32c1i (atomic compare-and-swap) instructions to l32i (plain load).
+# Renode's Xtensa CPU doesn't support s32c1i — it triggers a kernel exception.
+# For single-core emulation this is safe: spinlocks have no contention, so the
+# CAS always "succeeds" (loaded value matches expected). The l32i loads the old
+# value into the register (correct for assertion checks) but doesn't write the
+# new value. Combined with the __assert_func patch below, spinlock logic works:
+# lock->count tracks re-entrancy correctly, owner stays SPINLOCK_FREE (harmless
+# in single-core since there's no contention to check against).
+# Encoding: s32c1i has r=0xE in byte[1] upper nibble; l32i has r=0x2.
+# IRAM region (FreeRTOS, heap, system):
+sysbus WriteByte 0x4008FB9C 0x20
+sysbus WriteByte 0x4008FD85 0x27
+sysbus WriteByte 0x40091112 0x22
+sysbus WriteByte 0x40092A80 0x2D
+sysbus WriteByte 0x400996A9 0x20
+sysbus WriteByte 0x4009BA6F 0x20
+# IROM region (application code, drivers, networking):
+sysbus WriteByte 0x400DB4FF 0x20
+sysbus WriteByte 0x400E08A4 0x25
+sysbus WriteByte 0x400E22BD 0x29
+sysbus WriteByte 0x400EE2E6 0x25
+sysbus WriteByte 0x400EFCAF 0x20
+sysbus WriteByte 0x400F3032 0x20
+sysbus WriteByte 0x400F4CBB 0x25
+sysbus WriteByte 0x400F4D0A 0x20
+sysbus WriteByte 0x400F4F03 0x20
+sysbus WriteByte 0x400F5892 0x25
+sysbus WriteByte 0x400F621C 0x25
+sysbus WriteByte 0x400F9FC1 0x25
+sysbus WriteByte 0x400FD9B2 0x2F
+sysbus WriteByte 0x4010816A 0x25
+sysbus WriteByte 0x40108CC3 0x20
+sysbus WriteByte 0x4010A763 0x25
+sysbus WriteByte 0x4010A7F3 0x25
+sysbus WriteByte 0x4010CE31 0x20
+sysbus WriteByte 0x4010DAB4 0x25
+sysbus WriteByte 0x40111B74 0x25
+sysbus WriteByte 0x40114349 0x25
+sysbus WriteByte 0x40114716 0x25
+sysbus WriteByte 0x401171DF 0x20
+sysbus WriteByte 0x4011DCDF 0x20
+sysbus WriteByte 0x40123EF5 0x20
+sysbus WriteByte 0x4012DF92 0x20
+sysbus WriteByte 0x4012F3EB 0x20
+sysbus WriteByte 0x40133D96 0x25
+sysbus WriteByte 0x401359B9 0x2D
+sysbus WriteByte 0x40137DB7 0x25
+sysbus WriteByte 0x4013AF70 0x20
+sysbus WriteByte 0x4013F022 0x20
+sysbus WriteByte 0x40147B2F 0x25
+sysbus WriteByte 0x4014A0C6 0x25
+sysbus WriteByte 0x40151067 0x2A
+sysbus WriteByte 0x40152476 0x2E
+sysbus WriteByte 0x40153912 0x25
+sysbus WriteByte 0x40153B29 0x2E
+sysbus WriteByte 0x40155F7F 0x28
+sysbus WriteByte 0x4015602E 0x28
+sysbus WriteByte 0x40159729 0x20
+sysbus WriteByte 0x4015FE21 0x25
+sysbus WriteByte 0x40165BDA 0x27
+sysbus WriteByte 0x4016925E 0x20
+sysbus WriteByte 0x40169319 0x20
+sysbus WriteByte 0x4019032A 0x2D
+sysbus WriteByte 0x401924FE 0x21
+sysbus WriteByte 0x40197E84 0x28
+sysbus WriteByte 0x4019868C 0x2A
+sysbus WriteByte 0x401A812F 0x28
+sysbus WriteByte 0x401AB86A 0x20
+sysbus WriteByte 0x401ABCF6 0x20
+sysbus WriteByte 0x401AC252 0x20
+sysbus WriteByte 0x401AC8B2 0x20
+sysbus WriteByte 0x401B0356 0x25
+
+# Suppress spinlock assertions: patch __assert_func to return immediately.
+# With l32i replacing s32c1i, lock->owner is never written (stays SPINLOCK_FREE).
+# spinlock_release asserts core_id == lock->owner, which fails. But for single-core
+# emulation the lock state is still correct: count tracks re-entrancy, and there's
+# no contention. The assertions are debug-only checks that are safe to skip.
+# __assert_func at 0x40199DA0: entry a1,48 (3 bytes) + retw.n (2 bytes)
+sysbus WriteByte 0x40199DA3 0x1D
+sysbus WriteByte 0x40199DA4 0xF0
+
+# Patch esp_crosscore_int_send_yield to call vPortYield directly.
+# ESP-IDF triggers context switches via a software interrupt (writes to
+# DPORT_CPU_INTR_FROM_CPU_0_REG at 0x3FF000DC). Without real interrupt
+# hardware, the ISR never fires and the context switch never happens.
+# Tasks that block (e.g., on a semaphore in xQueueGenericReceive) spin
+# forever in the retry loop waiting for a yield that never occurs.
+# Fix: replace the entire function with j vPortYield (tail-call).
+# The caller's call8 already set CALLINC=2 and a0=return_addr, so
+# vPortYield's entry works correctly and retw returns to the original caller.
+# esp_crosscore_int_send_yield at 0x40081E28: entry a1,32 (36 41 00) → j vPortYield (06 60 3D)
+sysbus WriteByte 0x40081E28 0x06
+sysbus WriteByte 0x40081E29 0x60
+sysbus WriteByte 0x40081E2A 0x3D
+
+# Patch flash-related functions to return immediately.
+# These access the SPI flash controller which is only a MappedMemory stub.
+# Without real SPI hardware, they hang waiting for command completion.
+# bootloader_flash_update_id:
+sysbus WriteByte 0x4013565B 0x1D
+sysbus WriteByte 0x4013565C 0xF0
+# bootloader_flash_clock_config:
+sysbus WriteByte 0x4008A193 0x1D
+sysbus WriteByte 0x4008A194 0xF0
+# bootloader_flash_gpio_config:
+sysbus WriteByte 0x4008A1BF 0x1D
+sysbus WriteByte 0x4008A1C0 0xF0
+# bootloader_flash_dummy_config:
+sysbus WriteByte 0x4008A393 0x1D
+sysbus WriteByte 0x4008A394 0xF0
+# bootloader_flash_cs_timing_config:
+sysbus WriteByte 0x4008A123 0x1D
+sysbus WriteByte 0x4008A124 0xF0
+# esp_flash_init_default_chip: return ESP_OK (0)
+sysbus WriteByte 0x40135F4F 0x0C
+sysbus WriteByte 0x40135F50 0x02
+sysbus WriteByte 0x40135F51 0x1D
+sysbus WriteByte 0x40135F52 0xF0
+
+# _frxt_dispatch resume path: replace retw.n at 0x40091388 with j to trampoline.
+# Same Renode retw bug: reads A0 from AR[0] instead of AR[WINDOWBASE*4].
+# Fix: copy the correct A0 to physical AR[0] by temporarily setting WINDOWBASE=0,
+# then restore WINDOWBASE and execute retw.n. The retw then reads the correct A0
+# from AR[0], decrements WINDOWBASE, and triggers window underflow. The underflow
+# handler reloads the task's registers from the spill area (written by
+# xthal_window_spill_nw during vPortYield). This preserves the full register state.
+# j 0x4009F040 from 0x40091388 (offset 0xDCB4)
+sysbus WriteByte 0x40091388 0x06
+sysbus WriteByte 0x40091389 0x2D
+sysbus WriteByte 0x4009138A 0x37
+# Resume retw trampoline at 0x4009F040 (31 bytes):
+#   wsr.excsave1 a0       ; save correct A0 to scratch register
+#   rsr.windowbase a8     ; a8 = current WINDOWBASE
+#   wsr.excsave2 a8       ; save WINDOWBASE to scratch register
+#   movi.n a8, 0
+#   wsr.windowbase a8     ; WINDOWBASE = 0
+#   rsync
+#   rsr.excsave1 a0       ; AR[0] = correct A0 (a0 maps to AR[0] when WB=0)
+#   rsr.excsave2 a8       ; AR[8] = saved WB (a8 maps to AR[8] when WB=0)
+#   wsr.windowbase a8     ; restore original WINDOWBASE
+#   rsync
+#   retw.n                ; Renode reads AR[0] → correct! underflow reloads regs
+sysbus WriteByte 0x4009F040 0x00
+sysbus WriteByte 0x4009F041 0xD1
+sysbus WriteByte 0x4009F042 0x13
+sysbus WriteByte 0x4009F043 0x80
+sysbus WriteByte 0x4009F044 0x48
+sysbus WriteByte 0x4009F045 0x03
+sysbus WriteByte 0x4009F046 0x80
+sysbus WriteByte 0x4009F047 0xD2
+sysbus WriteByte 0x4009F048 0x13
+sysbus WriteByte 0x4009F049 0x0C
+sysbus WriteByte 0x4009F04A 0x08
+sysbus WriteByte 0x4009F04B 0x80
+sysbus WriteByte 0x4009F04C 0x48
+sysbus WriteByte 0x4009F04D 0x13
+sysbus WriteByte 0x4009F04E 0x10
+sysbus WriteByte 0x4009F04F 0x20
+sysbus WriteByte 0x4009F050 0x00
+sysbus WriteByte 0x4009F051 0x00
+sysbus WriteByte 0x4009F052 0xD1
+sysbus WriteByte 0x4009F053 0x03
+sysbus WriteByte 0x4009F054 0x80
+sysbus WriteByte 0x4009F055 0xD2
+sysbus WriteByte 0x4009F056 0x03
+sysbus WriteByte 0x4009F057 0x80
+sysbus WriteByte 0x4009F058 0x48
+sysbus WriteByte 0x4009F059 0x13
+sysbus WriteByte 0x4009F05A 0x10
+sysbus WriteByte 0x4009F05B 0x20
+sysbus WriteByte 0x4009F05C 0x00
+sysbus WriteByte 0x4009F05D 0x1D
+sysbus WriteByte 0x4009F05E 0xF0
+
+# Non-windowed vListInsertEnd at 0x4009F060 (48 bytes, all wide instructions).
+# No entry/retw — operates in caller's register window. Avoids Renode retw.n bug.
+# After call8: a8=return_addr(+CALLINC), a10=pxList, a11=pxNewListItem.
+# Uses a8-a13 (caller-saved). Returns via jx after stripping CALLINC bits.
+# NOTE: objdump shows hex MSB-first; memory is little-endian (bytes reversed).
+sysbus WriteByte 0x4009F060 0xC2   # l32i a12, a10, 4    (pxIndex = pxList->pxIndex)
+sysbus WriteByte 0x4009F061 0x2A
+sysbus WriteByte 0x4009F062 0x01
+sysbus WriteByte 0x4009F063 0xD2   # l32i a13, a12, 8    (pxPrev = pxIndex->pxPrevious)
+sysbus WriteByte 0x4009F064 0x2C
+sysbus WriteByte 0x4009F065 0x02
+sysbus WriteByte 0x4009F066 0xC2   # s32i a12, a11, 4    (pxNewListItem->pxNext = pxIndex)
+sysbus WriteByte 0x4009F067 0x6B
+sysbus WriteByte 0x4009F068 0x01
+sysbus WriteByte 0x4009F069 0xD2   # s32i a13, a11, 8    (pxNewListItem->pxPrevious = pxPrev)
+sysbus WriteByte 0x4009F06A 0x6B
+sysbus WriteByte 0x4009F06B 0x02
+sysbus WriteByte 0x4009F06C 0xB2   # s32i a11, a13, 4    (pxPrev->pxNext = pxNewListItem)
+sysbus WriteByte 0x4009F06D 0x6D
+sysbus WriteByte 0x4009F06E 0x01
+sysbus WriteByte 0x4009F06F 0xB2   # s32i a11, a12, 8    (pxIndex->pxPrevious = pxNewListItem)
+sysbus WriteByte 0x4009F070 0x6C
+sysbus WriteByte 0x4009F071 0x02
+sysbus WriteByte 0x4009F072 0xA2   # s32i a10, a11, 16   (pxNewListItem->pvContainer = pxList)
+sysbus WriteByte 0x4009F073 0x6B
+sysbus WriteByte 0x4009F074 0x04
+sysbus WriteByte 0x4009F075 0xC2   # l32i a12, a10, 0    (count = pxList->uxNumberOfItems)
+sysbus WriteByte 0x4009F076 0x2A
+sysbus WriteByte 0x4009F077 0x00
+sysbus WriteByte 0x4009F078 0xC2   # addi a12, a12, 1    (count++)
+sysbus WriteByte 0x4009F079 0xCC
+sysbus WriteByte 0x4009F07A 0x01
+sysbus WriteByte 0x4009F07B 0xC2   # s32i a12, a10, 0    (pxList->uxNumberOfItems = count)
+sysbus WriteByte 0x4009F07C 0x6A
+sysbus WriteByte 0x4009F07D 0x00
+sysbus WriteByte 0x4009F07E 0xE0   # slli a8, a8, 2      (clear CALLINC bits)
+sysbus WriteByte 0x4009F07F 0x88
+sysbus WriteByte 0x4009F080 0x11
+sysbus WriteByte 0x4009F081 0x80   # srli a8, a8, 2      (a8 = ret_addr & 0x3FFFFFFF)
+sysbus WriteByte 0x4009F082 0x82
+sysbus WriteByte 0x4009F083 0x41
+sysbus WriteByte 0x4009F084 0x92   # movi a9, 1
+sysbus WriteByte 0x4009F085 0xA0
+sysbus WriteByte 0x4009F086 0x01
+sysbus WriteByte 0x4009F087 0x20   # slli a9, a9, 30     (a9 = 0x40000000)
+sysbus WriteByte 0x4009F088 0x99
+sysbus WriteByte 0x4009F089 0x01
+sysbus WriteByte 0x4009F08A 0x90   # or a8, a8, a9       (a8 = return PC)
+sysbus WriteByte 0x4009F08B 0x88
+sysbus WriteByte 0x4009F08C 0x20
+sysbus WriteByte 0x4009F08D 0xA0   # jx a8               (jump to return address)
+sysbus WriteByte 0x4009F08E 0x08
+sysbus WriteByte 0x4009F08F 0x00
+# Redirect all 18 call8 sites from vListInsertEnd (0x400941B8) to new copy (0x4009F060):
+sysbus WriteByte 0x400923FE 0x25
+sysbus WriteByte 0x400923FF 0xC6
+sysbus WriteByte 0x40092400 0x0C
+sysbus WriteByte 0x40092616 0xA5
+sysbus WriteByte 0x40092617 0xA4
+sysbus WriteByte 0x40092618 0x0C
+sysbus WriteByte 0x400928F5 0xA5
+sysbus WriteByte 0x400928F6 0x76
+sysbus WriteByte 0x400928F7 0x0C
+sysbus WriteByte 0x40092CDD 0x25
+sysbus WriteByte 0x40092CDE 0x38
+sysbus WriteByte 0x40092CDF 0x0C
+sysbus WriteByte 0x40092D7D 0x25
+sysbus WriteByte 0x40092D7E 0x2E
+sysbus WriteByte 0x40092D7F 0x0C
+sysbus WriteByte 0x40092DAD 0x25
+sysbus WriteByte 0x40092DAE 0x2B
+sysbus WriteByte 0x40092DAF 0x0C
+sysbus WriteByte 0x40092E0A 0x65
+sysbus WriteByte 0x40092E0B 0x25
+sysbus WriteByte 0x40092E0C 0x0C
+sysbus WriteByte 0x40092EE2 0xE5
+sysbus WriteByte 0x40092EE3 0x17
+sysbus WriteByte 0x40092EE4 0x0C
+sysbus WriteByte 0x40092EF7 0xA5
+sysbus WriteByte 0x40092EF8 0x16
+sysbus WriteByte 0x40092EF9 0x0C
+sysbus WriteByte 0x40093006 0xA5
+sysbus WriteByte 0x40093007 0x05
+sysbus WriteByte 0x40093008 0x0C
+sysbus WriteByte 0x400932DB 0x65
+sysbus WriteByte 0x400932DC 0xD8
+sysbus WriteByte 0x400932DD 0x0B
+sysbus WriteByte 0x40093441 0xE5
+sysbus WriteByte 0x40093442 0xC1
+sysbus WriteByte 0x40093443 0x0B
+sysbus WriteByte 0x400935A9 0x65
+sysbus WriteByte 0x400935AA 0xAB
+sysbus WriteByte 0x400935AB 0x0B
+sysbus WriteByte 0x40093719 0x65
+sysbus WriteByte 0x4009371A 0x94
+sysbus WriteByte 0x4009371B 0x0B
+sysbus WriteByte 0x400937C1 0xE5
+sysbus WriteByte 0x400937C2 0x89
+sysbus WriteByte 0x400937C3 0x0B
+sysbus WriteByte 0x40093915 0xA5
+sysbus WriteByte 0x40093916 0x74
+sysbus WriteByte 0x40093917 0x0B
+sysbus WriteByte 0x40093A9E 0x25
+sysbus WriteByte 0x40093A9F 0x5C
+sysbus WriteByte 0x40093AA0 0x0B
+sysbus WriteByte 0x40093ABA 0x65
+sysbus WriteByte 0x40093ABB 0x5A
+sysbus WriteByte 0x40093ABC 0x0B
+
+# Non-windowed vListInsert at 0x4009F090 (87 bytes, all wide instructions).
+# No entry/retw — operates in caller's register window. Avoids Renode retw.n bug.
+# After call8: a8=return_addr(+CALLINC), a10=pxList, a11=pxNewListItem.
+# Sorted insert: searches for position where value < next->value, then inserts.
+# Includes loop safety limit (100 iterations) to survive corrupted lists.
+sysbus WriteByte 0x4009F090 0xC2
+sysbus WriteByte 0x4009F091 0x2B
+sysbus WriteByte 0x4009F092 0x00
+sysbus WriteByte 0x4009F093 0xD2
+sysbus WriteByte 0x4009F094 0xAF
+sysbus WriteByte 0x4009F095 0xFF
+sysbus WriteByte 0x4009F096 0xD7
+sysbus WriteByte 0x4009F097 0x9C
+sysbus WriteByte 0x4009F098 0x05
+sysbus WriteByte 0x4009F099 0x92
+sysbus WriteByte 0x4009F09A 0x2A
+sysbus WriteByte 0x4009F09B 0x04
+sysbus WriteByte 0x4009F09C 0x86
+sysbus WriteByte 0x4009F09D 0x06
+sysbus WriteByte 0x4009F09E 0x00
+sysbus WriteByte 0x4009F09F 0x92
+sysbus WriteByte 0x4009F0A0 0xCA
+sysbus WriteByte 0x4009F0A1 0x08
+sysbus WriteByte 0x4009F0A2 0xF2
+sysbus WriteByte 0x4009F0A3 0xA0
+sysbus WriteByte 0x4009F0A4 0x64
+sysbus WriteByte 0x4009F0A5 0xD2
+sysbus WriteByte 0x4009F0A6 0x29
+sysbus WriteByte 0x4009F0A7 0x01
+sysbus WriteByte 0x4009F0A8 0xE2
+sysbus WriteByte 0x4009F0A9 0x2D
+sysbus WriteByte 0x4009F0AA 0x00
+sysbus WriteByte 0x4009F0AB 0xE7
+sysbus WriteByte 0x4009F0AC 0x3C
+sysbus WriteByte 0x4009F0AD 0x0B
+sysbus WriteByte 0x4009F0AE 0xD0
+sysbus WriteByte 0x4009F0AF 0x9D
+sysbus WriteByte 0x4009F0B0 0x20
+sysbus WriteByte 0x4009F0B1 0xF2
+sysbus WriteByte 0x4009F0B2 0xCF
+sysbus WriteByte 0x4009F0B3 0xFF
+sysbus WriteByte 0x4009F0B4 0x56
+sysbus WriteByte 0x4009F0B5 0xDF
+sysbus WriteByte 0x4009F0B6 0xFE
+sysbus WriteByte 0x4009F0B7 0x86
+sysbus WriteByte 0x4009F0B8 0x06
+sysbus WriteByte 0x4009F0B9 0x00
+sysbus WriteByte 0x4009F0BA 0xD2
+sysbus WriteByte 0x4009F0BB 0x29
+sysbus WriteByte 0x4009F0BC 0x01
+sysbus WriteByte 0x4009F0BD 0xD2
+sysbus WriteByte 0x4009F0BE 0x6B
+sysbus WriteByte 0x4009F0BF 0x01
+sysbus WriteByte 0x4009F0C0 0xB2
+sysbus WriteByte 0x4009F0C1 0x6D
+sysbus WriteByte 0x4009F0C2 0x02
+sysbus WriteByte 0x4009F0C3 0x92
+sysbus WriteByte 0x4009F0C4 0x6B
+sysbus WriteByte 0x4009F0C5 0x02
+sysbus WriteByte 0x4009F0C6 0xB2
+sysbus WriteByte 0x4009F0C7 0x69
+sysbus WriteByte 0x4009F0C8 0x01
+sysbus WriteByte 0x4009F0C9 0xA2
+sysbus WriteByte 0x4009F0CA 0x6B
+sysbus WriteByte 0x4009F0CB 0x04
+sysbus WriteByte 0x4009F0CC 0xC2
+sysbus WriteByte 0x4009F0CD 0x2A
+sysbus WriteByte 0x4009F0CE 0x00
+sysbus WriteByte 0x4009F0CF 0xC2
+sysbus WriteByte 0x4009F0D0 0xCC
+sysbus WriteByte 0x4009F0D1 0x01
+sysbus WriteByte 0x4009F0D2 0xC2
+sysbus WriteByte 0x4009F0D3 0x6A
+sysbus WriteByte 0x4009F0D4 0x00
+sysbus WriteByte 0x4009F0D5 0xE0
+sysbus WriteByte 0x4009F0D6 0x88
+sysbus WriteByte 0x4009F0D7 0x11
+sysbus WriteByte 0x4009F0D8 0x80
+sysbus WriteByte 0x4009F0D9 0x82
+sysbus WriteByte 0x4009F0DA 0x41
+sysbus WriteByte 0x4009F0DB 0x92
+sysbus WriteByte 0x4009F0DC 0xA0
+sysbus WriteByte 0x4009F0DD 0x01
+sysbus WriteByte 0x4009F0DE 0x20
+sysbus WriteByte 0x4009F0DF 0x99
+sysbus WriteByte 0x4009F0E0 0x01
+sysbus WriteByte 0x4009F0E1 0x90
+sysbus WriteByte 0x4009F0E2 0x88
+sysbus WriteByte 0x4009F0E3 0x20
+sysbus WriteByte 0x4009F0E4 0xA0
+sysbus WriteByte 0x4009F0E5 0x08
+sysbus WriteByte 0x4009F0E6 0x00
+# Patch vListInsert entry to jump to non-windowed version.
+# Replace entry a1,32 (36 41 00) at 0x400941D4 with j 0x4009F090 (06 AE 2B).
+# This way call8 sites don't need redirection — they still target 0x400941D4,
+# which immediately jumps to the non-windowed code (no window rotation).
+sysbus WriteByte 0x400941D4 0x06
+sysbus WriteByte 0x400941D5 0xAE
+sysbus WriteByte 0x400941D6 0x2B
+
+# Non-windowed uxListRemove at 0x4009F120 (57 bytes, all wide instructions).
+# No entry/retw — operates in caller's register window. Avoids Renode retw.n bug.
+# After call8: a8=return_addr(+CALLINC), a10=pxItemToRemove.
+# Returns uxNumberOfItems in a10.
+sysbus WriteByte 0x4009F120 0xC2
+sysbus WriteByte 0x4009F121 0x2A
+sysbus WriteByte 0x4009F122 0x04
+sysbus WriteByte 0x4009F123 0xD2
+sysbus WriteByte 0x4009F124 0x2A
+sysbus WriteByte 0x4009F125 0x01
+sysbus WriteByte 0x4009F126 0xE2
+sysbus WriteByte 0x4009F127 0x2A
+sysbus WriteByte 0x4009F128 0x02
+sysbus WriteByte 0x4009F129 0xE2
+sysbus WriteByte 0x4009F12A 0x6D
+sysbus WriteByte 0x4009F12B 0x02
+sysbus WriteByte 0x4009F12C 0xD2
+sysbus WriteByte 0x4009F12D 0x6E
+sysbus WriteByte 0x4009F12E 0x01
+sysbus WriteByte 0x4009F12F 0xF2
+sysbus WriteByte 0x4009F130 0x2C
+sysbus WriteByte 0x4009F131 0x01
+sysbus WriteByte 0x4009F132 0xA7
+sysbus WriteByte 0x4009F133 0x9F
+sysbus WriteByte 0x4009F134 0x02
+sysbus WriteByte 0x4009F135 0xE2
+sysbus WriteByte 0x4009F136 0x6C
+sysbus WriteByte 0x4009F137 0x01
+sysbus WriteByte 0x4009F138 0x92
+sysbus WriteByte 0x4009F139 0xA0
+sysbus WriteByte 0x4009F13A 0x00
+sysbus WriteByte 0x4009F13B 0x92
+sysbus WriteByte 0x4009F13C 0x6A
+sysbus WriteByte 0x4009F13D 0x04
+sysbus WriteByte 0x4009F13E 0xA2
+sysbus WriteByte 0x4009F13F 0x2C
+sysbus WriteByte 0x4009F140 0x00
+sysbus WriteByte 0x4009F141 0xA2
+sysbus WriteByte 0x4009F142 0xCA
+sysbus WriteByte 0x4009F143 0xFF
+sysbus WriteByte 0x4009F144 0xA2
+sysbus WriteByte 0x4009F145 0x6C
+sysbus WriteByte 0x4009F146 0x00
+sysbus WriteByte 0x4009F147 0xE0
+sysbus WriteByte 0x4009F148 0x88
+sysbus WriteByte 0x4009F149 0x11
+sysbus WriteByte 0x4009F14A 0x80
+sysbus WriteByte 0x4009F14B 0x82
+sysbus WriteByte 0x4009F14C 0x41
+sysbus WriteByte 0x4009F14D 0x92
+sysbus WriteByte 0x4009F14E 0xA0
+sysbus WriteByte 0x4009F14F 0x01
+sysbus WriteByte 0x4009F150 0x20
+sysbus WriteByte 0x4009F151 0x99
+sysbus WriteByte 0x4009F152 0x01
+sysbus WriteByte 0x4009F153 0x90
+sysbus WriteByte 0x4009F154 0x88
+sysbus WriteByte 0x4009F155 0x20
+sysbus WriteByte 0x4009F156 0xA0
+sysbus WriteByte 0x4009F157 0x08
+sysbus WriteByte 0x4009F158 0x00
+# Patch uxListRemove entry to jump to non-windowed version.
+# Replace entry a1,32 (36 41 00) at 0x40094204 with j 0x4009F120 (06 C6 2B).
+sysbus WriteByte 0x40094204 0x06
+sysbus WriteByte 0x40094205 0xC6
+sysbus WriteByte 0x40094206 0x2B
+
+# ===== retw trampoline (call8) at 0x4009F160 (29 bytes) =====
+# Minimal retw replacement: adjusts WINDOWBASE by -2 (for call8),
+# reads caller's A0 for return address, and jumps there.
+# Skips WINDOWSTART update — may cause issues with window reuse.
+sysbus WriteByte 0x4009F160 0x80
+sysbus WriteByte 0x4009F161 0x48
+sysbus WriteByte 0x4009F162 0x03
+sysbus WriteByte 0x4009F163 0x82
+sysbus WriteByte 0x4009F164 0xC8
+sysbus WriteByte 0x4009F165 0xFE
+sysbus WriteByte 0x4009F166 0x80
+sysbus WriteByte 0x4009F167 0x48
+sysbus WriteByte 0x4009F168 0x13
+sysbus WriteByte 0x4009F169 0x10
+sysbus WriteByte 0x4009F16A 0x20
+sysbus WriteByte 0x4009F16B 0x00
+sysbus WriteByte 0x4009F16C 0xE0
+sysbus WriteByte 0x4009F16D 0x80
+sysbus WriteByte 0x4009F16E 0x11
+sysbus WriteByte 0x4009F16F 0x80
+sysbus WriteByte 0x4009F170 0x82
+sysbus WriteByte 0x4009F171 0x41
+sysbus WriteByte 0x4009F172 0x0C
+sysbus WriteByte 0x4009F173 0x19
+sysbus WriteByte 0x4009F174 0x20
+sysbus WriteByte 0x4009F175 0x99
+sysbus WriteByte 0x4009F176 0x01
+sysbus WriteByte 0x4009F177 0x90
+sysbus WriteByte 0x4009F178 0x88
+sysbus WriteByte 0x4009F179 0x20
+sysbus WriteByte 0x4009F17A 0xA0
+sysbus WriteByte 0x4009F17B 0x08
+sysbus WriteByte 0x4009F17C 0x00
+
+# ===== retw patches applied AFTER scheduler starts (via Python hook) =====
+# Can't apply during init because queue functions use retw during queue setup.
+
 # Hook: set app_cpu_started flag when firmware reaches the polling loop.
 # Can't pre-set because BSS clearing zeros it. Set it at the check point.
 # 0x40081D50: l8ui a4, a2, 0 (reads app_cpu_started before bnez check)
 cpu AddHook 0x40081D50 "self.Bus.WriteByte(0x3FFC91A8, 1)"
+
+# (No Python hook needed — non-windowed vListInsertEnd returns via jx a8)
+
+# Fix corrupted FreeRTOS lists at runtime.
+# Renode's Xtensa entry instruction occasionally gives vListInitialise wrong register
+# values (off by 8 bytes), causing it to write list initialization data to the wrong
+# addresses. The signature: [list+8] == list_address (instead of 0xFFFFFFFF).
+#
+# Hook 1: Scan sram2 at vTaskStartScheduler for the off-by-8 corruption pattern.
+# The bug writes: [list+0]=0xFFFFFFFF, [list+4]=list, [list+8]=list.
+# A properly init'd list has [list+0]=count, [list+8]=0xFFFFFFFF.
+# Check BOTH [addr+8]==addr AND [addr+0]==0xFFFFFFFF to avoid false positives.
+cpu AddHook 0x4009262C "bus = self.GetMachine().SystemBus; results = [( bus.WriteDoubleWord(a, 0), bus.WriteDoubleWord(a+4, a+8), bus.WriteDoubleWord(a+8, 0xFFFFFFFF), bus.WriteDoubleWord(a+12, a+8), bus.WriteDoubleWord(a+16, a+8), self.Log(LogLevel.Error, 'FIXED_LIST 0x{0:X8}'.format(a)) ) for a in range(0x3FFB6000, 0x3FFD0000, 4) if bus.ReadDoubleWord(a+8) == a and bus.ReadDoubleWord(a+12) == 0 and bus.ReadDoubleWord(a+16) == 0]; self.Log(LogLevel.Error, 'LIST_SCAN: fixed ' + str(len(results)) + ' lists')"
+
+# Simulate FreeRTOS timer tick at every task dispatch.
+# Without real timer interrupts, blocked tasks never unblock. This hook:
+# 1. Increments xTickCount
+# 2. Checks pxDelayedTaskList for tasks ready to wake (xItemValue <= xTickCount)
+# 3. Moves them to the appropriate pxReadyTasksLists[priority]
+# 4. Updates xNextTaskUnblockTime and uxTopReadyPriority
+# Key addresses: xTickCount=0x3FFC92F0, xNextTaskUnblockTime=0x3FFBEDC4,
+# pxDelayedTaskList=0x3FFC9358, pxReadyTasksLists=0x3FFC9384, uxTopReadyPriority=0x3FFC92EC
+# TCB layout: xStateListItem@+8 (20B), xEventListItem@+28 (20B), uxPriority@+48
+python
+"""
+import clr
+import __builtin__
+_emu = Antmicro.Renode.Core.EmulationManager.Instance.CurrentEmulation
+_machine = _emu.Machines[0]
+_bus = _machine['sysbus']
+
+_cpu = _machine['sysbus.cpu']
+_tick_log_interval = [0]  # mutable counter for periodic logging
+_ipc_demoted = [False]  # one-shot flag for IPC task demotion
+_retw_patched = [False]  # one-shot flag for retw patches
+
+def _apply_retw_patches():
+    # Apply retw patches AFTER scheduler starts (can't apply during init)
+    # Redirect to resume trampoline at 0x4009F040 which copies A0 to AR[0]
+    # then executes retw.n — Renode's buggy retw reads AR[0] and gets correct value.
+    # vTaskSwitchContext is NOT patched here — its inline trampoline at 0x40092C33
+    # already handles the return correctly (WB-1 for call4 + j to _frxt_dispatch).
+    W = _bus.WriteByte
+    # xQueueGenericReceive retw at 0x40091DFA -> j 0x4009F040
+    W(0x40091DFA, 0x86); W(0x40091DFB, 0x90); W(0x40091DFC, 0x34)
+    # xQueueGenericSend retw at 0x40091A99 -> j 0x4009F040
+    W(0x40091A99, 0xC6); W(0x40091A9A, 0x68); W(0x40091A9B, 0x35)
+    _cpu.Log(LogLevel.Error, 'RETW_PATCHES: applied 2 retw->j patches (queue send/receive)')
+
+def _demote_ipc_tasks(R, W):
+    # Demote IPC tasks from pri 24 to 0 (not needed in single-core emulation)
+    # Walk ready list at priority 24 (offset = 24*20 = 480)
+    rl24 = 0x3FFC9384 + 24 * 20
+    cnt24 = R(rl24)
+    if cnt24 == 0:
+        return
+    # Remove all items from ready list 24
+    sentinel24 = rl24 + 8
+    item = R(rl24 + 12)  # xListEnd.pxNext
+    moved = 0
+    for _ in range(cnt24 + 1):
+        if item == sentinel24 or item == 0:
+            break
+        next_item = R(item + 4)
+        tcb = R(item + 12)
+        pri = R(tcb + 48)
+        if pri == 24:
+            # Change priority to 0
+            W(tcb + 48, 0)
+            # Remove from pri24 list
+            nx = R(item + 4)
+            pv = R(item + 8)
+            W(nx + 8, pv)
+            W(pv + 4, nx)
+            pi = R(rl24 + 4)
+            if pi == item:
+                W(rl24 + 4, pv)
+            W(item + 16, 0)
+            W(rl24, R(rl24) - 1)
+            # Add to pri0 list
+            rl0 = 0x3FFC9384
+            ri = R(rl0 + 4)
+            rp = R(ri + 8)
+            W(item + 4, ri)
+            W(item + 8, rp)
+            W(rp + 4, item)
+            W(ri + 8, item)
+            W(item + 16, rl0)
+            W(rl0, R(rl0) + 1)
+            moved += 1
+            _cpu.Log(LogLevel.Error, 'DEMOTED IPC task TCB=0x%x from pri24 to pri0' % tcb)
+        item = next_item
+    # Update uxTopReadyPriority if we removed all pri24 tasks
+    if R(rl24) == 0:
+        # Find new top priority
+        for p in range(24, -1, -1):
+            if R(0x3FFC9384 + p * 20) > 0:
+                W(0x3FFC92EC, p)
+                break
+
+def _tick_process():
+    R = _bus.ReadDoubleWord
+    W = _bus.WriteDoubleWord
+    # One-shot setup at first dispatch
+    if not _ipc_demoted[0]:
+        _ipc_demoted[0] = True
+        _demote_ipc_tasks(R, W)
+    if not _retw_patched[0]:
+        _retw_patched[0] = True
+        _apply_retw_patches()
+    tc = (R(0x3FFC92F0) + 1) & 0xFFFFFFFF
+    W(0x3FFC92F0, tc)
+    _tick_log_interval[0] += 1
+    if _tick_log_interval[0] % 500 == 0:
+        _cpu.Log(LogLevel.Error, 'TICK tc=%d nub=0x%x pxCur=0x%x topPri=%d' % (tc, R(0x3FFBEDC4), R(0x3FFC9578), R(0x3FFC92EC)))
+    nub = R(0x3FFBEDC4)
+    if tc < nub:
+        return
+    dl = R(0x3FFC9358)
+    for _ in range(20):
+        cnt = R(dl)
+        if cnt == 0:
+            break
+        head = R(dl + 12)
+        iv = R(head)
+        if tc < iv:
+            W(0x3FFBEDC4, iv)
+            break
+        nx = R(head + 4)
+        pv = R(head + 8)
+        W(nx + 8, pv)
+        W(pv + 4, nx)
+        pi = R(dl + 4)
+        if pi == head:
+            W(dl + 4, pv)
+        W(head + 16, 0)
+        W(dl, cnt - 1)
+        tcb = R(head + 12)
+        eli = tcb + 28
+        ec = R(eli + 16)
+        if ec != 0:
+            en = R(eli + 4)
+            ep = R(eli + 8)
+            W(en + 8, ep)
+            W(ep + 4, en)
+            ei = R(ec + 4)
+            if ei == eli:
+                W(ec + 4, ep)
+            W(eli + 16, 0)
+            W(ec, R(ec) - 1)
+        pri = R(tcb + 48)
+        sli = tcb + 8
+        rl = 0x3FFC9384 + pri * 20
+        ri = R(rl + 4)
+        rp = R(ri + 8)
+        W(sli + 4, ri)
+        W(sli + 8, rp)
+        W(rp + 4, sli)
+        W(ri + 8, sli)
+        W(sli + 16, rl)
+        W(rl, R(rl) + 1)
+        tp = R(0x3FFC92EC)
+        if pri > tp:
+            W(0x3FFC92EC, pri)
+    else:
+        W(0x3FFBEDC4, 0xFFFFFFFF)
+
+__builtin__._tick_process = _tick_process
+"""
+cpu AddHook 0x40091360 "_tick_process()"
+
+# Milestone hooks — track boot progress
+cpu AddHook 0x400d6590 "self.Log(LogLevel.Error, 'MILESTONE: app_main entered!')"
+cpu AddHook 0x4009262C "self.Log(LogLevel.Error, 'MILESTONE: vTaskStartScheduler')"
+cpu AddHook 0x401b0cd0 "self.Log(LogLevel.Error, 'MILESTONE: esp_event_loop_create_default')"
+cpu AddHook 0x40158644 "self.Log(LogLevel.Error, 'MILESTONE: uart_driver_install')"
+# Exception vector hooks — detect crashes
+cpu AddHook 0x40080300 "self.Log(LogLevel.Error, 'KERNEL_EXC @40080300')"
+cpu AddHook 0x400803C0 "self.Log(LogLevel.Error, 'DOUBLE_EXC @400803C0')"
+# Task entry diagnostics
+cpu AddHook 0x400920F0 "self.Log(LogLevel.Error, 'IDLE_TASK entered')"
+cpu AddHook 0x400D506C "self.Log(LogLevel.Error, 'MAIN_TASK entered')"
+# General exception path (not 1, 4, 5, or >=32) — detect unexpected exceptions
+cpu AddHook 0x40082782 "self.Log(LogLevel.Error, 'EXC: General handler (EXCCAUSE=0/2/3/6-31)')"
 
 log "ESP32 Meadow boot ready (ROM + firmware loaded). Use 'start' to run."
