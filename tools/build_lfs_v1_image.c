@@ -156,6 +156,33 @@ int main(int argc, char *argv[]) {
 
     printf("Found %d assemblies (%zu KB total)\n", file_count, total_size / 1024);
 
+    /* Also write Meadow.dll at the filesystem root (not under /mono/4.5/)
+     * so Mono can find it at /meadow0/Meadow.dll */
+    {
+        char meadow_path[1024];
+        snprintf(meadow_path, sizeof(meadow_path), "%s/Meadow.dll", asm_dir);
+        struct stat mst;
+        if (stat(meadow_path, &mst) == 0) {
+            uint8_t *mdata = malloc(mst.st_size);
+            FILE *mfp = fopen(meadow_path, "rb");
+            if (mfp && mdata) {
+                fread(mdata, 1, mst.st_size, mfp);
+                fclose(mfp);
+                lfs_file_t mfile;
+                err = lfs_file_open(&lfs, &mfile, "Meadow.dll", LFS_O_WRONLY | LFS_O_CREAT);
+                if (!err) {
+                    lfs_file_write(&lfs, &mfile, mdata, mst.st_size);
+                    lfs_file_close(&lfs, &mfile);
+                    printf("  Meadow.dll (root): %lld bytes\n", (long long)mst.st_size);
+                }
+                free(mdata);
+            } else {
+                if (mfp) fclose(mfp);
+                free(mdata);
+            }
+        }
+    }
+
     /* Write meadow.config.yaml at filesystem root */
     static const char config_yaml[] =
         "MonoControl:\n"

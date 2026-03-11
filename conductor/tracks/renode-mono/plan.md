@@ -150,11 +150,11 @@ cc -o build_lfs_v1_image tools/build_lfs_v1_image.c /tmp/littlefs/lfs.c /tmp/lit
 
 | Hook | Address | Purpose |
 |------|---------|---------|
-| `mono_copy_bypass` | 0x0805ebf0 | Skip QSPI→SDRAM copy (pre-loaded via LoadBinary) |
-| `mono_ver_bypass` | 0x08143590 | Copy fw version to mono version fields + string ptrs |
-| `mono_str_fix` | 0x08061940 | Patch deep-copied config's mono version string (+0x80) |
-| `asm_scan_bypass` | 0x08061a74 | Skip .NET assembly DLL presence check |
-| `lfs_format_skip` | 0x08171df6 | Prevent LFS format from wiping pre-populated image |
+| `mono_copy_bypass` | 0x0805eb58 | Skip QSPI→SDRAM copy (pre-loaded via LoadBinary) |
+| `mono_ver_bypass` | 0x0814359c | Copy fw version to mono version fields + string ptrs |
+| `mono_str_fix` | 0x08061852 | Patch deep-copied config's mono version string (+0x80) |
+| `asm_scan_bypass` | 0x08061996 | Skip .NET assembly DLL presence check |
+| `lfs_format_skip` | 0x081713f6 | Prevent LFS format from wiping pre-populated image |
 
 ## C# Performance Hooks
 
@@ -204,3 +204,15 @@ cc -o build_lfs_v1_image tools/build_lfs_v1_image.c /tmp/littlefs/lfs.c /tmp/lit
 | 2026-03-11 | Interpreter first, AOT later | Mono ran interpreted before JIT was enabled — switch back for emulator. AOT is longer-term; older Mono AOT has limitations (no dynamic generics, limited reflection). Newer .NET/Mono fixes these. Plan: interpreter now, AOT + interpreter hybrid later. |
 | 2026-03-11 | No Renode state save | Rejected machine state snapshots — fragile across versions, not a real solution. |
 | 2026-03-11 | Overnight JIT run optional | Low priority correctness check only. Not blocking interpreter work. |
+| 2026-03-11 | Use NuGet refs for samples | Meadow.Samples repo has ProjectReferences to sibling source repos; must change to PackageReference (Meadow.F7 2.5.0, Meadow.Foundation 2.5.0) to build standalone. |
+| 2026-03-11 | HCOM download fix (PR #796) | WildernessLabs/Meadow PR #796 (merged 2026-03-07) fixes cirbuf race + semaphore in HCOM file download. Now at HEAD of legacy Meadow repo (`8f0e22bcb83`). Firmware rebuild needed to pick it up. |
+
+## Repo Clarification
+
+| Repo | Path | Role |
+|------|------|------|
+| `Meadow` (legacy) | `/Users/bryan/Git_Repos/wilderness_labs/Meadow/` | Legacy NuttX-based Meadow OS — **what we're building from** |
+| `Meadow.OS` (new) | `/Users/bryan/Git_Repos/wilderness_labs/Meadow.OS/` | New rebase — does NOT have proper Mono bringup yet, not used |
+| `Meadow.OS.Emulator` | worktree at `track/renode-mono` | Emulator scripts, hooks, build wrapper. Build script uses `../Meadow/` as source |
+| `Meadow.CLI` | `/Users/bryan/Git_Repos/wilderness_labs/Meadow.CLI/` | Branch `feature/TCP_Socket_Connection_for_EMU` — TCP socket HCOM for emulator |
+| `Meadow.Samples` | `/Users/bryan/Git_Repos/wilderness_labs/Meadow.Samples/` | Sample apps (Blinky, etc.) — needs NuGet PackageReferences to build standalone |

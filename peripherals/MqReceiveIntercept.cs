@@ -9,7 +9,7 @@
 // The C# version avoids IronPython interpreter overhead (~3ms per invocation).
 //
 // Usage from .resc:
-//   cpu InstallMqIntercept 0x08157c40 0x0814e95b 0x2007C010 0x2007FFF0
+//   cpu InstallMqIntercept 0x0815725c 0x0814de73 0x2007C010 0x2007FFF0
 
 using System;
 using Antmicro.Renode.Core;
