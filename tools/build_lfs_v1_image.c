@@ -155,6 +155,22 @@ int main(int argc, char *argv[]) {
     closedir(dir);
 
     printf("Found %d assemblies (%zu KB total)\n", file_count, total_size / 1024);
+
+    /* Write meadow.config.yaml at filesystem root */
+    static const char config_yaml[] =
+        "MonoControl:\n"
+        "    Options: --interp\n";
+
+    lfs_file_t cfgfile;
+    err = lfs_file_open(&lfs, &cfgfile, "meadow.config.yaml", LFS_O_WRONLY | LFS_O_CREAT);
+    if (err) {
+        fprintf(stderr, "ERROR: open meadow.config.yaml failed: %d\n", err);
+    } else {
+        lfs_file_write(&lfs, &cfgfile, config_yaml, strlen(config_yaml));
+        lfs_file_close(&lfs, &cfgfile);
+        printf("  meadow.config.yaml: %zu bytes (MonoControl: --interp)\n", strlen(config_yaml));
+    }
+
     lfs_unmount(&lfs);
 
     /* Write image to file */
