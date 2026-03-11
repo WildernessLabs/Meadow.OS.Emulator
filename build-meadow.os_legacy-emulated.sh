@@ -100,6 +100,10 @@ echo "--- Mono runtime libraries found ---"
 # Prevent reset loops in emulator
 kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_BOARD_RESET_ON_ASSERT 0
 
+# Generate config.h and set up include directories (needed before mbedtls build)
+echo "--- Generating NuttX headers (make context) ---"
+$MAKE context
+
 # Build mbedtls for NuttX (same flags as Meadow/build-mbedtls.sh)
 MBEDTLS_DIR="$MEADOW_DIR/mbedtls"
 if [ -d "$MBEDTLS_DIR/library" ] && [ ! -f "$MBEDTLS_DIR/library/libmbedcrypto.a" ]; then
