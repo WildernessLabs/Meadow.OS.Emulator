@@ -420,5 +420,9 @@ FodyWeavers.xsd
 # Renode emulator build artifacts
 build/
 
+# Compiled native tools
+tools/build_littlefs_image_native
+tools/build_lfs_v1_image
+
 # Mac Bullshit
 .DS_Store
