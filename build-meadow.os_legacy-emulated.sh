@@ -117,6 +117,15 @@ if [ -d "$MBEDTLS_DIR/library" ] && [ ! -f "$MBEDTLS_DIR/library/libmbedcrypto.a
             -I$NUTTX_DIR/include/sys -nostdinc -nostdlib -fno-builtin -fno-common -Os"
 fi
 
+# Version — read from Meadow/version.txt (e.g. "2.5.7") to match real firmware
+if [ -f "$MEADOW_DIR/version.txt" ]; then
+    IFS='.' read -r EMU_VERSION_MAJOR EMU_VERSION_MINOR EMU_VERSION_REVISION <<< "$(cat "$MEADOW_DIR/version.txt")"
+else
+    EMU_VERSION_MAJOR=0; EMU_VERSION_MINOR=0; EMU_VERSION_REVISION=0
+fi
+EMU_VERSION_BUILD=${EMU_VERSION_BUILD:-0}
+echo "--- Version: $EMU_VERSION_MAJOR.$EMU_VERSION_MINOR.$EMU_VERSION_REVISION.$EMU_VERSION_BUILD ---"
+
 # Compute git hash for version injection
 GIT_HASH=$(git -C "$MEADOW_DIR" rev-parse --short HEAD 2>/dev/null || echo "00000000")
 
@@ -126,10 +135,10 @@ if grep -q '###VERSION_MAJOR###' "$SHARED_HEADER" 2>/dev/null; then
     echo "--- Injecting version placeholders ---"
     cp "$SHARED_HEADER" "$SHARED_HEADER.emubak"
     sed -i.bak \
-        -e 's/###VERSION_MAJOR###/0/g' \
-        -e 's/###VERSION_MINOR###/0/g' \
-        -e 's/###VERSION_REVISION###/0/g' \
-        -e 's/###VERSION_BUILD###/0/g' \
+        -e "s/###VERSION_MAJOR###/$EMU_VERSION_MAJOR/g" \
+        -e "s/###VERSION_MINOR###/$EMU_VERSION_MINOR/g" \
+        -e "s/###VERSION_REVISION###/$EMU_VERSION_REVISION/g" \
+        -e "s/###VERSION_BUILD###/$EMU_VERSION_BUILD/g" \
         -e "s/###BUILD_DAY###/$((10#$(date -u +%d)))/g" \
         -e "s/###BUILD_TWO_DIGIT_DAY###/$(date -u +%d)/g" \
         -e "s/###BUILD_MONTH###/$((10#$(date -u +%m)))/g" \
@@ -157,10 +166,10 @@ if grep -q '###VERSION_MAJOR###' "$USER_LD" 2>/dev/null; then
     echo "--- Injecting version placeholders in user-space.ld ---"
     cp "$USER_LD" "$USER_LD.emubak"
     sed -i.bak \
-        -e 's/###VERSION_MAJOR###/0/g' \
-        -e 's/###VERSION_MINOR###/0/g' \
-        -e 's/###VERSION_REVISION###/0/g' \
-        -e 's/###VERSION_BUILD###/0/g' \
+        -e "s/###VERSION_MAJOR###/$EMU_VERSION_MAJOR/g" \
+        -e "s/###VERSION_MINOR###/$EMU_VERSION_MINOR/g" \
+        -e "s/###VERSION_REVISION###/$EMU_VERSION_REVISION/g" \
+        -e "s/###VERSION_BUILD###/$EMU_VERSION_BUILD/g" \
         -e "s/###BUILD_DAY###/$((10#$(date -u +%d)))/g" \
         -e "s/###BUILD_MONTH###/$((10#$(date -u +%m)))/g" \
         -e "s/###BUILD_YEAR###/$((10#$(date -u +%y)))/g" \
@@ -233,14 +242,39 @@ echo "--- Created nuttx_user.bin (mono sections stripped)"
 # 3a. Extract Mono runtime sections for SDRAM loading (0xC0000000)
 # These sections contain the Mono JIT/interpreter runtime linked at SDRAM addresses.
 # Renode loads them separately into the emulated SDRAM region.
+#
+# Note: objcopy -O binary silently drops .mono_signature (0xC0000000) when extracting
+# multiple sections — the output starts at .mono (0xC0000020). We extract the signature
+# separately using dd from the ELF and prepend it to create a complete binary.
 if arm-none-eabi-objdump -h "$NUTTX_DIR/nuttx_user.elf" | grep -q '\.mono '; then
+    # Extract code sections (starts at 0xC0000020)
     arm-none-eabi-objcopy -O binary \
-        --only-section=.mono_signature \
         --only-section=.mono \
         --only-section=.mono_data \
         --only-section=.mono_comment \
-        "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_mono.bin"
-    echo "--- Created nuttx_mono.bin (Mono runtime for SDRAM at 0xC0000000)"
+        "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_mono_code.bin"
+
+    # Extract .mono_signature (30 bytes at 0xC0000000) directly from ELF
+    SIG_OFFSET=$(arm-none-eabi-readelf -S "$NUTTX_DIR/nuttx_user.elf" | \
+        awk '/\.mono_signature/ {print "0x" $5}')
+    SIG_SIZE=$(arm-none-eabi-readelf -S "$NUTTX_DIR/nuttx_user.elf" | \
+        awk '/\.mono_signature/ {print "0x" $6}')
+    python3 -c "
+import sys
+with open('$NUTTX_DIR/nuttx_user.elf', 'rb') as f:
+    f.seek($SIG_OFFSET)
+    sig = f.read($SIG_SIZE)
+    # Pad to 32 bytes (0x20) to align with .mono section start
+    sig = sig.ljust(0x20, b'\x00')
+    with open('$BUILD_DIR/nuttx_mono_sig.bin', 'wb') as out:
+        out.write(sig)
+print(f'Signature: {sig[:4].hex()} version={int.from_bytes(sig[16:20], \"little\")}.{int.from_bytes(sig[12:16], \"little\")}.{int.from_bytes(sig[8:12], \"little\")}.{int.from_bytes(sig[4:8], \"little\")}')
+"
+
+    # Combine: signature (32 bytes) + code = complete SDRAM binary starting at 0xC0000000
+    cat "$BUILD_DIR/nuttx_mono_sig.bin" "$BUILD_DIR/nuttx_mono_code.bin" > "$BUILD_DIR/nuttx_mono.bin"
+    rm -f "$BUILD_DIR/nuttx_mono_code.bin" "$BUILD_DIR/nuttx_mono_sig.bin"
+    echo "--- Created nuttx_mono.bin (Mono runtime for SDRAM at 0xC0000000, $(du -h "$BUILD_DIR/nuttx_mono.bin" | cut -f1))"
 else
     echo "--- WARNING: No .mono sections found in nuttx_user.elf"
 fi
