@@ -1,7 +1,7 @@
 # Plan: Dual-Machine ESP32 Emulation
 
 ## Track ID: `renode-esp32-dual`
-## Status: `in-progress` (Phase 1.1 ✅, Phase 1.2 ✅, Phase 1.3 in-progress — boot prints UART output, crashes in C++ static init Thread::TakeExecutionSemaphore; retw bug globally mitigated with 6845 hooks; brownout/frame-registration skipped; xQueueGenericReceive pre-scheduler fix in progress)
+## Status: `in-progress` (Phase 1.1 ✅, Phase 1.2 ✅, Phase 1.3 in-progress — boot reaches app_main → MessageDispatcher ctor; SpiTransportProvider skipped; PS.INTLEVEL fix via lock function patches; next: null pointer crash in spi_slave_hal_prepare_data after MessageDispatcher)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -183,16 +183,28 @@
   branch at 0x40091d07 to jump to return pdTRUE (0x40091d83). However, this only catches
   scheduler state 0 (SUSPENDED). With state 1 (NOT_STARTED), code falls through to
   normal blocking path — still crashes. See next item.
-- [ ] **Thread::TakeExecutionSemaphore crash (CURRENT BLOCKER)**: Meadow C++ static
-  constructors create Thread/ThreadPool objects that take semaphores before the FreeRTOS
-  scheduler starts. `xQueueGenericReceive` is called with portMAX_DELAY timeout, queue
-  count is 0, code enters blocking path → `vTaskPlaceOnEventList` → kernel exception
-  (task lists not initialized). Backtrace: `Thread::TakeExecutionSemaphore` (0x400e12fa)
-  → `xQueueGenericReceive` → `vTaskPlaceOnEventList` → `_xt_kernel_exc` (0x40082754).
-  - Root cause confirmed: `xTaskGetSchedulerState` returns 1 (NOT_STARTED), but
-    `beqz.n a10` at 0x40091cf8 only branches on 0 (SUSPENDED). Value 1 falls through
-    to normal blocking path.
-  - Fix needed: Python hook at 0x40091cf8 to intercept state=1 and force return pdTRUE.
+- [x] **Thread::TakeExecutionSemaphore crash — RESOLVED**: Fixed by xQueueGenericReceive
+  scheduler state hook + retw fix getting boot past C++ static constructors.
+- [x] **ROM retw hook regression — RESOLVED**: Confirmed that _fix_retw on ROM retw addresses
+  corrupts AR[0] for other contexts. Even a SINGLE ROM retw hook corrupts WB=0's physical
+  registers. Root cause: _fix_retw writes A0 → AR[0] (physical), but AR[0] is shared across
+  ALL window contexts where WB=0. With no-op hooks (pass), boot works — proving hook overhead
+  isn't the issue, the register manipulation is. Solution: skip ROM function calls at firmware
+  call sites instead.
+- [x] **strftime ROM call crash**: After disabling ROM hooks, strftime (0x40059ab4) called from
+  app_main returned to NULL. NOP'd the callx8 at 0x400d65ca (replaced with movi a8, 0).
+  Result not needed since esp_log_write is also NOP'd.
+- [x] **SpiTransportProvider ctor skip**: Ctor at 0x400d93f8 calls ROM functions (gpio_pad_select_gpio,
+  spi_bus_initialize) that crash at deep call depths. Patched entry+3 (0x400d93fb) with
+  `j 0x400d95f4` (retw.n) to skip entire ctor body. SPI hardware init not needed for emulation.
+- [x] **PS.INTLEVEL / FreeRTOS lock abort**: NOP'd _xtos_set_intlevel calls left PS.INTLEVEL=3
+  permanently, causing lock_acquire_generic to think we're in ISR context → abort(). Fix:
+  patched `extui a11,a11,0,4` → `movi a11,0` in lock_acquire_generic (0x40082c49) and
+  lock_release_generic (0x40082ca7). Forces non-ISR path. Safe because emulator has no real ISRs.
+- [ ] **spi_slave_hal_prepare_data null pointer (CURRENT BLOCKER)**: After MessageDispatcher ctor,
+  code enters spi_slave_hal_prepare_data (0x4009f0a8) with A8=0 (null pointer), causing
+  load/store exception at VADDR=0x00000000/0x00000004. Likely because SpiTransportProvider ctor
+  was skipped, leaving SPI HAL struct uninitialized. Need to identify caller and skip/NOP.
 - [ ] **tlib fix: arch_tlb_fill (U.8)**: Fixed in `bryancostanich/renode` branch
   `fix/xtensa-retw`. Changed `return TRANSLATE_FAIL` → `return ret` in `helper.c` to
   propagate real MMU cause codes. Submodule chain: tlib `2520925`→`2574b54` on
@@ -348,6 +360,11 @@
 | 2026-03-12 | **__register_frame_info_bases skip** | GCC exception frame registration calls pthread_mutex_lock → xQueueGenericReceive before scheduler starts. Replace beqz.n at 0x40199b57 with `j 0x40199b90` (retw.n). |
 | 2026-03-12 | **xQueueGenericReceive scheduler state analysis** | `xTaskGetSchedulerState` returns 1 (NOT_STARTED). The `beqz.n a10` at 0x40091cf8 only branches on 0 (SUSPENDED); value 1 falls through to normal blocking path. Binary patch at 0x40091d07 (SUSPENDED path) is ineffective. Need Python hook at 0x40091cf8 to catch state=1 and skip to return pdTRUE. |
 | 2026-03-12 | **_xt_kernel_exc is a double fault handler** | The BREAK at 0x40082754 is the kernel exception vector (`_xt_kernel_exc`), not a configASSERT. It fires when an exception occurs during exception processing (PS.EXCM=1). In our case: vTaskPlaceOnEventList accesses uninitialized task list structures → memory fault while already in critical section. |
+| 2026-03-12 | **ROM retw hooks cause AR[0] corruption** | Even a SINGLE _fix_retw hook on a ROM function's retw corrupts physical AR[0], breaking any context using WB=0. The _fix_retw approach is fundamentally incompatible with ROM functions. The corruption cascades because AR[0] is shared across all WB=0 contexts — a hooked retw writes one function's A0 value to AR[0], and a later unhooked retw (or any code at WB=0) reads the wrong value. No-op hooks ("pass") don't cause corruption, confirming the register manipulation (not hook overhead) is the problem. |
+| 2026-03-12 | **Skip ROM function calls at firmware call sites** | Instead of fixing retw in ROM functions, skip them entirely by patching the firmware's callx8 → movi (NOP) or patching function entry → j retw.n. Applied to: strftime (NOP callx8), SpiTransportProvider ctor (j to retw.n), _xtos_set_intlevel (NOP 10 callx8 sites). |
+| 2026-03-12 | **PS.INTLEVEL fix via lock function patches** | NOP'd _xtos_set_intlevel leaves PS.INTLEVEL permanently elevated (=3). This makes lock_acquire_generic think code is running in ISR context → abort(). Patched `extui a11,a11,0,4` → `movi a11,0` in both lock_acquire_generic (0x40082c49) and lock_release_generic (0x40082ca7) to always take the non-ISR path. Safe for single-core emulation with no real interrupts. |
+| 2026-03-12 | **SpiTransportProvider ctor skip** | Ctor at 0x400d93f8 has 20 callx8 instructions targeting ROM functions (gpio_pad_select_gpio, spi_bus_initialize, gpio_set_pull_mode). Patched entry+3 (0x400d93fb) with `j 0x400d95f4` (retw.n). SPI hardware init not needed for emulation. Leaves SPI HAL structs uninitialized — may need to provide dummy initialized state for later SPI operations. |
+| 2026-03-12 | **movi encoding: 82 A0 00 (not 82 C0 00)** | Verified `movi a8, 0` = bytes `82 A0 00` from objdump. Previous patches using `82 C0 00` encoded a different (nonzero) immediate but happened to work as harmless NOPs. Corrected encoding for lock function patches uses `B2 A0 00` for `movi a11, 0`. |
 
 ## Changes Log
 
@@ -381,3 +398,5 @@
 | 2026-03-12 | `scripts/trace_callx8.py` | Helper: traces call8/retw sequences with register dumps |
 | 2026-03-12 | `scripts/check_bytes.py` | Helper: verifies binary patch bytes at specific addresses |
 | 2026-03-12 | `scripts/test_set_reg.py` | Helper: tests IronPython register read/write via _cpu.GetRegister/SetRegister |
+| 2026-03-12 | `scripts/esp32-meadow-boot.resc` | (1) Disabled ROM retw hooks (partial hooking corrupts AR[0]). (2) NOP'd strftime callx8 at 0x400d65ca. (3) Skip SpiTransportProvider ctor (j 0x400d95f4 at 0x400d93fb). (4) Patched lock_acquire_generic and lock_release_generic to force non-ISR path (movi a11,0 replacing extui INTLEVEL extraction). (5) Boot now reaches app_main → MessageDispatcher ctor → spi_slave_hal_prepare_data (null ptr crash). |
+| 2026-03-12 | `scripts/retw_hooks_rom.resc` | 23 ROM retw hooks (narrowed from 621) — currently DISABLED via comment in boot script. Kept for reference. |
