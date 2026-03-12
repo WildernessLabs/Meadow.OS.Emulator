@@ -751,6 +751,7 @@ cpu AddHook 0x40081D50 "self.Bus.WriteByte(0x3FFC91A8, 1)"
 
 # (No Python hook needed — non-windowed vListInsertEnd returns via jx a8)
 
+
 # Fix corrupted FreeRTOS lists at runtime.
 # Renode's Xtensa entry instruction occasionally gives vListInitialise wrong register
 # values (off by 8 bytes), causing it to write list initialization data to the wrong
@@ -760,7 +761,10 @@ cpu AddHook 0x40081D50 "self.Bus.WriteByte(0x3FFC91A8, 1)"
 # The bug writes: [list+0]=0xFFFFFFFF, [list+4]=list, [list+8]=list.
 # A properly init'd list has [list+0]=count, [list+8]=0xFFFFFFFF.
 # Check BOTH [addr+8]==addr AND [addr+0]==0xFFFFFFFF to avoid false positives.
-cpu AddHook 0x4009262C "bus = self.GetMachine().SystemBus; results = [( bus.WriteDoubleWord(a, 0), bus.WriteDoubleWord(a+4, a+8), bus.WriteDoubleWord(a+8, 0xFFFFFFFF), bus.WriteDoubleWord(a+12, a+8), bus.WriteDoubleWord(a+16, a+8), self.Log(LogLevel.Error, 'FIXED_LIST 0x{0:X8}'.format(a)) ) for a in range(0x3FFB6000, 0x3FFD0000, 4) if bus.ReadDoubleWord(a+8) == a and bus.ReadDoubleWord(a+12) == 0 and bus.ReadDoubleWord(a+16) == 0]; self.Log(LogLevel.Error, 'LIST_SCAN: fixed ' + str(len(results)) + ' lists')"
+# LIST FIXUP REMOVED: The 16 "corrupted lists" were actually 15 valid semaphore
+# Queue_t objects (pcWriteTo = Q for uxItemSize=0) and 1 properly initialized
+# List_t where xListEnd.pxPrevious matched the detection pattern. The fixup was
+# DESTROYING valid data structures, causing tasks to go missing.
 
 # Simulate FreeRTOS timer tick at every task dispatch.
 # Without real timer interrupts, blocked tasks never unblock. This hook:
@@ -848,25 +852,8 @@ def _demote_ipc_tasks(R, W):
                 W(0x3FFC92EC, p)
                 break
 
-def _tick_process():
-    R = _bus.ReadDoubleWord
-    W = _bus.WriteDoubleWord
-    # One-shot setup at first dispatch
-    if not _ipc_demoted[0]:
-        _ipc_demoted[0] = True
-        _demote_ipc_tasks(R, W)
-    if not _retw_patched[0]:
-        _retw_patched[0] = True
-        _apply_retw_patches()
-    tc = (R(0x3FFC92F0) + 1) & 0xFFFFFFFF
-    W(0x3FFC92F0, tc)
-    _tick_log_interval[0] += 1
-    if _tick_log_interval[0] % 500 == 0:
-        _cpu.Log(LogLevel.Error, 'TICK tc=%d nub=0x%x pxCur=0x%x topPri=%d' % (tc, R(0x3FFBEDC4), R(0x3FFC9578), R(0x3FFC92EC)))
-    nub = R(0x3FFBEDC4)
-    if tc < nub:
-        return
-    dl = R(0x3FFC9358)
+def _wake_delayed(R, W, dl, tc):
+    woken = 0
     for _ in range(20):
         cnt = R(dl)
         if cnt == 0:
@@ -874,7 +861,9 @@ def _tick_process():
         head = R(dl + 12)
         iv = R(head)
         if tc < iv:
-            W(0x3FFBEDC4, iv)
+            nub = R(0x3FFBEDC4)
+            if iv < nub:
+                W(0x3FFBEDC4, iv)
             break
         nx = R(head + 4)
         pv = R(head + 8)
@@ -901,7 +890,13 @@ def _tick_process():
         pri = R(tcb + 48)
         sli = tcb + 8
         rl = 0x3FFC9384 + pri * 20
+        # Validate pxIndex — Renode window-spill bugs can corrupt it with
+        # code addresses (e.g., 0x400xxxxx). Use xListEnd as safe insertion
+        # point when pxIndex is outside DRAM range.
         ri = R(rl + 4)
+        if ri < 0x3FF00000 or ri > 0x40000000:
+            ri = rl + 8
+            W(rl + 4, ri)
         rp = R(ri + 8)
         W(sli + 4, ri)
         W(sli + 8, rp)
@@ -912,8 +907,43 @@ def _tick_process():
         tp = R(0x3FFC92EC)
         if pri > tp:
             W(0x3FFC92EC, pri)
-    else:
-        W(0x3FFBEDC4, 0xFFFFFFFF)
+        woken += 1
+        _cpu.Log(LogLevel.Error, 'WAKE: tcb=0x%x pri=%d -> ready[%d]' % (tcb, pri, pri))
+    return woken
+
+def _tick_process():
+    R = _bus.ReadDoubleWord
+    W = _bus.WriteDoubleWord
+    # One-shot setup at first dispatch
+    if not _ipc_demoted[0]:
+        _ipc_demoted[0] = True
+        _demote_ipc_tasks(R, W)
+        # Fake core 1 scheduler as running — main_task busy-waits on
+        # port_xSchedulerRunning[1] (0x3FFC92BC) which is never set in
+        # single-core emulation.
+        W(0x3FFC92BC, 1)
+    if not _retw_patched[0]:
+        _retw_patched[0] = True
+        _apply_retw_patches()
+    tc = (R(0x3FFC92F0) + 1) & 0xFFFFFFFF
+    W(0x3FFC92F0, tc)
+    _tick_log_interval[0] += 1
+    if _tick_log_interval[0] % 100 == 0:
+        _cpu.Log(LogLevel.Error, 'TICK tc=%d nub=0x%x pxCur=0x%x topPri=%d' % (tc, R(0x3FFBEDC4), R(0x3FFC9578), R(0x3FFC92EC)))
+    # Repair any ready-list pxIndex values corrupted by Renode window-spill bugs.
+    # The firmware's listGET_OWNER_OF_NEXT_ENTRY dereferences pxIndex, so corrupt
+    # values (e.g., IRAM code addresses) must be fixed before the firmware runs.
+    for p in range(25):
+        base = 0x3FFC9384 + p * 20
+        pi = R(base + 4)
+        if pi < 0x3FF00000 or pi > 0x40000000:
+            W(base + 4, base + 8)
+    # Check only the primary delayed list (pxDelayedTaskList pointer).
+    # Do NOT check the overflow delayed list — it holds tasks whose wake time
+    # wrapped; they must wait for the tick counter to overflow and the lists
+    # to swap (handled by FreeRTOS internally).
+    dl1 = R(0x3FFC9358)
+    _wake_delayed(R, W, dl1, tc)
 
 __builtin__._tick_process = _tick_process
 """
@@ -924,9 +954,32 @@ cpu AddHook 0x400d6590 "self.Log(LogLevel.Error, 'MILESTONE: app_main entered!')
 cpu AddHook 0x4009262C "self.Log(LogLevel.Error, 'MILESTONE: vTaskStartScheduler')"
 cpu AddHook 0x401b0cd0 "self.Log(LogLevel.Error, 'MILESTONE: esp_event_loop_create_default')"
 cpu AddHook 0x40158644 "self.Log(LogLevel.Error, 'MILESTONE: uart_driver_install')"
+# app_main sub-function milestones
+cpu AddHook 0x400d76c0 "self.Log(LogLevel.Error, 'MILESTONE: Logging::Setup')"
+cpu AddHook 0x40094e14 "self.Log(LogLevel.Error, 'MILESTONE: esp_log_timestamp')"
+cpu AddHook 0x400d66f8 "self.Log(LogLevel.Error, 'MILESTONE: NvsManager::Setup')"
+cpu AddHook 0x400d93f8 "self.Log(LogLevel.Error, 'MILESTONE: SpiTransportProvider ctor')"
+cpu AddHook 0x400d91cc "self.Log(LogLevel.Error, 'MILESTONE: MessageDispatcher ctor')"
+cpu AddHook 0x400d6b50 "self.Log(LogLevel.Error, 'MILESTONE: SendConfigAsInterrupt')"
+cpu AddHook 0x400933fc "self.Log(LogLevel.Error, 'MILESTONE: vTaskSuspend')"
+cpu AddHook 0x401357a8 "self.Log(LogLevel.Error, 'MILESTONE: esp_ipc_call')"
+cpu AddHook 0x401357d0 "self.Log(LogLevel.Error, 'MILESTONE: esp_ipc_call_blocking')"
+# uart_driver_install sub-function hooks
+cpu AddHook 0x40157fbc "self.Log(LogLevel.Error, 'UART: uart_param_config')"
+cpu AddHook 0x40157d20 "self.Log(LogLevel.Error, 'UART: uart_set_pin')"
+cpu AddHook 0x40157cb0 "self.Log(LogLevel.Error, 'UART: uart_isr_register')"
+cpu AddHook 0x400d5810 "self.Log(LogLevel.Error, 'UART: esp_intr_alloc')"
+cpu AddHook 0x40155884 "self.Log(LogLevel.Error, 'UART: periph_module_enable')"
+cpu AddHook 0x40157bf4 "self.Log(LogLevel.Error, 'UART: uart_pattern_queue_reset')"
 # Exception vector hooks — detect crashes
 cpu AddHook 0x40080300 "self.Log(LogLevel.Error, 'KERNEL_EXC @40080300')"
 cpu AddHook 0x400803C0 "self.Log(LogLevel.Error, 'DOUBLE_EXC @400803C0')"
+# Window exception monitoring — log every 10000th window overflow/underflow
+python "exc_count = [0]"
+python "def _exc_monitor(): exc_count[0] += 1; (self.Log(LogLevel.Error, 'WIN_EXC count=%d' % exc_count[0]) if exc_count[0] % 10000 == 0 else None)"
+python "__builtin__._exc_monitor = _exc_monitor"
+python "__builtin__.exc_count = exc_count"
+cpu AddHook 0x40080340 "_exc_monitor()"
 # Task entry diagnostics
 cpu AddHook 0x400920F0 "self.Log(LogLevel.Error, 'IDLE_TASK entered')"
 cpu AddHook 0x400D506C "self.Log(LogLevel.Error, 'MAIN_TASK entered')"

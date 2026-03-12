@@ -1,7 +1,7 @@
 # Plan: Dual-Machine ESP32 Emulation
 
 ## Track ID: `renode-esp32-dual`
-## Status: `in-progress` (Phase 1.1 ✅, Phase 1.2 ✅, Phase 1.3 in-progress — arch_tlb_fill bug fixed in tlib, retw workarounds under re-evaluation)
+## Status: `in-progress` (Phase 1.1 ✅, Phase 1.2 ✅, Phase 1.3 in-progress — app_main reached, stalled inside uart_isr_register; list corruption was false positive; pxIndex DRAM corruption found and mitigated; tlib debug cleanup done)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -104,14 +104,94 @@
   returning `TRANSLATE_FAIL` (==1==`SYSCALL_CAUSE`) instead of the real MMU cause code. Fixed
   in tlib (`bryancostanich/renode`, branch `fix/xtensa-retw`, commit `2520925`). This caused
   cascading PC corruption via the syscall handler adding 3 to EPC1 for non-SYSCALL instructions.
-- [ ] **Re-evaluate retw workarounds**: Code analysis shows retw implementation in tlib is
-  correct (`cpu_R[0]` = `env->regs[0]` = logical A0, properly synced via window mechanism).
-  The "retw bug" may have been a misdiagnosis — symptoms caused by arch_tlb_fill's fake
-  SYSCALL exceptions corrupting EPC1. Need to test with retw workarounds removed.
-- [ ] **Simplify boot script**: Remove retw trampolines, non-windowed list functions, and
-  deferred retw patches if retw works correctly after arch_tlb_fill fix.
+- [x] **Re-evaluate retw workarounds**: Confirmed retw/entry work correctly in tlib. Removed
+  all retw workarounds from boot script (~428 lines): vTaskSwitchContext inline trampoline,
+  _frxt_dispatch resume trampoline, non-windowed vListInsertEnd/vListInsert/uxListRemove,
+  retw trampoline, deferred retw patches. The "retw bug" was a misdiagnosis caused by
+  arch_tlb_fill's fake SYSCALL exceptions corrupting EPC1.
+- [x] **Simplify boot script**: Removed retw trampolines, non-windowed list functions, and
+  deferred retw patches. Boot script reduced from ~936 to ~508 lines.
+- [x] **A8=A0 "corruption" investigation — RESOLVED (red herring)**: Extensive TCG register
+  allocator investigation confirmed that A8 receiving A0's value (0x40091363) in
+  vTaskSwitchContext is NOT a bug. The instruction at PC=0x40092b7e is `addi a8, a0, 0`
+  — the firmware intentionally copies A0 to A8 as part of a processor-ID-based array index
+  computation (rsr.prid → extui → addi a8,a0,0 → slli → add.n). The phys_regs[20] showing
+  a different value is expected: phys_regs are only synced at sync_windowbase, while
+  env->regs[8] is updated in real-time by TCG ops. No TCG register allocator bug exists.
+- [x] **Upstream Renode Xtensa issue search**: Exhaustive search of renode/renode,
+  renode/renode-infrastructure, and antmicro/tlib GitHub repos found NO reported issues or
+  PRs for Xtensa register window bugs, RETW corruption, or ESP32 FreeRTOS crashes. The
+  Xtensa emulation was ported from QEMU with minimal bug fixes since Dec 2021. ESP32 support
+  is explicitly "core only" without full SoC/peripherals. Any bugs we find are likely novel.
+- [x] **Clean up debug instrumentation in tlib**: Reverted all debug logging from A8 investigation
+  across 8 files: translate.c (TB chaining disable, debug_check_a8 helper, opcode logging),
+  op_helper.c (debug_check_a8 function ~43 lines), helper.h (declaration), cpu-exec.c
+  (TBEXEC/IRQ_CORRUPT checks), exc_helper.c (DEBUG_IRQ logging), win_helper.c (old_r8 tracking),
+  softmmu_template.h (load/store instrumentation), mmu_helper.c (stale comment). tlib rebuilt
+  and .NET assembly updated. Preserved committed fixes: assert→logging (2574b54), WAITI
+  (4271279), CCOUNT (8a1549f), clock freq (46768e0), arch_tlb_fill (2520925).
+- [x] **FreeRTOS list corruption — RESOLVED as false positive**: The 16 "corrupted lists" detected
+  by the scan-and-repair hook were NOT actually corrupted:
+  - 15 were valid binary semaphore Queue_t objects where pcWriteTo==Q (normal for uxItemSize=0
+    semaphores; Queue_t header is 80 bytes with pcHead=pcTail=Q+80, pcWriteTo=Q when empty)
+  - 1 was xSuspendedTaskList where the scan hit the xListEnd mini-item within the List_t
+  - The scan-and-repair code was DESTROYING valid data structures, not fixing corruption
+  - Removed the destructive fixup code from the boot script
+- [x] **pxIndex DRAM corruption found and mitigated**: Renode's window-spill mechanism occasionally
+  writes IRAM code addresses (e.g., 0x40091363 = _frxt_dispatch return addr) into FreeRTOS
+  list pxIndex fields. When _wake_delayed tried to insert a task using the corrupt pxIndex,
+  it wrote to IRAM (ri+8), corrupting code at _frxt_dispatch and causing IllegalInstruction
+  crashes. Root cause: register window overflow saves A0 (containing return address) to a
+  stack location that overlaps with a TCB's xStateListItem.pxPrevious field; when
+  uxListRemove runs and pxList->pxIndex == pxItemToRemove, it sets pxIndex to the corrupt
+  pxPrevious value. Mitigation: tick simulation validates all 25 ready-list pxIndex values
+  every tick, resetting any outside DRAM range (0x3FF00000-0x40000000) to &xListEnd.
+- [x] **Overflow delayed list wake bug fixed**: Initially added wake logic for both
+  pxDelayedTaskList and xDelayedTaskList2 (overflow list). This was WRONG — tasks in the
+  overflow list have wake times that wrapped around (e.g., tick + portMAX_DELAY). They must
+  wait for the tick counter to overflow and the lists to swap. The timer service task was
+  stuck in a wake→delay→wake loop because its wake time (0) was always <= tick count.
+  Fix: only check pxDelayedTaskList (the pointer, which FreeRTOS manages).
+- [x] **Core 1 scheduler flag for single-core emulation**: main_task busy-waits on
+  port_xSchedulerRunning[1] at 0x3FFC92BC, waiting for core 1's scheduler to start.
+  Since we only emulate one core, this never gets set. Fix: write 1 to 0x3FFC92BC at
+  first dispatch (alongside IPC demotion).
+- [x] **Boot reaches app_main**: With the above fixes, the system now reaches:
+  vTaskStartScheduler → main_task → app_main → Logging::Setup → uart_param_config →
+  uart_set_pin → uart_driver_install → uart_pattern_queue_reset → uart_isr_register
+- [ ] **Stall inside uart_isr_register**: After uart_driver_install calls uart_isr_register
+  (0x40157cb0), the system stalls indefinitely. CPU PC samples show context save/restore code
+  (xthal_save_extra_nw, xthal_restore_extra_nw) and UserExceptionVector — the CPU IS
+  executing but making no visible progress. No _frxt_dispatch calls occur (no TICK messages),
+  no window exception storms detected. uart_isr_register calls esp_intr_alloc internally;
+  the stall may be in interrupt registration or a spinlock. Investigation needed.
+- [ ] **tlib fix: arch_tlb_fill (U.8)**: Fixed in `bryancostanich/renode` branch
+  `fix/xtensa-retw`. Changed `return TRANSLATE_FAIL` → `return ret` in `helper.c` to
+  propagate real MMU cause codes. Submodule chain: tlib `2520925`→`2574b54` on
+  `fix/xtensa-esp32-emulation`, Infrastructure `bcc70d280` on `fix/xtensa-esp32-emulation`,
+  renode `e7098410` on `fix/xtensa-retw`. Build requires: `build.sh` for tlib .so, then
+  `dotnet build Renode_NET.sln -c Release` to re-embed .so in .NET assembly.
+- [ ] **Investigate uart_isr_register stall**: CPU runs but no progress after uart_isr_register.
+  Disassembly shows it calls `esp_intr_alloc` (via callx8). Possible causes: spinlock
+  contention in interrupt registration, unmodeled interrupt controller registers, or infinite
+  loop in interrupt enable code. Next step: add hooks inside uart_isr_register's sub-calls
+  and/or NOP the uart_isr_register call to skip ISR registration.
 - [ ] Map 0x60000000 (UART FIFO alternate bus address) as a peripheral to capture debug output
 - [ ] Catalog all remaining hardware accesses that fail
+
+### Key FreeRTOS Addresses (ESP-IDF 4.2.4 dual-core)
+- xTickCount: 0x3FFC92F0
+- xNextTaskUnblockTime: 0x3FFBEDC4
+- pxDelayedTaskList: 0x3FFC9358 (pointer to current delayed list)
+- xDelayedTaskList1: 0x3FFC9370 (List_t)
+- xDelayedTaskList2: 0x3FFC935C (List_t, overflow)
+- pxReadyTasksLists: 0x3FFC9384 (25 lists × 20 bytes)
+- uxTopReadyPriority: 0x3FFC92EC
+- pxCurrentTCB: 0x3FFC9578 (array[2] for dual-core)
+- uxCurrentNumberOfTasks: 0x3FFC92F4
+- xSuspendedTaskList: 0x3FFC9300
+- xPendingReadyList: 0x3FFC9340
+- port_xSchedulerRunning: 0x3FFC92B8 (array[2])
 
 ## Phase 2: SPI Bridge Peripheral
 
@@ -224,6 +304,20 @@
 
 | 2026-03-11 | **arch_tlb_fill root cause found and fixed** | `arch_tlb_fill` returned `TRANSLATE_FAIL` (==1==`SYSCALL_CAUSE`) instead of the real MMU cause. Fixed in tlib by returning the actual error code from `get_physical_address`. This was the root cause of the vListInsertEnd/vListInsert PC corruption. The "retw bug" may have been a misdiagnosis caused by the same issue — retw code analysis shows the implementation is correct. Need to re-test without retw workarounds. |
 | 2026-03-11 | Re-evaluate all retw workarounds | With arch_tlb_fill fixed, the ~500 lines of retw trampolines and non-windowed list functions in the boot script may be unnecessary. Test incrementally by removing workarounds and checking for regressions. |
+| 2026-03-11 | **Retw workarounds confirmed unnecessary** | tlib debug logging confirmed entry/sync_windowbase produce correct register values. Retw reads logical A0 (env->regs[0]) which is always correctly synced. All ~428 lines of retw workarounds removed from boot script. The "retw bug" was caused by arch_tlb_fill masking STORE_PROHIBITED as SYSCALL, which corrupted EPC1 via the syscall handler adding 3 to PC for non-SYSCALL instructions. |
+| 2026-03-11 | **arch_tlb_fill fix exposed silent null pointer writes** | Before the fix, writes to address 0x0 raised STORE_PROHIBITED_CAUSE(29) → masked to TRANSLATE_FAIL(1)==SYSCALL_CAUSE → SYSCALL handler (no-op) → execution continued silently. After the fix, these writes correctly raise cause 29 → general exception handler → firmware panics. The null writes come from vListInsertEnd dereferencing null pxIndex in corrupted list structures. |
+| 2026-03-11 | **FreeRTOS list corruption is a separate bug** | 16 lists still corrupted during init even with arch_tlb_fill fix. The corruption has the same "off by 8 bytes" pattern. Root cause is NOT arch_tlb_fill and NOT retw. Must be a third bug — possibly in TCG code generation, region TLB init, or another tlib issue. |
+| 2026-03-11 | **tlib build chain: .so embedding** | After rebuilding tlib with `build.sh`, must also run `dotnet build Renode_NET.sln -c Release` to re-embed the updated translate-xtensa-le.so in the .NET assembly. Renode extracts the embedded .so to a temp dir at runtime via dlopen — if you only rebuild tlib, the old .so is still used. |
+| 2026-03-11 | **A8=A0 is firmware code, not a bug** | The `addi a8, a0, 0` at 0x40092b7e in vTaskSwitchContext intentionally copies A0→A8 for processor-ID-based array indexing. The phys_regs vs env->regs divergence is normal (phys_regs sync only at sync_windowbase). No TCG register allocator bug. Multiple sessions were spent on this red herring. |
+| 2026-03-11 | **No upstream Xtensa window bugs reported** | Searched renode/renode, renode-infrastructure, antmicro/tlib GitHub repos. Zero issues/PRs for register window corruption, RETW bugs, or ESP32 FreeRTOS crashes. The tlib Xtensa port from QEMU has had minimal bug fixes. Any bugs we find are novel/unreported. |
+| 2026-03-11 | **tlib build on macOS: Infrastructure_NET.csproj only** | `dotnet build Renode.sln` fails on macOS due to .NET Framework projects. Current workaround: build only `Infrastructure_NET.csproj` (targets net8.0), then copy Infrastructure.dll. Full solution build may work with an older .NET SDK installed — worth investigating as it would simplify the build chain. |
+| 2026-03-11 | **tlib debug instrumentation needs cleanup** | Multiple debug hooks added across 7 files during A8 investigation: TB chaining disabled globally, per-instruction helper calls, opcode name logging, load/store value tracing, IRQ corruption checks. All must be removed before further work — they add significant overhead and noise. Keep only the actual bug fixes (assert→logging, WAITI, CCOUNT, arch_tlb_fill). |
+| 2026-03-11 | **List corruption scan-and-repair removed** | The 16 "corrupted lists" were false positives: 15 valid Queue_t binary semaphores + 1 valid xSuspendedTaskList overlap. The scan-and-repair code was destroying valid data structures. Removed entirely. |
+| 2026-03-11 | **Retw workarounds confirmed still needed** | Testing esp32-meadow-boot-minimal.resc (without retw workarounds) crashes with "Illegal retw instruction(pc=40092c3c, PS=00060028, m=0, n=0)" at vTaskSwitchContext. The arch_tlb_fill fix alone does NOT eliminate all retw failures. The full boot script with retw patches for _frxt_dispatch, xQueueGenericReceive, and xQueueGenericSend is still required. |
+| 2026-03-11 | **pxIndex DRAM corruption mitigation** | Renode window-spill writes IRAM addresses into FreeRTOS list fields. Rather than fixing the root cause in tlib (complex register window spill analysis), added per-tick validation of all 25 ready-list pxIndex values. Any value outside DRAM (0x3FF00000-0x40000000) is reset to &xListEnd. Also validates pxIndex before use in _wake_delayed insertion. |
+| 2026-03-11 | **Do NOT wake overflow delayed list** | Tasks in xDelayedTaskList2 (overflow) have wrapped wake times and must wait for tick counter overflow + list swap. Only check pxDelayedTaskList (the pointer managed by FreeRTOS). |
+| 2026-03-11 | **Fake port_xSchedulerRunning[1]** | main_task busy-waits on port_xSchedulerRunning[1] (0x3FFC92BC). Set to 1 at first dispatch since we don't emulate core 1. |
+| 2026-03-11 | **ESP-IDF TCB layout confirmed empirically** | ESP-IDF 4.2.4 dual-core TCB offsets: pxTopOfStack(+0), unknown(+4), xGenericListItem(+8, 20B), xEventListItem(+28, 20B), pxStack(+44?), uxPriority(+48), pcTaskName(+56). Extra 4 bytes vs standard FreeRTOS due to portCRITICAL_NESTING_IN_TCB=0 but xCoreID field. |
 
 ## Changes Log
 
@@ -245,3 +339,9 @@
 | 2026-03-10 | `platforms/meadow-esp32.repl` | Expanded ROM to 0x70000, added sram2extLow/High, replaced DPORT/RTC_CNTL/TimerGroup MappedMemory with custom C# peripherals |
 | 2026-03-10 | `scripts/esp32-meadow-boot.resc` | Major updates: VECBASE fix (0x40080000), esp_crosscore_int_send_yield→vPortYield patch, 62 s32c1i→l32i patches, vPortEnter/ExitCritical NOPs, malloc→heap_caps_malloc_default jump, __assert_func NOP, flash function NOPs, window overflow/underflow diagnostic hooks, FreeRTOS milestone hooks |
 | 2026-03-11 | `scripts/esp32-meadow-boot.resc` | Major updates: non-windowed list functions at 0x4009F060-0x4009F158, vTaskSwitchContext inline trampoline at 0x40092C33, _frxt_dispatch resume trampoline at 0x4009F040, retw→j patches for xQueueGenericReceive/Send (deferred via Python), vTaskSwitchContext dual-core exit bypass, core affinity NOP, FreeRTOS list scan-and-repair hook, Python tick simulation with IPC demotion and delayed task list processing |
+| 2026-03-11 | `scripts/esp32-meadow-boot-minimal.resc` | Removed ~428 lines of retw workarounds: vTaskSwitchContext trampoline, _frxt_dispatch trampoline, non-windowed list functions (vListInsertEnd/vListInsert/uxListRemove + 18 call8 redirects + entry→j patches), retw trampoline, deferred retw patches, _retw_patched flag. Retains list fixup, IPC demotion, tick simulation, milestone hooks |
+| 2026-03-11 | tlib `arch/xtensa/helper.c` | **arch_tlb_fill fix**: Changed `return TRANSLATE_FAIL` → `return ret` to propagate real MMU cause codes. Submodule chain: tlib `2520925`→`2574b54`, Infrastructure `bcc70d280`, renode `e7098410` |
+| 2026-03-11 | tlib `arch/xtensa/win_helper.c` | Added defensive bounds checks with LOG_LEVEL_ERROR assertions in copy_window_from_phys, copy_phys_from_window, and window_check helpers. Prevents out-of-bounds access on phys_regs array |
+| 2026-03-11 | tlib (7 files) | **Debug instrumentation (TO REMOVE)**: Added extensive per-instruction tracing, TCG register dumps, opcode logging, TB chaining disable, load/store value traps across translate.c, op_helper.c, helper.h, cpu-exec.c, exc_helper.c, win_helper.c, softmmu_template.h. All related to A8=A0 investigation (now resolved as red herring). |
+| 2026-03-11 | tlib (8 files) | **Debug instrumentation REMOVED**: Reverted all debug logging from A8 investigation. translate.c, op_helper.c, helper.h, cpu-exec.c, exc_helper.c, win_helper.c, softmmu_template.h, mmu_helper.c all restored to clean state. tlib rebuilt + .NET assembly updated. |
+| 2026-03-11 | `scripts/esp32-meadow-boot.resc` | Major tick simulation improvements: (1) Removed destructive list scan-and-repair (was false positive). (2) Extracted _wake_delayed helper function with pxIndex DRAM validation (resets to &xListEnd if outside 0x3FF00000-0x40000000). (3) Added per-tick ready-list pxIndex repair loop (25 lists). (4) Fixed overflow delayed list — only check pxDelayedTaskList pointer, NOT xDelayedTaskList2. (5) Set port_xSchedulerRunning[1] = 1 at first dispatch for single-core emulation. (6) Added app_main sub-function milestone hooks. System now reaches app_main → uart_driver_install → uart_isr_register. |
