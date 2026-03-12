@@ -1,7 +1,7 @@
 # Plan: Dual-Machine ESP32 Emulation
 
 ## Track ID: `renode-esp32-dual`
-## Status: `in-progress` (Phase 1.1 ✅, Phase 1.2 ✅, Phase 1.3 in-progress — app_main reached, stalled inside uart_isr_register; list corruption was false positive; pxIndex DRAM corruption found and mitigated; tlib debug cleanup done)
+## Status: `in-progress` (Phase 1.1 ✅, Phase 1.2 ✅, Phase 1.3 in-progress — boot prints UART output, crashes in C++ static init Thread::TakeExecutionSemaphore; retw bug globally mitigated with 6845 hooks; brownout/frame-registration skipped; xQueueGenericReceive pre-scheduler fix in progress)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -156,28 +156,52 @@
   port_xSchedulerRunning[1] at 0x3FFC92BC, waiting for core 1's scheduler to start.
   Since we only emulate one core, this never gets set. Fix: write 1 to 0x3FFC92BC at
   first dispatch (alongside IPC demotion).
-- [x] **Boot reaches app_main**: With the above fixes, the system now reaches:
+- [x] **Boot reaches app_main and beyond**: With the above fixes, the system now reaches:
   vTaskStartScheduler → main_task → app_main → Logging::Setup → uart_param_config →
-  uart_set_pin → uart_driver_install → uart_pattern_queue_reset → uart_isr_register
-- [ ] **Stall inside uart_isr_register**: After uart_driver_install calls uart_isr_register
-  (0x40157cb0), the system stalls indefinitely. CPU PC samples show context save/restore code
-  (xthal_save_extra_nw, xthal_restore_extra_nw) and UserExceptionVector — the CPU IS
-  executing but making no visible progress. No _frxt_dispatch calls occur (no TICK messages),
-  no window exception storms detected. uart_isr_register calls esp_intr_alloc internally;
-  the stall may be in interrupt registration or a spinlock. Investigation needed.
+  uart_set_pin → uart_driver_install → uart_pattern_queue_reset → uart_isr_register →
+  brownout_init → C++ static constructors (do_global_ctors). UART output visible:
+  "Re-enable cpu cache." printed before crash in Thread::TakeExecutionSemaphore.
+- [x] **Stall inside uart_isr_register — RESOLVED**: Root cause was Renode's retw bug
+  (reads AR[0] instead of AR[WINDOWBASE*4]) causing return address corruption in deeply
+  nested call chains. Fix: NOP'd the `esp_intr_alloc` call inside uart_isr_register
+  (interrupt registration not needed in emulation), plus global retw fix (see below).
+- [x] **Renode retw bug — global mitigation**: Extracted all 6845 retw/retw.n addresses
+  from MeadowComms.elf, generated `scripts/retw_hooks.resc` with a Python hook at each
+  address that copies logical A0 to physical AR[0] before retw executes. Takes ~40s to
+  load at startup but fixes retw system-wide. The `_fix_retw()` hook also detects bad
+  return addresses (< 0x40000000 or > 0x401C0000) and logs them.
+  - Discovery: `call8` does NOT rotate WINDOWBASE — only `entry` does. Patching `entry`
+    to a jump breaks window rotation, causing retw to return to the wrong caller.
+- [x] **esp_brownout_init skip**: Brownout detection irrelevant in emulation. Keep `entry`
+  at 0x400d5948 (for window rotation), replace `l32r` at 0x400d594b with `j` to retw.n
+  at 0x400d597d. Skips entire function body.
+- [x] **__register_frame_info_bases skip**: GCC exception frame registration calls
+  pthread_mutex_lock → xQueueGenericReceive before FreeRTOS scheduler starts, triggering
+  assertions. Not needed for emulation. Replace `beqz.n` at 0x40199b57 with `j` to
+  retw.n at 0x40199b90.
+- [x] **xQueueGenericReceive pre-scheduler patch (partial)**: Patched scheduler-suspended
+  branch at 0x40091d07 to jump to return pdTRUE (0x40091d83). However, this only catches
+  scheduler state 0 (SUSPENDED). With state 1 (NOT_STARTED), code falls through to
+  normal blocking path — still crashes. See next item.
+- [ ] **Thread::TakeExecutionSemaphore crash (CURRENT BLOCKER)**: Meadow C++ static
+  constructors create Thread/ThreadPool objects that take semaphores before the FreeRTOS
+  scheduler starts. `xQueueGenericReceive` is called with portMAX_DELAY timeout, queue
+  count is 0, code enters blocking path → `vTaskPlaceOnEventList` → kernel exception
+  (task lists not initialized). Backtrace: `Thread::TakeExecutionSemaphore` (0x400e12fa)
+  → `xQueueGenericReceive` → `vTaskPlaceOnEventList` → `_xt_kernel_exc` (0x40082754).
+  - Root cause confirmed: `xTaskGetSchedulerState` returns 1 (NOT_STARTED), but
+    `beqz.n a10` at 0x40091cf8 only branches on 0 (SUSPENDED). Value 1 falls through
+    to normal blocking path.
+  - Fix needed: Python hook at 0x40091cf8 to intercept state=1 and force return pdTRUE.
 - [ ] **tlib fix: arch_tlb_fill (U.8)**: Fixed in `bryancostanich/renode` branch
   `fix/xtensa-retw`. Changed `return TRANSLATE_FAIL` → `return ret` in `helper.c` to
   propagate real MMU cause codes. Submodule chain: tlib `2520925`→`2574b54` on
   `fix/xtensa-esp32-emulation`, Infrastructure `bcc70d280` on `fix/xtensa-esp32-emulation`,
   renode `e7098410` on `fix/xtensa-retw`. Build requires: `build.sh` for tlib .so, then
   `dotnet build Renode_NET.sln -c Release` to re-embed .so in .NET assembly.
-- [ ] **Investigate uart_isr_register stall**: CPU runs but no progress after uart_isr_register.
-  Disassembly shows it calls `esp_intr_alloc` (via callx8). Possible causes: spinlock
-  contention in interrupt registration, unmodeled interrupt controller registers, or infinite
-  loop in interrupt enable code. Next step: add hooks inside uart_isr_register's sub-calls
-  and/or NOP the uart_isr_register call to skip ISR registration.
 - [ ] Map 0x60000000 (UART FIFO alternate bus address) as a peripheral to capture debug output
 - [ ] Catalog all remaining hardware accesses that fail
+- [ ] Consider Renode source patch for retw bug (eliminate 6845-hook overhead)
 
 ### Key FreeRTOS Addresses (ESP-IDF 4.2.4 dual-core)
 - xTickCount: 0x3FFC92F0
@@ -318,6 +342,12 @@
 | 2026-03-11 | **Do NOT wake overflow delayed list** | Tasks in xDelayedTaskList2 (overflow) have wrapped wake times and must wait for tick counter overflow + list swap. Only check pxDelayedTaskList (the pointer managed by FreeRTOS). |
 | 2026-03-11 | **Fake port_xSchedulerRunning[1]** | main_task busy-waits on port_xSchedulerRunning[1] (0x3FFC92BC). Set to 1 at first dispatch since we don't emulate core 1. |
 | 2026-03-11 | **ESP-IDF TCB layout confirmed empirically** | ESP-IDF 4.2.4 dual-core TCB offsets: pxTopOfStack(+0), unknown(+4), xGenericListItem(+8, 20B), xEventListItem(+28, 20B), pxStack(+44?), uxPriority(+48), pcTaskName(+56). Extra 4 bytes vs standard FreeRTOS due to portCRITICAL_NESTING_IN_TCB=0 but xCoreID field. |
+| 2026-03-12 | **Bulk retw fix — 6845 hooks** | Extracted all retw/retw.n addresses from MeadowComms.elf, generated `retw_hooks.resc` with `_fix_retw()` Python hook at each address. Copies logical A0 to physical AR[0] before retw executes. Fixes retw system-wide at cost of ~40s startup. This replaced the per-function retw patches and got boot past the uart_isr_register stall. |
+| 2026-03-12 | **call8 does NOT rotate WINDOWBASE** | Only `entry` rotates WINDOWBASE. Replacing a function's `entry` with `j retw.n` breaks window rotation — retw reads the caller-of-caller's A0. Must keep `entry` intact and patch the instruction AFTER it. Discovered when esp_brownout_init skip returned to 0x40081d82 (invalid) instead of back to start_cpu0_default. |
+| 2026-03-12 | **esp_brownout_init skip** | Keep entry at 0x400d5948, replace l32r at 0x400d594b with `j 0x400d597d` (retw.n). Brownout detection is irrelevant in emulation. |
+| 2026-03-12 | **__register_frame_info_bases skip** | GCC exception frame registration calls pthread_mutex_lock → xQueueGenericReceive before scheduler starts. Replace beqz.n at 0x40199b57 with `j 0x40199b90` (retw.n). |
+| 2026-03-12 | **xQueueGenericReceive scheduler state analysis** | `xTaskGetSchedulerState` returns 1 (NOT_STARTED). The `beqz.n a10` at 0x40091cf8 only branches on 0 (SUSPENDED); value 1 falls through to normal blocking path. Binary patch at 0x40091d07 (SUSPENDED path) is ineffective. Need Python hook at 0x40091cf8 to catch state=1 and skip to return pdTRUE. |
+| 2026-03-12 | **_xt_kernel_exc is a double fault handler** | The BREAK at 0x40082754 is the kernel exception vector (`_xt_kernel_exc`), not a configASSERT. It fires when an exception occurs during exception processing (PS.EXCM=1). In our case: vTaskPlaceOnEventList accesses uninitialized task list structures → memory fault while already in critical section. |
 
 ## Changes Log
 
@@ -345,3 +375,9 @@
 | 2026-03-11 | tlib (7 files) | **Debug instrumentation (TO REMOVE)**: Added extensive per-instruction tracing, TCG register dumps, opcode logging, TB chaining disable, load/store value traps across translate.c, op_helper.c, helper.h, cpu-exec.c, exc_helper.c, win_helper.c, softmmu_template.h. All related to A8=A0 investigation (now resolved as red herring). |
 | 2026-03-11 | tlib (8 files) | **Debug instrumentation REMOVED**: Reverted all debug logging from A8 investigation. translate.c, op_helper.c, helper.h, cpu-exec.c, exc_helper.c, win_helper.c, softmmu_template.h, mmu_helper.c all restored to clean state. tlib rebuilt + .NET assembly updated. |
 | 2026-03-11 | `scripts/esp32-meadow-boot.resc` | Major tick simulation improvements: (1) Removed destructive list scan-and-repair (was false positive). (2) Extracted _wake_delayed helper function with pxIndex DRAM validation (resets to &xListEnd if outside 0x3FF00000-0x40000000). (3) Added per-tick ready-list pxIndex repair loop (25 lists). (4) Fixed overflow delayed list — only check pxDelayedTaskList pointer, NOT xDelayedTaskList2. (5) Set port_xSchedulerRunning[1] = 1 at first dispatch for single-core emulation. (6) Added app_main sub-function milestone hooks. System now reaches app_main → uart_driver_install → uart_isr_register. |
+| 2026-03-12 | `scripts/retw_hooks.resc` | Generated file: 6845 lines of `cpu AddHook 0xADDRESS "_fix_retw()"` for every retw/retw.n in MeadowComms.elf. Generated from: `awk '{printf "cpu AddHook %s \"_fix_retw()\"\n", $1}' /tmp/retw_addrs.txt`. Takes ~40s to load. |
+| 2026-03-12 | `scripts/esp32-meadow-boot.resc` | (1) Added bulk retw fix: `_fix_retw()` Python function + `include @scripts/retw_hooks.resc`. (2) NOP'd esp_intr_alloc call in uart_isr_register. (3) Skip esp_brownout_init body (keep entry, j to retw.n). (4) Skip __register_frame_info_bases body. (5) Patch xQueueGenericReceive scheduler-suspended path (partial fix). (6) Added diagnostic hooks for xTaskGetSchedulerState return value and break instruction detection. |
+| 2026-03-12 | `scripts/find_reg_indices.py` | Helper: discovers IronPython register indices for named registers |
+| 2026-03-12 | `scripts/trace_callx8.py` | Helper: traces call8/retw sequences with register dumps |
+| 2026-03-12 | `scripts/check_bytes.py` | Helper: verifies binary patch bytes at specific addresses |
+| 2026-03-12 | `scripts/test_set_reg.py` | Helper: tests IronPython register read/write via _cpu.GetRegister/SetRegister |
