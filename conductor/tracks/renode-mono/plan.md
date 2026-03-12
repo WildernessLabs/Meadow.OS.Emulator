@@ -1,7 +1,7 @@
 # Plan: Mono Runtime Bring-Up in Emulator
 
 ## Track ID: `renode-mono`
-## Status: `in-progress` (Phase 2.11 — app deploy works, blocked on LFS format-on-boot)
+## Status: `in-progress` (Phase 2.14 — SVC fix in Renode, Mono boots in seconds)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -140,11 +140,14 @@ reconnects, then writes files. BBR must persist across resets for this to work.
 - [x] `app deploy` with trimmed binaries completes successfully (33 files, ~8MB)
 - [x] `app trim` → `app deploy` → all files transferred to emulated LittleFS
 - [x] Removed `littlefs.bin` reload from reset macro (was overwriting deployed files)
-- [ ] **BLOCKER**: Firmware re-formats LittleFS on every boot, destroying deployed files
-  - `RuntimeEnable` → device resets → firmware boots → formats LFS → files gone
-  - QSPI `MappedMemory` retains data across reset, but firmware's `create_fs` always formats
-  - Need to either: (a) patch firmware to mount-only if superblock exists, (b) pre-populate
-    LFS image with app files, or (c) find the BBR/NVS flag that controls format-vs-mount
+- [x] **RESOLVED**: "LFS format-on-boot" was a misdiagnosis (2026-03-11)
+  - Investigated: `lfs_format()` is never called — diagnostic hook at 0x081714ae never fires
+  - First `lfs_mount()` succeeds every boot (UART: "Mounted partition 0")
+  - "mount & format" UART message is a misleading phase label, not confirmation of formatting
+  - `lfs_format_skip` hook remains as safety net but is not triggered
+  - MappedMemory persists across resets (Reset() is intentionally empty in Renode)
+  - "Missing files" error is expected pre-deploy — firmware checks `/meadow0/mscorlib.dll` etc.
+  - Original file-loss was caused by reset macro reloading `littlefs.bin` (fixed in commit f80759a)
 
 ### 2.10 — File Transfer Fix (DONE)
 File writes to the emulated device were failing 100% of the time via `file write` command,
@@ -176,28 +179,156 @@ and requiring ~50 retries via `app deploy`. Root cause identified and fixed 2026
 ### 2.11 — App Deploy End-to-End (IN PROGRESS)
 Deploy a Meadow app via CLI and have Mono JIT start it.
 
-**Status:** Deploy works, blocked on LFS format-on-boot.
+**Status:** Deploy works (watchdog fixed), but transfer speed is very slow. Investigating throughput.
 
 **What works (2026-03-11):**
 - `app trim` produces trimmed binaries (~8MB, 33 files)
 - `app deploy` transfers all files via HCOM socket connection
-- Between-file delays (~30s each) caused by firmware download watchdog timeout — not a bug,
-  just slow emulated QSPI. `dataTransferStarted` guard handles stale responses correctly.
+- Download watchdog bypass hook added to `.resc` (see below)
 - Removed `littlefs.bin` from reset macro so deployed files survive in QSPI `MappedMemory`
+- LFS mounts successfully on every boot — `lfs_format()` is never called (diagnostic hook confirmed)
+- MappedMemory persists across Renode resets (Reset() is intentionally empty)
 
-**Blocker: firmware formats LFS on every boot**
-- After deploy, `runtime enable` triggers `SYSRESETREQ` → Renode resets CPU → firmware boots
-- Firmware always runs `F/S creating 1 partition ... mount & format` — this formats LFS,
-  destroying all deployed files
-- The QSPI `MappedMemory` at 0x90500000 DOES retain data across reset
-- But the firmware's `create_fs` code formats regardless — need to understand why
-- On real hardware, firmware presumably mounts existing filesystem without formatting
+**Download watchdog fix (2026-03-11):**
+- **Root cause**: Virtual time vs wall time mismatch. The firmware's 3-second POSIX download
+  watchdog timer runs in virtual time, but CLI sends data over TCP (wall time). The emulated CPU
+  burns through 3+ virtual seconds in the idle loop while waiting for the next TCP data packet
+  (which arrives in milliseconds of wall time). The watchdog fires before data is delivered.
+- **Fix**: Hook `hcom_host_watchdog_timeout_expired` at 0x0805f9c4 to skip (return immediately).
+  This SIGALRM handler just sets a flag at 0x200461a0 — skipping it prevents false timeouts.
+- **Impact**: File writes now succeed. Previously ALL file writes silently failed (CLI reported
+  100% but firmware cancelled the download and never wrote to LFS).
+- **General issue**: Any firmware timeout guarding external I/O will have this problem.
+  See README.md "Wall Time vs. Virtual Time" section.
 
-**Possible fixes:**
-- [ ] Investigate firmware's format-vs-mount decision logic (BBR flag? partition table check?)
-- [ ] Pre-build LFS v1 image with Blinky app files baked in (skip deploy for testing)
-- [ ] Patch `lfs_format_skip` hook to prevent format after first boot
-- [ ] Check if `lfs_format_skip` hook (listed at 0x081714ae) was meant for this exact problem
+**Deploy throughput problem (2026-03-11):**
+- `app deploy` of 33 files (~8MB total) takes extremely long (10+ minutes wall time)
+- Bottleneck: byte-by-byte UART delivery. Each byte requires an interrupt cycle in the emulator.
+  On real hardware, HCOM runs over USB at 12+ Mbps. In Renode, each byte goes through:
+  TCP → ServerSocketTerminal → UART4 RX interrupt → ISR → byte buffer → HCOM decode
+- For `mscorlib.dll` (~2MB), that's ~2 million individual interrupt/ISR cycles
+- Potential fixes to investigate:
+  - **DMA bypass for UART RX**: Hook the UART read path to inject bulk data directly into firmware buffers
+  - **Direct LFS injection**: Bypass HCOM entirely, write files directly to QSPI memory using LFS tooling
+  - **Bake a pre-populated LFS image**: Build the LFS image offline with app files already included
+  - **Tune Renode quantum/performance**: Increase quantum to reduce sync overhead per byte
+
+**LFS "format-on-boot" investigation (resolved 2026-03-11):**
+- "mount & format" UART message is a misleading phase label — firmware logs it before attempting
+  mount, regardless of whether format will be needed
+- Added diagnostic hook at `lfs_format` (0x081714ae) with logging — never fires during boot
+- First `lfs_mount()` succeeds immediately (valid superblock in littlefs.bin)
+- Firmware's mount flow: try mount → if LFS_ERR_CORRUPT, format+remount; otherwise return OK
+- The `lfs_format_skip` hook remains as defense-in-depth but is not triggered in practice
+- "Missing files" error (mscorlib.dll etc.) is expected — firmware checks `/meadow0/` root,
+  files only appear there after `app deploy`
+
+**Pre-populated LFS image (2026-03-11):**
+- Built LFS v1 image offline with `build_lfs_v1_image` tool (app files + BCL assemblies + meadow.config.yaml)
+- Loaded via `sysbus LoadBinary` at 0x90500000 — bypasses HCOM entirely, instant deploy
+- Firmware boots, mounts LFS, finds all 38 files, starts Mono successfully
+- `device info` shows `Runtime: 2.5.7.0` (was blank before Mono)
+- `file list` shows all files including `meadow.log` (created by Mono)
+- `meadow.log` contains: "Logging started" + "Config file successfully processed"
+
+**Syslog semaphore deadlock (FIXED 2026-03-11):**
+- Mono started successfully but immediately deadlocked on `_f7syslogSem` (0x20046164)
+- Root cause: `hcom_logging_syslog()` in `hcom_diag_logging.c` has a semaphore leak bug
+  - When `hcom_diag_logging_build_syslog_string()` returns `-ENOMEM` (malloc failure),
+    the function returns WITHOUT calling `sem_post(&_f7syslogSem)` (line 409-411)
+  - This permanently deadlocks all subsequent syslog calls from any thread
+  - In emulator, malloc failures happen due to constrained GC heap (`max-heap-size=16m`)
+- Diagnosis: Used GDB via Renode monitor to inspect NuttX TCBs
+  - All Mono pthreads (PIDs 9-14) in `g_waitingforsemaphore`
+  - PID 13 (Mono main) `waitsem = 0x20046164` = `_f7syslogSem`
+  - `_f7syslogSem.semcount = -1` — locked with 1 waiter, no holder running
+- Fix: Hook `hcom_logging_syslog` at 0x0805cf78 to skip (`cpu.PC = cpu.LR`)
+  - Disables user-space syslog (boot-time kernel syslog via UART unaffected)
+  - Mono's managed logging uses `meadow.log` file, not syslog
+- Firmware bug should be fixed upstream (add `sem_post` before `-ENOMEM` return)
+
+**Mono interpreter status (2026-03-11, SUPERSEDED):**
+- After syslog fix, Mono was actively running (load ~5000-10000x)
+- Virtual time advanced very slowly: 0.035s per minute of wall time
+- Root cause: NOT Mono interpreter overhead — was SVC hook overhead (see Phase 2.14)
+
+**Board version fix (2026-03-12):**
+- App threw `System.Exception: Cannot find an IApp that targets a F7CoreComputeV2 device`
+- GPIO board version hook was returning 3 (F7CoreComputeV2), Blinky app targets F7FeatherV2
+- Fixed: Changed hook to return 2 (F7FeatherV2). Values: 1=F7FeatherV1, 2=F7FeatherV2, 3=F7CoreComputeV2
+- Source: `meadow_hw_version.c` lines 99-101 define the version→name mapping
+
+**SVC PRIMASK fix in Renode source (2026-03-12, MAJOR BREAKTHROUGH):**
+- Root cause of ALL emulation slowness: SVC hook overhead, NOT Mono interpretation
+- SvcPrimaskFix.cs hooks fired on every syscall. Even compiled C# hooks break Renode's
+  translation blocks, forcing re-translation and cross-boundary calls thousands of times/sec
+- Measured: 6,600 effective instructions/second (vs QEMU's ~100M+). Load 70,000-96,000x
+- **Fix**: Patched `NVIC.cs` in Renode fork (`bryancostanich/renode`)
+  - `ShouldRaiseException()` now lets SVCall through when PRIMASK is set
+  - Previously only HardFault passed through PRIMASK (line 1535)
+  - Added `|| excp == (int)SystemException.SuperVisorCall` to the check
+  - Per ARMv7-M ARM B1.5.14, SVC is synchronous and should escalate to HardFault
+    when masked, not be silently skipped. Letting it through is functionally equivalent
+    to the old PRIMASK-clearing hook.
+- **Result**: 12,000x speedup. Load dropped from 96,000x to 5-8x (near real-time)
+  - 0.01 virtual sec per 10 wall min → 100 virtual sec per 2 wall min
+  - Mono boots in seconds instead of hours
+  - SvcPrimaskFix.cs hook removed from `.resc` script
+- **Confirmed**: Firmware was using JIT mode (not interpreter) the entire time.
+  `mono_main` receives `{"mono", "/meadow0/Meadow.dll"}` — no `--interp` flag.
+  The default `run_method` in `hcom_mono_control.c` line 227 is `MONO_OPTION_JIT`.
+
+**MemFault on runtime re-enable (2026-03-11):**
+- After `runtime disable` + `runtime enable`, Mono crashes with MemFault
+- MMFAR: 0x74737953 = ASCII "Syst" — string being dereferenced as pointer
+- PC: 0x0805d31a, LR: 0x0805d313, Task: Mono (PID 13)
+- Stack contains "/meadow0/Meadow.dll" and "Mono\0--i" strings
+- Only happens on re-enable, NOT on first boot — likely state corruption from disable/enable cycle
+- Non-blocking: first boot works fine, and that's the primary use case for emulator
+
+**Renode state save options:**
+- `Save @path` — full machine snapshot (CPU, memory, peripherals)
+- `sysbus.qspi DumpBinary @backup.bin` — QSPI flash contents only
+- Plan: let Mono run overnight, save state once app produces output
+
+**Next steps:**
+- [x] Deploy trimmed Blinky app via pre-populated LFS image — working
+- [x] `runtime enable` on first boot — Mono starts successfully
+- [ ] Let Mono interpreter run overnight — waiting for first app output
+- [ ] Save Renode state snapshot once Mono completes initialization
+- [ ] Investigate MemFault on runtime re-enable (low priority — first boot works)
+- [ ] Investigate deploy throughput — UART byte-by-byte interrupt path is the bottleneck
+
+### 2.14 — SVC Fix in Renode Source (DONE)
+Fix the root cause of SVC-with-PRIMASK behavior in Renode's NVIC model, eliminating the
+need for per-address SVC hooks entirely.
+
+- [x] Identified root cause in `NVIC.cs:ShouldRaiseException()` — SVCall masked by PRIMASK
+- [x] Patched: Added `|| excp == (int)SystemException.SuperVisorCall` to PRIMASK check
+- [x] Rebuilt Renode fork with `bash build.sh --host-arch aarch64 --skip-fetch`
+- [x] Removed `InstallSvcFix` line and `SvcPrimaskFix.cs` include from `.resc` script
+- [x] Verified: NuttX boots, Mono starts, 12,000x speedup confirmed
+- [x] Updated hooks table and performance measurements
+- [ ] Upstream this fix to Renode (Antmicro) — clear spec compliance bug
+
+### 2.15 — Renode Execution Speed Investigation (TODO)
+Even with SVC hooks removed, Renode's instruction throughput is a concern for heavier workloads.
+Investigate Renode's tlib execution model and potential optimizations.
+
+**Findings so far:**
+- With SVC fix, load is 5-8x for Mono boot — acceptable for current use
+- QEMU TCG achieves ~100M-1B instructions/sec; Renode's tlib (derived from old QEMU TCG) is slower
+- Remaining hooks (18 total) still break translation blocks, but only on cold paths
+- Quantum is 100μs (46,200 instructions) — reasonable, not a bottleneck
+
+**Work items:**
+- [ ] Profile remaining hooks — which ones fire most frequently during Mono execution?
+- [ ] Investigate Renode tlib vs QEMU TCG differences — what accounts for the gap?
+- [ ] Test increasing quantum (e.g., 1ms, 10ms) to reduce sync overhead
+- [ ] Test reducing `PerformanceInMips` to see if it improves wall-clock throughput
+- [ ] Explore Renode's `ExecutionMode` options (if any) for faster CPU emulation
+- [ ] Consider QEMU as alternative for CPU-intensive workloads (peripheral stubs needed)
+- [ ] Investigate if Renode supports multi-threaded translation or block caching optimizations
 
 ### 2.12 — AOT Compilation (FUTURE)
 Ahead-of-time compilation pre-compiles IL → native ARM at build time. Longer-term goal that
@@ -281,11 +412,12 @@ cc -o build_lfs_v1_image tools/build_lfs_v1_image.c /tmp/littlefs/lfs.c /tmp/lit
 | `mono_str_fix` | 0x080618e8 | Patch deep-copied config's mono version string (+0x80) |
 | `asm_scan_bypass` | 0x08061a1c | Skip .NET assembly DLL presence check (currently disabled) |
 | `lfs_format_skip` | 0x081714ae | Prevent LFS format from wiping pre-populated image |
-| `gpio_ver_fix` | 0x08141970 | Force board version to CCMv2 (3) |
+| `gpio_ver_fix` | 0x08141970 | Force board version to F7FeatherV2 (2) |
 | `espcp_spi_bypass` | 0x081480cc | Bypass SPI DMA with direct peripheral calls |
 | `espcp_force_init` | 0x08141d50 | Force ESPCP init (set network type to WiFi) |
 | `spi_lock_skip` | 0x08148144, 0x08148150 | Skip SPI lock/unlock (DMA bypassed) |
 | `lsi_skip` | 0x0814d2c0 | Skip LSI clock calibration thread |
+| `syslog_skip` | 0x0805cf78 | Skip `hcom_logging_syslog` (sem leak deadlocks Mono) |
 
 **BBR hooks removed** — STM32F4_RTC.cs patched (`BackupEnd = 0xCC`) in `bryancostanich/renode` fork.
 Backup registers now handled natively by the RTC model with `softResettable: false`.
@@ -295,7 +427,7 @@ Backup registers now handled natively by the RTC model with `softResettable: fal
 | Hook | File | Purpose |
 |------|------|---------|
 | `InstallQspiBypass` | `peripherals/QspiDmaBypass.cs` | QSPI DMA bypass — direct memcpy via SystemBus |
-| `InstallSvcFix` | `peripherals/SvcPrimaskFix.cs` | Clear PRIMASK before SVC instructions |
+| ~~`InstallSvcFix`~~ | ~~`peripherals/SvcPrimaskFix.cs`~~ | **REMOVED** — Fixed in Renode NVIC.cs (2026-03-12) |
 | `InstallMqIntercept` | `peripherals/MqReceiveIntercept.cs` | ESPCP polling via mq_receive interception |
 
 ## Performance Analysis
@@ -307,18 +439,19 @@ Backup registers now handled natively by the RTC model with `softResettable: fal
 | ~~mq_intercept (IronPython)~~ | ~~0.1ms/call~~ | **FIXED**: C# `MqReceiveIntercept` (negligible) |
 | espcp_spi_bypass (IronPython) | ~0.5ms/call | SPI exchange per poll cycle (disabled during Mono init) |
 | ESPCP polling loop | consumes all CPU | starves Mono thread (FIXED: disabled) |
-| **Renode ARM emulation** | **~250K instr/sec** | **CURRENT BLOCKER**: Mono JIT needs billions of instructions |
+| **Renode ARM emulation** | **~6,600 instr/sec (with hooks)** | **FIXED**: SVC hooks were the bottleneck, not Renode itself |
 
 ## Emulation Speed Measurements
 
-| Metric | Value |
-|--------|-------|
-| Virtual time after 10 min | 0.147 seconds |
-| Emulation ratio | ~0.00025x real-time |
-| SVC rate (declining) | 188 → 52 hits/sec over 8 min |
-| QSPI reads (assembly load) | 22K calls, 13MB, 4 seconds real time |
-| Estimated Mono boot time | 16+ hours (at current emulation speed) |
-| Real hardware Mono boot | ~15-30 seconds |
+| Metric | Before SVC Fix | After SVC Fix (2026-03-12) |
+|--------|---------------|---------------------------|
+| Virtual time per 10 min wall | 0.01-0.07 seconds | ~600 seconds |
+| Emulation ratio (Mono active) | 0.00001-0.0001x | ~0.15x (near real-time) |
+| Effective instructions/sec | ~6,600 | ~70,000,000 (estimated) |
+| Load factor | 70,000-96,000x | 5-8x |
+| Mono boot time | 8-24+ hours | ~2-3 minutes |
+| Real hardware Mono boot | ~15-30 seconds | — |
+| QSPI reads (assembly load) | 22K calls, 13MB, 4 seconds real time | unchanged |
 
 ## Decision Log
 
@@ -337,7 +470,7 @@ Backup registers now handled natively by the RTC model with `softResettable: fal
 | 2026-03-11 | Emulation speed blocker | 0.147s virtual time in 10 min. Need AOT or cache solution for Mono JIT. |
 | 2026-03-11 | Interpreter first, AOT later | Mono ran interpreted before JIT was enabled — switch back for emulator. AOT is longer-term; older Mono AOT has limitations (no dynamic generics, limited reflection). Newer .NET/Mono fixes these. Plan: interpreter now, AOT + interpreter hybrid later. |
 | 2026-03-11 | Remove littlefs.bin from reset macro | Reset macro was reloading pristine LFS image, wiping deployed files. Removed so QSPI MappedMemory retains deployed data across resets. |
-| 2026-03-11 | LFS format-on-boot is the blocker | Firmware always formats LFS on boot regardless of existing data. Need to either pre-populate LFS image, skip format, or find firmware's mount-vs-format decision flag. |
+| 2026-03-11 | LFS format-on-boot was misdiagnosis | Investigated: `lfs_format()` never called (diagnostic hook confirmed). First `lfs_mount()` succeeds. "mount & format" UART msg is just a phase label. Original file loss was from reset macro reloading littlefs.bin (already fixed). |
 | 2026-03-11 | No Renode state save | Rejected machine state snapshots — fragile across versions, not a real solution. |
 | 2026-03-11 | Overnight JIT run optional | Low priority correctness check only. Not blocking interpreter work. |
 | 2026-03-11 | Use NuGet refs for samples | Meadow.Samples repo has ProjectReferences to sibling source repos; must change to PackageReference (Meadow.F7 2.5.0, Meadow.Foundation 2.5.0) to build standalone. |
@@ -350,9 +483,18 @@ Backup registers now handled natively by the RTC model with `softResettable: fal
 | 2026-03-11 | Started overnight interpreter run | `--interp` via `meadow.config.yaml` in LFS image. Logging to `/tmp/renode-mono-overnight.log`. |
 | 2026-03-11 | Patch Renode RTC, not hooks | BBR SRAM hooks worked for kernel `hcom_nx_bbreg_*` functions but NOT for ioctl handler which uses `putreg32`/`getreg32` directly. Fixing the RTC model is the correct solution. |
 | 2026-03-11 | Fork Renode for RTC fix | One-line change (`BackupEnd = 0x9C` → `0xCC`) in `STM32F4_RTC.cs`. Fork: `bryancostanich/renode`. |
+| 2026-03-12 | Board version → F7FeatherV2 | Blinky app's `MeadowApp<T> where T : F7FeatherBase` needs version=2, not 3 (CCMv2). |
+| 2026-03-12 | SVC fix in Renode NVIC.cs | Root cause of 96,000x load: SVC hooks broke translation blocks. Fix in NVIC lets SVCall through PRIMASK. 12,000x speedup. |
+| 2026-03-12 | Firmware uses JIT by default | `hcom_mono_control.c` line 227: `run_method = MONO_OPTION_JIT`. No `--interp` flag passed. JIT was active the whole time. |
+| 2026-03-12 | Hook overhead is catastrophic | Even compiled C# hooks that fire on hot paths (thousands/sec) destroy Renode performance by breaking translation blocks. Any future hooks must avoid hot paths. |
 | 2026-03-11 | `--host-arch aarch64` | macOS Renode build defaults to x86_64 tlib. Must pass `--host-arch aarch64` for Apple Silicon. |
 | 2026-03-11 | Run via `dotnet` not binary | Custom build uses `dotnet Renode.dll` (not native single-file `Renode` binary) since tlib is separate. |
+| 2026-03-11 | Download watchdog bypass | Virtual time vs wall time mismatch: 3-second POSIX timer fires before TCP data arrives. Hook `hcom_host_watchdog_timeout_expired` (0x0805f9c4) to skip. General pattern for all external I/O timeouts. |
+| 2026-03-11 | Wall time vs virtual time documented | Added README section. Any firmware timeout guarding external I/O will have this problem — WiFi, BLE, HCOM, cloud. Each needs a similar hook or architectural fix. |
 | 2026-03-11 | WriteFile stale watchdog fix | Root cause: firmware's download watchdog sends `DNLD_FAIL_RESEND` from prior abandoned ops. Fix: `dataTransferStarted` guard ignores `FileWriteFailed` until data phase begins. Also added retry (10x) as defense-in-depth. `file write` now succeeds first attempt. |
+| 2026-03-11 | Pre-populated LFS image | Bypass slow HCOM file transfer entirely — build LFS v1 image offline with all app+BCL files, load via `sysbus LoadBinary`. Instant deploy, Mono starts on first boot. |
+| 2026-03-11 | MemFault on re-enable | Mono crashes after disable/enable cycle with MMFAR=0x74737953 ("Syst"). First boot works. Likely state corruption in firmware's enable/disable path — not blocking. |
+| 2026-03-11 | Syslog deadlock found + fixed | `hcom_logging_syslog` has sem leak when malloc fails: returns without `sem_post(_f7syslogSem)`. All Mono threads deadlock. Hook to skip function entirely. Firmware bug — should fix upstream. |
 
 ## Repo Clarification
 
@@ -363,4 +505,4 @@ Backup registers now handled natively by the RTC model with `softResettable: fal
 | `Meadow.OS.Emulator` | worktree at `track/renode-mono` | Emulator scripts, hooks, build wrapper. Build script uses `../Meadow/` as source |
 | `Meadow.CLI` | `/Users/bryan/Git_Repos/wilderness_labs/Meadow.CLI/` | Branch `feature/TCP_Socket_Connection_for_EMU` — TCP socket HCOM for emulator |
 | `Meadow.Samples` | `/Users/bryan/Git_Repos/wilderness_labs/Meadow.Samples/` | Sample apps (Blinky, etc.) — needs NuGet PackageReferences to build standalone |
-| `renode` (fork) | `/Users/bryan/Git_Repos/bryan_costanich/renode/` | Renode fork with STM32F4_RTC backup register fix. Build with `--host-arch aarch64`. |
+| `renode` (fork) | `/Users/bryan/Git_Repos/bryan_costanich/renode/` | Renode fork with STM32F4_RTC backup register fix + NVIC SVC/PRIMASK fix. Build with `--host-arch aarch64`. |
