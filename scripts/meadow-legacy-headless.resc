@@ -51,7 +51,8 @@ macro reset
     sysbus LoadBinary @build/legacy/nuttx_kernel.bin 0x08140000
     sysbus LoadBinary @build/legacy/nuttx_mono.bin 0x90000000
     sysbus LoadBinary @build/legacy/nuttx_mono.bin 0xC0000000
-    sysbus LoadBinary @build/legacy/littlefs.bin 0x90500000
+    # NOTE: Do NOT reload littlefs.bin here — it would overwrite deployed app files.
+    # The LFS image is loaded once at initial boot; the firmware manages QSPI flash after that.
     sysbus.cpu VectorTableOffset 0x08040000
     sysbus.spi2.espcpStub Reset
     sysbus WriteDoubleWord 0xC01696F6 0x61656D2F
