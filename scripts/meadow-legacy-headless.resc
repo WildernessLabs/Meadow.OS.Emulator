@@ -86,16 +86,17 @@ connector Connect sysbus.uart5 esp32ctrl
 # Addresses extracted from: arm-none-eabi-nm build/legacy/nuttx.elf
 # =============================================================================
 
-# Workaround: Renode skips SVC when PRIMASK=1 instead of escalating to HardFault.
-# SVC instruction addresses from: arm-none-eabi-objdump -d build/legacy/nuttx.elf | grep svc
-# Uses compiled C# hook (SvcPrimaskFix.cs) instead of IronPython for performance.
-# Critical for Mono JIT which makes thousands of syscalls/sec during assembly loading.
-cpu InstallSvcFix 0x08163212 0x0816345e 0x0816346e 0x08163478 0x08163484 0x0817b408
+# FIXED IN RENODE: SVC with PRIMASK=1 now handled correctly in NVIC.cs.
+# Previously Renode skipped SVC when PRIMASK was set; the fix lets SVCall through
+# (matching real ARM behavior where SVC is a synchronous exception).
+# The SvcPrimaskFix.cs hook is no longer needed — removing it eliminates hook overhead
+# on every syscall, which is critical for Mono performance (thousands of syscalls/sec).
 
-# Workaround: Force GPIO board version to CCMv2 (3).
+# Workaround: Force GPIO board version to F7FeatherV2 (2).
 # Hook meadow_hw_version_find_device_ver (0x08141970) at entry.
-# Write initialized=1 and version=3 to hw_version struct at 0x20020ce4.
-set gpio_ver_fix "machine.SystemBus.WriteByte(0x20020e74, 1); machine.SystemBus.WriteDoubleWord(0x20020e78, 3); cpu.PC = cpu.LR"
+# Write initialized=1 and version=2 to hw_version struct at 0x20020ce4.
+# Values: 1=F7FeatherV1, 2=F7FeatherV2, 3=F7CoreComputeV2
+set gpio_ver_fix "machine.SystemBus.WriteByte(0x20020e74, 1); machine.SystemBus.WriteDoubleWord(0x20020e78, 2); cpu.PC = cpu.LR"
 cpu AddHook 0x08141970 $gpio_ver_fix
 
 # Workaround: Renode's STM32H7_QuadSPI doesn't set TCF in SR.
@@ -221,6 +222,26 @@ sysbus WriteDoubleWord 0xC0171A9C 0x00000000
 # lfs_format = 0x081714ae
 set lfs_format_skip "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
 cpu AddHook 0x081714ae $lfs_format_skip
+
+# Workaround: Syslog semaphore leak in hcom_logging_syslog.
+# When malloc fails inside hcom_diag_logging_build_syslog_string, the function returns
+# -ENOMEM and hcom_logging_syslog returns WITHOUT posting _f7syslogSem (at 0x20046164).
+# This permanently deadlocks all subsequent syslog calls (including from Mono threads).
+# In the emulator, malloc failures are more likely due to Mono's constrained GC heap.
+# Fix: skip hcom_logging_syslog entirely — Mono's managed logging uses meadow.log file,
+# not the firmware syslog path. Boot-time kernel syslog() calls are unaffected.
+# hcom_logging_syslog = 0x0805cf78
+set syslog_skip "cpu.PC = cpu.LR"
+cpu AddHook 0x0805cf78 $syslog_skip
+
+# Workaround: Download watchdog SIGALRM handler fires too early in emulator.
+# Renode's virtual time advances faster than wall time, so the 3-second POSIX timer
+# expires before TCP data from the CLI arrives. The handler at 0x0805f9c4 just sets
+# a flag (_hcom_host_process_wdog_timedout at 0x200461a0) to true.
+# Skip it entirely so file downloads aren't aborted.
+# hcom_host_watchdog_timeout_expired = 0x0805f9c4
+set wdog_skip "cpu.PC = cpu.LR"
+cpu AddHook 0x0805f9c4 $wdog_skip
 
 
 start

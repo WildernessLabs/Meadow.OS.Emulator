@@ -42,9 +42,10 @@
 - [x] Run `meadow device info -s socket://localhost:4242` — verified device info (version 2.5.7.0)
 - [x] Deploy command gets past MONO_DISABLE + reconnect
 - [x] BBR persistence fixed (Renode RTC model patched, tracked under `renode-mono` Phase 2.9)
-- [x] `file write` works — 100% success on first attempt after stale watchdog fix
+- [x] `file write` works — 100% success on first attempt after stale watchdog fix + download watchdog bypass
 - [x] `app trim` + `app deploy` with trimmed binaries — all 33 files transferred successfully
-- [ ] `runtime enable` after deploy — blocked by firmware formatting LFS on boot (tracked under `renode-mono` Phase 2.11)
+- [ ] Deploy throughput is very slow (10+ min for 8MB) — UART byte-by-byte interrupt bottleneck
+- [ ] `runtime enable` after deploy — LFS format-on-boot was misdiagnosis (resolved), testing end-to-end (tracked under `renode-mono` Phase 2.11)
 
 ## 6 — WriteFile Bug Fix (2026-03-11)
 - [x] Diagnosed: firmware's download watchdog sends stale `DNLD_FAIL_RESEND` (0x0312) from prior
@@ -52,6 +53,16 @@
 - [x] Fix: `dataTransferStarted` guard in `OnFileRetry` — ignore `FileWriteFailed` until data phase
 - [x] Also added retry loop (10 attempts) + `TimeoutException` catch as defense-in-depth
 - [x] Verified: `file write` succeeds first attempt against emulator
+
+## 7 — Download Watchdog Bypass (2026-03-11)
+- [x] Diagnosed: firmware's 3-second download watchdog fires prematurely in emulator due to
+  virtual time vs wall time mismatch — emulated CPU burns through 3+ virtual seconds while
+  CLI prepares next TCP packet (milliseconds of wall time)
+- [x] Fix: Hook `hcom_host_watchdog_timeout_expired` at 0x0805f9c4 with `cpu.PC = cpu.LR`
+  (skip SIGALRM handler that sets timeout flag at 0x200461a0)
+- [x] Added to `meadow-legacy-headless.resc` as `wdog_skip` hook
+- [x] Verified: `file write` and `app deploy` succeed without watchdog abortion
+- [ ] Deploy throughput still slow — separate issue from watchdog (see `renode-mono` Phase 2.11)
 
 ---
 

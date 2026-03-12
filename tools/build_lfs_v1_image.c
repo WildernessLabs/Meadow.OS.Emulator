@@ -2,9 +2,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <limits.h>
 #include "lfs.h"
+#include "lfs_util.h"
 
 #define FS_BLOCK_SIZE   4096
 #define FS_READ_SIZE    256
@@ -29,14 +32,63 @@ static int ram_erase(const struct lfs_config *c, lfs_block_t block) {
 }
 static int ram_sync(const struct lfs_config *c) { return 0; }
 
+/* Write all files from a directory to a given LFS path prefix */
+static int write_dir_to_lfs(lfs_t *lfs, const char *host_dir, const char *lfs_prefix,
+                            const char *filter_ext, int *file_count, size_t *total_size) {
+    DIR *dir = opendir(host_dir);
+    if (!dir) {
+        fprintf(stderr, "ERROR: Cannot open directory: %s\n", host_dir);
+        return -1;
+    }
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        size_t nlen = strlen(entry->d_name);
+        if (filter_ext) {
+            size_t elen = strlen(filter_ext);
+            if (nlen < elen) continue;
+            if (strcasecmp(entry->d_name + nlen - elen, filter_ext) != 0) continue;
+        }
+        char src_path[1024];
+        snprintf(src_path, sizeof(src_path), "%s/%s", host_dir, entry->d_name);
+        struct stat st;
+        if (stat(src_path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        uint8_t *data = malloc(st.st_size);
+        if (!data) { fprintf(stderr, "ERROR: malloc failed for %s\n", entry->d_name); continue; }
+        FILE *fp = fopen(src_path, "rb");
+        if (!fp) { fprintf(stderr, "WARNING: Cannot open %s\n", src_path); free(data); continue; }
+        fread(data, 1, st.st_size, fp);
+        fclose(fp);
+        char lfs_path[512];
+        if (lfs_prefix[0])
+            snprintf(lfs_path, sizeof(lfs_path), "%s/%s", lfs_prefix, entry->d_name);
+        else
+            snprintf(lfs_path, sizeof(lfs_path), "%s", entry->d_name);
+        lfs_file_t file;
+        int err = lfs_file_open(lfs, &file, lfs_path, LFS_O_WRONLY | LFS_O_CREAT);
+        if (err) { fprintf(stderr, "ERROR: open %s failed: %d\n", lfs_path, err); free(data); continue; }
+        lfs_file_write(lfs, &file, data, st.st_size);
+        lfs_file_close(lfs, &file);
+        printf("  %s: %lld bytes\n", lfs_path, (long long)st.st_size);
+        if (total_size) *total_size += st.st_size;
+        if (file_count) (*file_count)++;
+        free(data);
+    }
+    closedir(dir);
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <assembly_dir> <output.bin>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <bcl_assembly_dir> <output.bin> [app_dir]\n", argv[0]);
+        fprintf(stderr, "  bcl_assembly_dir: BCL DLLs → /mono/4.5/\n");
+        fprintf(stderr, "  app_dir:          App files → / (root, all file types)\n");
         return 1;
     }
 
     const char *asm_dir = argv[1];
     const char *output_path = argv[2];
+    const char *app_dir = (argc >= 4) ? argv[3] : NULL;
 
     size_t image_size = (size_t)FS_BLOCK_SIZE * FS_BLOCK_COUNT;
     flash_image = malloc(image_size);
@@ -55,7 +107,7 @@ int main(int argc, char *argv[]) {
         .prog_size      = FS_PROG_SIZE,
         .block_size     = FS_BLOCK_SIZE,
         .block_count    = FS_BLOCK_COUNT,
-        .lookahead      = 8,
+        .lookahead      = 32,
     };
 
     lfs_t lfs;
@@ -91,96 +143,20 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Scan assembly directory for DLLs */
-    DIR *dir = opendir(asm_dir);
-    if (!dir) {
-        fprintf(stderr, "ERROR: Cannot open directory: %s\n", asm_dir);
-        lfs_unmount(&lfs);
-        free(flash_image);
-        return 1;
-    }
-
+    /* Write BCL assemblies to /mono/4.5/ */
     int file_count = 0;
     size_t total_size = 0;
-    struct dirent *entry;
+    printf("BCL assemblies → /mono/4.5/:\n");
+    write_dir_to_lfs(&lfs, asm_dir, "mono/4.5", ".dll", &file_count, &total_size);
+    printf("  %d BCL assemblies (%zu KB)\n\n", file_count, total_size / 1024);
 
-    while ((entry = readdir(dir)) != NULL) {
-        size_t nlen = strlen(entry->d_name);
-        if (nlen < 4) continue;
-        if (strcasecmp(entry->d_name + nlen - 4, ".dll") != 0) continue;
-
-        char src_path[1024];
-        snprintf(src_path, sizeof(src_path), "%s/%s", asm_dir, entry->d_name);
-
-        struct stat st;
-        if (stat(src_path, &st) != 0) {
-            fprintf(stderr, "WARNING: Cannot stat %s\n", src_path);
-            continue;
-        }
-
-        uint8_t *data = malloc(st.st_size);
-        if (!data) {
-            fprintf(stderr, "ERROR: malloc failed for %s\n", entry->d_name);
-            continue;
-        }
-
-        FILE *fp = fopen(src_path, "rb");
-        if (!fp) {
-            fprintf(stderr, "WARNING: Cannot open %s\n", src_path);
-            free(data);
-            continue;
-        }
-        fread(data, 1, st.st_size, fp);
-        fclose(fp);
-
-        /* Write to /mono/4.5/ for Mono runtime */
-        char lfs_path[512];
-        snprintf(lfs_path, sizeof(lfs_path), "mono/4.5/%s", entry->d_name);
-
-        lfs_file_t file;
-        err = lfs_file_open(&lfs, &file, lfs_path, LFS_O_WRONLY | LFS_O_CREAT);
-        if (err) {
-            fprintf(stderr, "ERROR: open %s failed: %d\n", lfs_path, err);
-            free(data);
-            continue;
-        }
-        lfs_file_write(&lfs, &file, data, st.st_size);
-        lfs_file_close(&lfs, &file);
-
-        printf("  %s: %lld bytes\n", entry->d_name, (long long)st.st_size);
-        total_size += st.st_size;
-        file_count++;
-        free(data);
-    }
-    closedir(dir);
-
-    printf("Found %d assemblies (%zu KB total)\n", file_count, total_size / 1024);
-
-    /* Also write Meadow.dll at the filesystem root (not under /mono/4.5/)
-     * so Mono can find it at /meadow0/Meadow.dll */
-    {
-        char meadow_path[1024];
-        snprintf(meadow_path, sizeof(meadow_path), "%s/Meadow.dll", asm_dir);
-        struct stat mst;
-        if (stat(meadow_path, &mst) == 0) {
-            uint8_t *mdata = malloc(mst.st_size);
-            FILE *mfp = fopen(meadow_path, "rb");
-            if (mfp && mdata) {
-                fread(mdata, 1, mst.st_size, mfp);
-                fclose(mfp);
-                lfs_file_t mfile;
-                err = lfs_file_open(&lfs, &mfile, "Meadow.dll", LFS_O_WRONLY | LFS_O_CREAT);
-                if (!err) {
-                    lfs_file_write(&lfs, &mfile, mdata, mst.st_size);
-                    lfs_file_close(&lfs, &mfile);
-                    printf("  Meadow.dll (root): %lld bytes\n", (long long)mst.st_size);
-                }
-                free(mdata);
-            } else {
-                if (mfp) fclose(mfp);
-                free(mdata);
-            }
-        }
+    /* Write app files to root if app_dir specified */
+    if (app_dir) {
+        int app_count = 0;
+        size_t app_size = 0;
+        printf("App files → / (root):\n");
+        write_dir_to_lfs(&lfs, app_dir, "", NULL, &app_count, &app_size);
+        printf("  %d app files (%zu KB)\n\n", app_count, app_size / 1024);
     }
 
     /* Write meadow.config.yaml at filesystem root */

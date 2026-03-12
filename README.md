@@ -164,6 +164,8 @@ Summary of active workarounds:
 | ESPCP SPI lock | Skip lock/unlock | Deadlock without it |
 | ESPCP init gate | Force R5=1 (WiFi) | ESPCP never starts without it |
 | Mono runtime check | Return 0 (not running) | ESP32 HCOM commands blocked without it |
+| Download watchdog | Skip SIGALRM handler | Virtual time vs wall time mismatch (see [Wall Time vs. Virtual Time](#wall-time-vs-virtual-time)) |
+| Syslog semaphore leak | Skip `hcom_logging_syslog` | Firmware bug: sem not posted on malloc failure → deadlocks all Mono threads |
 | FPU frame mismatch | `fix_fpu_frame.py` (new OS only) | Non-critical; legacy build unaffected |
 
 ## NuttX Configuration
@@ -267,6 +269,46 @@ To revert Meadow.CLI to USB for use with a physical device:
 ```bash
 dotnet meadow.dll config route
 ```
+
+## Wall Time vs. Virtual Time
+
+Renode runs all hardware in **virtual time** — timers, clocks, and CPU instructions all advance together in a consistent simulated timeline. This means internal operations (flash reads, memory access, DMA, thread scheduling) are self-consistent. However, virtual time and wall time (real-world clock) are **not synchronized**, and this mismatch matters whenever the emulated firmware interacts with external systems.
+
+### What Works
+
+- **Internal timers**: A 1-second NuttX `timer_settime()` fires after exactly 1 virtual second. SysTick, watchdog timers, and kernel scheduling all work correctly within the emulator.
+- **Internal I/O**: QSPI flash reads/writes, SPI transfers to the ESP32 stub, GPIO, and DMA all happen in virtual time with correct relative ordering.
+- **Thread scheduling**: NuttX's preemptive scheduler works normally. Threads block, wake, and context-switch as expected.
+
+### What Breaks
+
+Any timeout or watchdog that guards **external I/O** can misfire, because the external device (host PC, network, CLI tool) operates in wall time while the firmware's timer runs in virtual time.
+
+**Example**: The HCOM file download watchdog uses a 3-second POSIX timer. When Meadow.CLI sends a file over TCP:
+1. Firmware receives `InitFileWriteRequest`, arms 3-second watchdog (virtual time)
+2. CLI prepares the data packet and sends it over TCP (a few ms of wall time)
+3. Meanwhile, the emulated CPU spins through idle/other threads, burning 3+ virtual seconds
+4. Watchdog fires before the TCP data is delivered to the UART model
+5. Download is aborted even though only milliseconds passed in the real world
+
+The root cause: the emulated CPU runs significantly faster than real time during idle periods, so virtual seconds pass while only milliseconds of wall time elapse.
+
+### Implications for Meadow
+
+This affects any firmware path that:
+- **Waits for external data with a timeout** — HCOM downloads, network socket reads, BLE responses
+- **Polls external hardware with deadlines** — ESP32 SPI command timeouts, WiFi association timeouts
+- **Rate-limits outbound I/O** — If firmware throttles output based on virtual-time delays, data may burst out faster than external consumers can handle
+
+### Workarounds
+
+| Pattern | Approach |
+|---------|----------|
+| Download watchdog | Hook `hcom_host_watchdog_timeout_expired` to skip (already done in `meadow-legacy-headless.resc`) |
+| External I/O timeouts | Hook the timeout handler to no-op, or multiply the timeout value |
+| Rate limiting | May need to slow Renode's virtual time (`cpu PerformanceInMips` or quantum tuning) |
+
+As we add more external I/O (WiFi, BLE, cloud connectivity), each external-facing timeout will likely need a similar hook or architectural solution. A more general fix would be to synchronize Renode's virtual time with wall time for I/O-bound workloads, but this trades accuracy for real-time behavior.
 
 ## Known Issues and Errata
 
