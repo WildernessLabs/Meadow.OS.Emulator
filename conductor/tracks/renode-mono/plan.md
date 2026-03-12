@@ -169,12 +169,24 @@ that can't be AOT'd (generics, reflection, dynamic code).
 reflection support, no `Reflection.Emit`. Newer .NET/Mono versions fix much of this.
 The plan is to eventually move to newer .NET, which has better AOT + interpreter hybrid support.
 
-- [ ] Investigate Meadow Mono build config for AOT cross-compiler support
+**Investigation findings (2026-03-11):** The Meadow firmware already whitelists AOT-related
+Mono runtime options in `hcom_mono_control.c`:
+- `--aot` — Ahead-of-time compiled assemblies
+- `--llvmonly` — LLVM-only compilation backend
+- `--llvmonly-interp` — LLVM with interpreter fallback (hybrid mode, ideal for emulator)
+These are passed through `meadow.config.yaml` `MonoControl.Options` field.
+The runtime parsing is ready; the gap is building AOT native images for the target assemblies.
+
+- [x] Investigate Meadow Mono build config for AOT cross-compiler support
+  - Runtime supports `--aot`, `--llvmonly`, `--llvmonly-interp` options (whitelisted)
+  - No AOT cross-compiler build infrastructure in repo yet (Mono binary is pre-built)
+  - Mono source/build scripts not in Meadow.OS repo — binary deployed directly
+- [ ] Find or build Mono AOT cross-compiler for ARMv7 (needs Mono source with `--enable-llvm`)
 - [ ] Determine if `mono --aot=full --aot-options=mtriple=armv7-...` works with Meadow's Mono fork
 - [ ] Identify which assemblies are AOT-safe vs need interpreter fallback
 - [ ] Build AOT native images for BCL assemblies (mscorlib, System, System.Core)
 - [ ] Deploy AOT images alongside IL assemblies in LittleFS
-- [ ] Test AOT + interpreter hybrid boot
+- [ ] Test `--llvmonly-interp` hybrid boot (AOT + interpreter fallback)
 
 ### 2.13 — Overnight JIT Validation Run (OPTIONAL)
 Let the JIT emulator run for 16+ hours to validate the full JIT path works end-to-end.
@@ -293,6 +305,8 @@ Backup registers now handled natively by the RTC model with `softResettable: fal
 | 2026-03-11 | BBR → SRAM redirect | RTC backup registers not emulated. Hook all 8 bbreg functions to redirect to SRAM 0x2007FFE0. Persists across reset because reset macro doesn't touch SRAM. |
 | 2026-03-11 | Renode `--port` mode | `--console` mode exits when stdin hits EOF (backgrounded process). Use `--port 1234` for telnet-based monitor instead. |
 | 2026-03-11 | Known firmware bug | `meadow_os_copy_version_strings` line 121: copies `source->short_string` to `destination->long_string` instead of `source->long_string`. Non-blocking but worth tracking. |
+| 2026-03-11 | AOT runtime support confirmed | Firmware whitelists `--aot`, `--llvmonly`, `--llvmonly-interp`. No AOT cross-compiler built yet. |
+| 2026-03-11 | Started overnight interpreter run | `--interp` via `meadow.config.yaml` in LFS image. Logging to `/tmp/renode-mono-overnight.log`. |
 | 2026-03-11 | Patch Renode RTC, not hooks | BBR SRAM hooks worked for kernel `hcom_nx_bbreg_*` functions but NOT for ioctl handler which uses `putreg32`/`getreg32` directly. Fixing the RTC model is the correct solution. |
 | 2026-03-11 | Fork Renode for RTC fix | One-line change (`BackupEnd = 0x9C` → `0xCC`) in `STM32F4_RTC.cs`. Fork: `bryancostanich/renode`. |
 | 2026-03-11 | `--host-arch aarch64` | macOS Renode build defaults to x86_64 tlib. Must pass `--host-arch aarch64` for Apple Silicon. |
