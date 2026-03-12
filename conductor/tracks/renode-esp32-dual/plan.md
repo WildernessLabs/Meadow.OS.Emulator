@@ -1,7 +1,7 @@
 # Plan: Dual-Machine ESP32 Emulation
 
 ## Track ID: `renode-esp32-dual`
-## Status: `in-progress` (Phase 1.1 ✅, Phase 1.2 ✅, Phase 1.3 in-progress — boot reaches app_main → MessageDispatcher ctor; SpiTransportProvider skipped; PS.INTLEVEL fix via lock function patches; next: null pointer crash in spi_slave_hal_prepare_data after MessageDispatcher)
+## Status: `in-progress` (Phase 1.1 ✅, Phase 1.2 ✅, Phase 1.3 in-progress — full boot to idle task with working FreeRTOS ticks; app_main → Logging → NVS → SPI → MessageDispatcher all complete; tick injection via OnGPIO; next: capture debug UART output, catalog remaining peripheral stubs needed)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -201,10 +201,27 @@
   permanently, causing lock_acquire_generic to think we're in ISR context → abort(). Fix:
   patched `extui a11,a11,0,4` → `movi a11,0` in lock_acquire_generic (0x40082c49) and
   lock_release_generic (0x40082ca7). Forces non-ISR path. Safe because emulator has no real ISRs.
-- [ ] **spi_slave_hal_prepare_data null pointer (CURRENT BLOCKER)**: After MessageDispatcher ctor,
-  code enters spi_slave_hal_prepare_data (0x4009f0a8) with A8=0 (null pointer), causing
-  load/store exception at VADDR=0x00000000/0x00000004. Likely because SpiTransportProvider ctor
-  was skipped, leaving SPI HAL struct uninitialized. Need to identify caller and skip/NOP.
+- [x] **spi_slave_hal_prepare_data null pointer — RESOLVED**: Root cause was corrupted _lock_t
+  variables from Renode's window-spill bug, not the skipped SPI ctor. Queue handles pointed to
+  uninitialized heap memory. Fix: Python hook on xQueueGenericReceive (0x40091cb8) detects
+  uninitialized Queue_t structs (both list pxIndex fields NULL) and initializes all List_t and
+  Queue_t fields in-place before the function proceeds.
+- [x] **prvDeleteTCB/prvDeleteTLS/reclaim_reent/vPortReleaseMPU crashes — RESOLVED**: All four
+  task cleanup functions crash when Renode's window-spill corrupts TCB pointer fields. Skipped
+  with entry→j-to-retw binary patches. Task cleanup isn't critical for emulation boot.
+- [x] **CCOUNT not incrementing — RESOLVED**: Renode's Xtensa CCOUNT register returns a stale
+  value (never advances from its initial value). This means CCOMPARE0 timer interrupts never
+  fire, and FreeRTOS has no tick source. `waiti` instruction in esp_pm_impl_waiti also halts
+  the CPU, preventing clock advancement.
+  Fix: (1) Patched `waiti 0` to `nop` in esp_pm_impl_waiti (0x401aef8b), (2) Python tick
+  injection hook on idle task loop (0x400920fe) that periodically fires CPU interrupt 6 via
+  `OnGPIO(6, True/False)` with PS.INTLEVEL cleared. xPortSysTickHandler now runs natively
+  via the interrupt vector, performing real tick counting and delayed task waking.
+- [x] **Boot reaches idle task with working FreeRTOS ticks**: Full boot sequence:
+  ROM init → heap init → FreeRTOS scheduler start → app_main → Logging::Setup →
+  NvsManager::Setup → SpiTransportProvider ctor (skipped) → MessageDispatcher ctor →
+  idle task. Tick injection fires every ~50 idle loops, context switches work, system
+  runs stably for 90+ seconds with no crashes.
 - [ ] **tlib fix: arch_tlb_fill (U.8)**: Fixed in `bryancostanich/renode` branch
   `fix/xtensa-retw`. Changed `return TRANSLATE_FAIL` → `return ret` in `helper.c` to
   propagate real MMU cause codes. Submodule chain: tlib `2520925`→`2574b54` on
