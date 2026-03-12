@@ -214,6 +214,52 @@ sysbus WriteByte 0x400911a4 0xF0
 sysbus WriteByte 0x400910E7 0x1D
 sysbus WriteByte 0x400910E8 0xF0
 
+# NOP out esp_intr_alloc call in uart_isr_register.
+# The call chain uart_isr_register → esp_intr_alloc → esp_intr_alloc_intrstatus
+# triggers the Renode retw bug at EVERY return point in the chain: each retw reads
+# AR[0] instead of AR[WINDOWBASE*4], getting a corrupted return address.
+# Additionally, xt_ints_on inside esp_intr_alloc_intrstatus receives corrupted
+# interrupt masks (DRAM addresses like 0x3ffb79ec instead of valid bitmasks)
+# due to window-spill register corruption.
+# Fix: NOP the callx8 in uart_isr_register that calls esp_intr_alloc, replacing
+# it with movi a8, 0 (harmless NOP). A Python hook sets A10=0 (ESP_OK return).
+# callx8 a8 at 0x40157d0f (3 bytes: e0 08 00) → movi a8, 0 (82 c0 00)
+sysbus WriteByte 0x40157d0f 0x82
+sysbus WriteByte 0x40157d10 0xC0
+sysbus WriteByte 0x40157d11 0x00
+
+# Skip esp_brownout_init body — brownout detection is irrelevant in emulation.
+# Keep entry (which rotates WINDOWBASE — call8 does NOT rotate it!) then jump
+# to retw.n. Patching entry breaks window rotation → retw returns to wrong caller.
+# entry at 0x400d5948 stays. Replace l32r at 0x400d594b with j to retw.n at 0x400d597d.
+# j offset: target=0x400d597d, source=0x400d594b, offset=target-(source+4)=0x2E
+sysbus WriteByte 0x400d594b 0x86
+sysbus WriteByte 0x400d594c 0x0B
+sysbus WriteByte 0x400d594d 0x00
+
+# Skip __register_frame_info_bases — GCC exception frame registration calls
+# pthread_mutex_lock which calls xQueueGenericReceive before the FreeRTOS scheduler
+# starts, triggering assertions/BREAK instructions. Exception frame registration
+# is not needed for emulation. Replace first instruction after entry with j to retw.n.
+# beqz.n at 0x40199b57 (2 bytes) → j +0x35 to retw.n at 0x40199b90 (3 bytes)
+sysbus WriteByte 0x40199b57 0x46
+sysbus WriteByte 0x40199b58 0x0D
+sysbus WriteByte 0x40199b59 0x00
+
+# Disable configASSERT in xQueueGenericReceive — the Meadow firmware is a debug build
+# with assertions compiled in. Pre-scheduler semaphore/mutex operations trigger these
+# assertions even though the operations would succeed (semaphore available, no blocking).
+# In release builds, these assertions are compiled out and everything works.
+# When scheduler not started, xQueueGenericReceive should return pdTRUE immediately.
+# The debug build has configASSERT that aborts if called pre-scheduler with timeout.
+# Even without the assert, the blocking path hits BREAK in vTaskPlaceOnEventList.
+# Fix: patch the scheduler-not-started branch target (0x40091d07) to jump directly
+# to "movi a2, 1; j retw" at 0x40091d83 (return pdTRUE).
+# l32i.n + beqz at 0x40091d07 (5 bytes) → j +0x78 to 0x40091d83 (3 bytes)
+sysbus WriteByte 0x40091d07 0x06
+sysbus WriteByte 0x40091d08 0x3E
+sysbus WriteByte 0x40091d09 0x00
+
 # Patch vTaskSwitchContext core affinity check for single-core emulation.
 # The dual-core scheduler checks pxTCB->xCoreID == xPortGetCoreID().
 # Tasks pinned to core 1 (xCoreID=1) can't run on core 0, causing "no ready
@@ -969,21 +1015,93 @@ cpu AddHook 0x40157fbc "self.Log(LogLevel.Error, 'UART: uart_param_config')"
 cpu AddHook 0x40157d20 "self.Log(LogLevel.Error, 'UART: uart_set_pin')"
 cpu AddHook 0x40157cb0 "self.Log(LogLevel.Error, 'UART: uart_isr_register')"
 cpu AddHook 0x400d5810 "self.Log(LogLevel.Error, 'UART: esp_intr_alloc')"
+# Set A10=0 (ESP_OK) after NOPed esp_intr_alloc call in uart_isr_register.
+# The callx8 at 0x40157d0f was replaced with movi a8,0; the next instruction
+# at 0x40157d12 is mov a2,a10, so A10 must contain the return value.
+python """
+import clr
+clr.AddReference('Renode')
+from Antmicro.Renode.Peripherals.CPU import RegisterValue as _RV
+def _set_a10_zero():
+    _cpu.SetRegister(99, _RV.Create(0, 32))
+__builtin__._set_a10_zero = _set_a10_zero
+
+_retw_fix_count = [0]
+def _fix_retw():
+    # Fix Renode retw bug: retw reads from physical AR[0] instead of AR[WB*4].
+    # Write the correct A0 value directly to AR[0] (physical register index 1).
+    # Then retw.n executes normally and reads the right value from AR[0].
+    _retw_fix_count[0] += 1
+    a0 = _cpu.GetRegister(89).RawValue  # A0 (logical, maps to AR[WB*4])
+    pc = _cpu.GetRegister(0).RawValue
+    wb = _cpu.GetRegister(34).RawValue
+    # Compute expected return address: {PC[31:30], A0[29:0]}
+    ret_pc = (pc & 0xC0000000) | (a0 & 0x3FFFFFFF)
+    # Detect returns to suspicious addresses
+    if ret_pc == 0x40081d82 or ret_pc < 0x40000000 or ret_pc > 0x401C0000:
+        _cpu.Log(LogLevel.Error, 'RETW_FIX BAD_RET #%d PC=0x%08x A0=0x%08x WB=%d ret=0x%08x' % (_retw_fix_count[0], pc, a0, wb, ret_pc))
+    elif _retw_fix_count[0] <= 20:
+        _cpu.Log(LogLevel.Error, 'RETW_FIX #%d PC=0x%08x A0=0x%08x WB=%d' % (_retw_fix_count[0], pc, a0, wb))
+    elif _retw_fix_count[0] == 100:
+        _cpu.Log(LogLevel.Error, 'RETW_FIX: 100 fixes applied, suppressing further logs')
+    # Write A0 directly to AR[0] (physical register, index 1)
+    _cpu.SetRegister(1, _RV.Create(a0, 32))
+__builtin__._fix_retw = _fix_retw
+__builtin__._retw_fix_count = _retw_fix_count
+"""
+cpu AddHook 0x40157d12 "_set_a10_zero()"
+# Fix Renode retw bug globally: retw reads AR[0] instead of AR[WINDOWBASE*4].
+# _fix_retw() copies A0 (logical) to AR[0] (physical) before each retw executes.
+# Hook all 6845 retw addresses extracted from the ELF binary.
+include @scripts/retw_hooks.resc
 cpu AddHook 0x40155884 "self.Log(LogLevel.Error, 'UART: periph_module_enable')"
 cpu AddHook 0x40157bf4 "self.Log(LogLevel.Error, 'UART: uart_pattern_queue_reset')"
 # Exception vector hooks — detect crashes
 cpu AddHook 0x40080300 "self.Log(LogLevel.Error, 'KERNEL_EXC @40080300')"
 cpu AddHook 0x400803C0 "self.Log(LogLevel.Error, 'DOUBLE_EXC @400803C0')"
-# Window exception monitoring — log every 10000th window overflow/underflow
+# User exception vector monitoring — detect tight exception loops
+# Register indices: EPC1=51, EXCCAUSE=77, EXCVADDR=83, PS=38, EXCSAVE1=65
 python "exc_count = [0]"
-python "def _exc_monitor(): exc_count[0] += 1; (self.Log(LogLevel.Error, 'WIN_EXC count=%d' % exc_count[0]) if exc_count[0] % 10000 == 0 else None)"
-python "__builtin__._exc_monitor = _exc_monitor"
-python "__builtin__.exc_count = exc_count"
+python """
+def _exc_monitor():
+    exc_count[0] += 1
+    c = exc_count[0]
+    if c <= 5:
+        epc1 = _cpu.GetRegister(51).RawValue
+        cause = _cpu.GetRegister(77).RawValue
+        vaddr = _cpu.GetRegister(83).RawValue
+        ps = _cpu.GetRegister(38).RawValue
+        pc = _cpu.GetRegister(0).RawValue
+        _cpu.Log(LogLevel.Error, 'USER_EXC #%d PC=0x%08x EPC1=0x%08x CAUSE=%d VADDR=0x%08x PS=0x%08x' % (c, pc, epc1, cause, vaddr, ps))
+    elif c % 2000 == 0:
+        _cpu.Log(LogLevel.Error, 'USER_EXC #%d (still looping)' % c)
+__builtin__._exc_monitor = _exc_monitor
+__builtin__.exc_count = exc_count
+"""
 cpu AddHook 0x40080340 "_exc_monitor()"
 # Task entry diagnostics
 cpu AddHook 0x400920F0 "self.Log(LogLevel.Error, 'IDLE_TASK entered')"
 cpu AddHook 0x400D506C "self.Log(LogLevel.Error, 'MAIN_TASK entered')"
 # General exception path (not 1, 4, 5, or >=32) — detect unexpected exceptions
 cpu AddHook 0x40082782 "self.Log(LogLevel.Error, 'EXC: General handler (EXCCAUSE=0/2/3/6-31)')"
+# abort() hook — detect assertion failures and panics
+cpu AddHook 0x40097bec "self.Log(LogLevel.Error, 'ABORT called!')"
+# configASSERT hooks — detect exactly which break fires
+cpu AddHook 0x40090883 "self.Log(LogLevel.Error, 'BREAK: panic_abort')"
+cpu AddHook 0x40094c59 "self.Log(LogLevel.Error, 'BREAK: multi_heap_realloc assert')"
+cpu AddHook 0x4011a6e8 "self.Log(LogLevel.Error, 'BREAK: bta_gattc assert')"
+# xQueueGenericReceive scheduler check
+python """
+def _check_sched():
+    a10 = _cpu.GetRegister(99).RawValue
+    _cpu.Log(LogLevel.Error, 'xQueueGenericReceive: xTaskGetSchedulerState returned %d' % a10)
+__builtin__._check_sched = _check_sched
+"""
+cpu AddHook 0x40091cf8 "_check_sched()"
+# Boot sequence milestones
+cpu AddHook 0x40081b07 "self.Log(LogLevel.Error, 'vTaskStartScheduler called')"
+cpu AddHook 0x4009244c "self.Log(LogLevel.Error, 'xTaskCreatePinnedToCore called')"
+cpu AddHook 0x4009262c "self.Log(LogLevel.Error, 'vTaskStartScheduler entry')"
+cpu AddHook 0x40081d7f "self.Log(LogLevel.Error, 'call_start_cpu0: call8 start_cpu0_default')"
 
 log "ESP32 Meadow boot ready (ROM + firmware loaded). Use 'start' to run."
