@@ -62,6 +62,15 @@
 - [ ] Note: `STM32H7_QuadSPI` register layout is identical to STM32F7 QUADSPI (same IP block), so improvements benefit both F7 and H7 users
 - [ ] Decide: submit as feature request issue, or implement full transaction logic in C# as PR
 
+## U.8 — Xtensa `arch_tlb_fill` Wrong Error Code (PR)
+- [x] **Bug:** `arch_tlb_fill()` in `tlib/arch/xtensa/helper.c` discards the real MMU exception cause code from `get_physical_address()` and returns `TRANSLATE_FAIL` (== `1`). The `TRY_FILL` macro passes this to `arch_raise_mmu_fault_exception()`, which uses it as the Xtensa exception cause. Since `SYSCALL_CAUSE` is also `1`, every MMU fault (TLB miss, store prohibited, etc.) is misreported as a SYSCALL exception.
+- [x] **Impact:** On ESP32, the `_xt_syscall_exc` handler adds 3 to EPC1 (to skip the 3-byte SYSCALL instruction). When the real instruction is a 2-byte narrow instruction (e.g., `s32i.n`), this corrupts EPC1 to a non-instruction boundary, causing cascading PC misalignment crashes. Affects any Xtensa firmware with narrow instructions near MMU-faulting code, particularly FreeRTOS `vListInsertEnd`/`vListInsert` on ESP32.
+- [x] **Fix:** Changed `return TRANSLATE_FAIL;` to `return ret;` so the actual cause code (e.g., `STORE_PROHIBITED_CAUSE=29`) propagates correctly. All Xtensa cause codes are non-zero, so the `TRY_FILL` error check still works.
+- [x] **Location:** `src/Infrastructure/src/Emulator/Cores/tlib/arch/xtensa/helper.c`, line ~193
+- [x] **Repo/Branch:** `bryancostanich/renode` fork, worktree `renode-retw-fix`, branch `fix/xtensa-retw`
+- [x] **Commit:** Not yet committed
+- [ ] Submit PR upstream
+
 ---
 
 ## Decision Log
