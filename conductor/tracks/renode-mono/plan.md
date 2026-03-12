@@ -163,14 +163,8 @@ and requiring ~50 retries via `app deploy`. Root cause identified and fixed 2026
 - Also added retry logic (10 attempts) and TimeoutException catch as defense-in-depth
 - `file write` now succeeds on first attempt (previously failed 100% of the time)
 
-**Possible approaches:**
-- [x] ~~Profile HCOM protocol~~ — root cause found: stale DNLD_FAIL_RESEND from firmware watchdog
-- [ ] Bypass QSPI write path similar to read bypass (direct memory writes to flash region)
-- [ ] Increase CLI timeout for emulator connections
-- [ ] Profile where time is spent in the write path (QSPI commands, LFS block ops, DMA waits)
-- [ ] Pre-populate app DLLs in the LittleFS image (skip deploy entirely for testing)
-- [x] ~~Investigate why single `file write` fails but `app deploy` succeeds for first file~~
-  — `app deploy` uses infinite retry loop in `AppManager`; added retry to `SocketConnection.WriteFile`
+**Root cause found and fixed** — stale `DNLD_FAIL_RESEND` from firmware watchdog was poisoning file writes.
+`dataTransferStarted` guard ignores stale watchdog responses. No workarounds needed.
 
 ### 2.12 — AOT Compilation (FUTURE)
 Ahead-of-time compilation pre-compiles IL → native ARM at build time. Longer-term goal that
