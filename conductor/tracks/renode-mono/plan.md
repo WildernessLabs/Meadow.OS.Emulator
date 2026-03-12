@@ -1,7 +1,7 @@
 # Plan: Mono Runtime Bring-Up in Emulator
 
 ## Track ID: `renode-mono`
-## Status: `in-progress` (Phase 2.10 done — next: app deploy end-to-end)
+## Status: `in-progress` (Phase 2.11 — app deploy works, blocked on LFS format-on-boot)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -137,7 +137,14 @@ reconnects, then writes files. BBR must persist across resets for this to work.
 - [x] Verified: `app deploy` gets past MONO_DISABLE, reconnects, begins file transfer
 - [x] File transfer fixed — stale watchdog bug in SocketConnection (see Phase 2.10)
 - [x] `file write` succeeds first attempt (was failing 100%, required ~50 retries via app deploy)
-- [ ] Fix LFS image reload on reset (reset macro reloads `littlefs.bin`, overwriting deployed files)
+- [x] `app deploy` with trimmed binaries completes successfully (33 files, ~8MB)
+- [x] `app trim` → `app deploy` → all files transferred to emulated LittleFS
+- [x] Removed `littlefs.bin` reload from reset macro (was overwriting deployed files)
+- [ ] **BLOCKER**: Firmware re-formats LittleFS on every boot, destroying deployed files
+  - `RuntimeEnable` → device resets → firmware boots → formats LFS → files gone
+  - QSPI `MappedMemory` retains data across reset, but firmware's `create_fs` always formats
+  - Need to either: (a) patch firmware to mount-only if superblock exists, (b) pre-populate
+    LFS image with app files, or (c) find the BBR/NVS flag that controls format-vs-mount
 
 ### 2.10 — File Transfer Fix (DONE)
 File writes to the emulated device were failing 100% of the time via `file write` command,
@@ -165,6 +172,32 @@ and requiring ~50 retries via `app deploy`. Root cause identified and fixed 2026
 
 **Root cause found and fixed** — stale `DNLD_FAIL_RESEND` from firmware watchdog was poisoning file writes.
 `dataTransferStarted` guard ignores stale watchdog responses. No workarounds needed.
+
+### 2.11 — App Deploy End-to-End (IN PROGRESS)
+Deploy a Meadow app via CLI and have Mono JIT start it.
+
+**Status:** Deploy works, blocked on LFS format-on-boot.
+
+**What works (2026-03-11):**
+- `app trim` produces trimmed binaries (~8MB, 33 files)
+- `app deploy` transfers all files via HCOM socket connection
+- Between-file delays (~30s each) caused by firmware download watchdog timeout — not a bug,
+  just slow emulated QSPI. `dataTransferStarted` guard handles stale responses correctly.
+- Removed `littlefs.bin` from reset macro so deployed files survive in QSPI `MappedMemory`
+
+**Blocker: firmware formats LFS on every boot**
+- After deploy, `runtime enable` triggers `SYSRESETREQ` → Renode resets CPU → firmware boots
+- Firmware always runs `F/S creating 1 partition ... mount & format` — this formats LFS,
+  destroying all deployed files
+- The QSPI `MappedMemory` at 0x90500000 DOES retain data across reset
+- But the firmware's `create_fs` code formats regardless — need to understand why
+- On real hardware, firmware presumably mounts existing filesystem without formatting
+
+**Possible fixes:**
+- [ ] Investigate firmware's format-vs-mount decision logic (BBR flag? partition table check?)
+- [ ] Pre-build LFS v1 image with Blinky app files baked in (skip deploy for testing)
+- [ ] Patch `lfs_format_skip` hook to prevent format after first boot
+- [ ] Check if `lfs_format_skip` hook (listed at 0x081714ae) was meant for this exact problem
 
 ### 2.12 — AOT Compilation (FUTURE)
 Ahead-of-time compilation pre-compiles IL → native ARM at build time. Longer-term goal that
@@ -303,6 +336,8 @@ Backup registers now handled natively by the RTC model with `softResettable: fal
 | 2026-03-11 | C# mq_intercept | `MqReceiveIntercept.cs` replaces IronPython. Fires on all mq_receive calls. |
 | 2026-03-11 | Emulation speed blocker | 0.147s virtual time in 10 min. Need AOT or cache solution for Mono JIT. |
 | 2026-03-11 | Interpreter first, AOT later | Mono ran interpreted before JIT was enabled — switch back for emulator. AOT is longer-term; older Mono AOT has limitations (no dynamic generics, limited reflection). Newer .NET/Mono fixes these. Plan: interpreter now, AOT + interpreter hybrid later. |
+| 2026-03-11 | Remove littlefs.bin from reset macro | Reset macro was reloading pristine LFS image, wiping deployed files. Removed so QSPI MappedMemory retains deployed data across resets. |
+| 2026-03-11 | LFS format-on-boot is the blocker | Firmware always formats LFS on boot regardless of existing data. Need to either pre-populate LFS image, skip format, or find firmware's mount-vs-format decision flag. |
 | 2026-03-11 | No Renode state save | Rejected machine state snapshots — fragile across versions, not a real solution. |
 | 2026-03-11 | Overnight JIT run optional | Low priority correctness check only. Not blocking interpreter work. |
 | 2026-03-11 | Use NuGet refs for samples | Meadow.Samples repo has ProjectReferences to sibling source repos; must change to PackageReference (Meadow.F7 2.5.0, Meadow.Foundation 2.5.0) to build standalone. |
