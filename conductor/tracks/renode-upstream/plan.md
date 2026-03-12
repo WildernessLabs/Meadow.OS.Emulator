@@ -68,7 +68,7 @@
 - [x] **Fix:** Changed `return TRANSLATE_FAIL;` to `return ret;` so the actual cause code (e.g., `STORE_PROHIBITED_CAUSE=29`) propagates correctly. All Xtensa cause codes are non-zero, so the `TRY_FILL` error check still works.
 - [x] **Location:** `src/Infrastructure/src/Emulator/Cores/tlib/arch/xtensa/helper.c`, line ~193
 - [x] **Repo/Branch:** `bryancostanich/renode` fork, worktree `renode-retw-fix`, branch `fix/xtensa-retw`
-- [x] **Commit:** Not yet committed
+- [x] **Commits:** tlib: `2520925`, Infrastructure: `bcc70d280`, renode: `e7098410`
 - [ ] Submit PR upstream
 
 ---

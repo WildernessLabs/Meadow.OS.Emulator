@@ -15,4 +15,4 @@ See [conductor/tracks/renode-upstream/plan.md](conductor/tracks/renode-upstream/
 | U.5 | Winbond W25QXXXJV flash peripheral | — | — | Planned |
 | U.6 | STM32H7_QuadSPI completeness | — | — | Planned |
 | U.7 | GenericSpiFlash Winbond status registers | — | — | Planned |
-| U.8 | Xtensa `arch_tlb_fill` wrong error code | `bryancostanich/renode` `fix/xtensa-retw` (worktree: `renode-retw-fix`) | Not yet committed | Fixed locally |
+| U.8 | Xtensa `arch_tlb_fill` wrong error code | `bryancostanich/renode` `fix/xtensa-retw` (worktree: `renode-retw-fix`) | tlib:`2520925` | Fixed locally |
