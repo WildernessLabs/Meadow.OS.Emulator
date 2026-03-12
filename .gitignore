@@ -430,5 +430,8 @@ tools/lfs.h
 tools/lfs_util.c
 tools/lfs_util.h
 
+# Assembly object files (keep .elf for runtime loading)
+*.o
+
 # Mac Bullshit
 .DS_Store

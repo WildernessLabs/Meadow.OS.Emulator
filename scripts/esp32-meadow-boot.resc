@@ -39,7 +39,7 @@ sysbus LoadELF @/Users/bryancostanich/Git_Repos/Wilderness_Labs/Meadow.OS/esp32/
 # Window register init trampoline — sets WINDOWBASE/WINDOWSTART/PS, then
 # uses callx8 to call_start_cpu0 (proper windowed call for overflow handling).
 # Trampoline code at 0x4009F00C, literal pool at 0x4009F000-0x4009F00B.
-sysbus LoadELF @/tmp/trampoline2.elf
+sysbus LoadELF @tests/trampoline/trampoline.elf
 cpu PC 0x4009F00C
 
 # Set VECBASE to the firmware's exception vectors in IRAM.
