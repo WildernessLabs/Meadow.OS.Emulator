@@ -41,14 +41,22 @@
 - [x] Start Renode with `meadow-legacy-headless.resc`
 - [x] Run `meadow device info -s socket://localhost:4242` — verified device info (version 2.5.7.0)
 - [x] Deploy command gets past MONO_DISABLE + reconnect
-- [ ] Full deploy flow blocked by BBR persistence (tracked under `renode-mono` Phase 2.9)
+- [x] BBR persistence fixed (Renode RTC model patched, tracked under `renode-mono` Phase 2.9)
+- [x] `file write` works — 100% success on first attempt after stale watchdog fix
+
+## 6 — WriteFile Bug Fix (2026-03-11)
+- [x] Diagnosed: firmware's download watchdog sends stale `DNLD_FAIL_RESEND` (0x0312) from prior
+  abandoned ops, setting `needsRetry=true` before data transfer begins → data loop skipped
+- [x] Fix: `dataTransferStarted` guard in `OnFileRetry` — ignore `FileWriteFailed` until data phase
+- [x] Also added retry loop (10 attempts) + `TimeoutException` catch as defense-in-depth
+- [x] Verified: `file write` succeeds first attempt against emulator
 
 ---
 
 ## Implementation Notes
 
 - Branch: `feature/TCP_Socket_Connection_for_EMU` in Meadow.CLI repo
-- Published to `/tmp/meadow-cli/` via `dotnet publish`
+- Run from source: `dotnet run --project Source/Meadow.CLI/Meadow.CLI.csproj -- <args>`
 - SocketConnection is ~80% copy of SerialConnection with transport swapped
 - COBS framing, response dispatch, request queuing, threading model identical
 - Key difference: `NetworkStream.Read()` blocks until data available (vs SerialPort timeout)
@@ -61,3 +69,4 @@
 | 2026-03-09 | `socket://` URI scheme | Distinguishes from HTTP-based TcpConnection which uses `http://`. Clear intent. |
 | 2026-03-09 | Separate class, not refactor SerialConnection | Keeps USB serial path untouched. Lower risk. |
 | 2026-03-11 | ReconnectRequiredResponse handler | CLI deploy sends MONO_DISABLE → device restarts → CLI must reconnect and signal concluded. |
+| 2026-03-11 | Stale watchdog fix | `dataTransferStarted` guard prevents stale `DNLD_FAIL_RESEND` from aborting file writes before data phase. |

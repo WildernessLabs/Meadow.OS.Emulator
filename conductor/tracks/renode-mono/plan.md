@@ -1,7 +1,7 @@
 # Plan: Mono Runtime Bring-Up in Emulator
 
 ## Track ID: `renode-mono`
-## Status: `in-progress` (Phase 2.10 — File transfer performance)
+## Status: `in-progress` (Phase 2.10 done — next: app deploy end-to-end)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -135,15 +135,13 @@ reconnects, then writes files. BBR must persist across resets for this to work.
 - [x] Removed all diagnostic trace hooks from `.resc` (cleanup)
 - [x] Verified: `runtime disable` → device restarts with `Mono:Disabled` (BBR persists!)
 - [x] Verified: `app deploy` gets past MONO_DISABLE, reconnects, begins file transfer
-- [x] First file (`netstandard.dll`) transfers to 100% after ~50 retries
-- [ ] **REMAINING**: File transfer too slow — second file (`mscorlib.dll`) times out
+- [x] File transfer fixed — stale watchdog bug in SocketConnection (see Phase 2.10)
+- [x] `file write` succeeds first attempt (was failing 100%, required ~50 retries via app deploy)
 - [ ] Fix LFS image reload on reset (reset macro reloads `littlefs.bin`, overwriting deployed files)
 
-### 2.10 — File Transfer Performance (IN PROGRESS)
-File writes to the emulated device are extremely slow. The firmware's download watchdog
-fires every ~5s of emulated time. The CLI retries sending, and the first file eventually
-gets through after ~50 retries (~4-5 min wall-clock), but the CLI's overall operation
-timeout expires before the second file completes.
+### 2.10 — File Transfer Fix (DONE)
+File writes to the emulated device were failing 100% of the time via `file write` command,
+and requiring ~50 retries via `app deploy`. Root cause identified and fixed 2026-03-11.
 
 **Root cause analysis:**
 - LittleFS writes go through QSPI flash in indirect write mode (Page Program commands)
@@ -152,13 +150,27 @@ timeout expires before the second file completes.
 - The `qspi_waitstatusflags` skip hook may cause write timing issues
 - Single `file write` command returns immediately at 0% with no file appearing on device
 - `app deploy` does transfer files (netstandard.dll reached 100%) but extremely slowly
+- Emulator runs at 1:1 real-time speed — confirmed via `machine GetTimeSourceInfo` — so
+  emulation speed is NOT the bottleneck
+- `SocketConnection.WriteFile` sends `InitFileWriteRequest`, waits for `FileWriteAccepted`
+  event from firmware's `INIT_DOWNLOAD_OKAY` (0x030E) response
+- **ROOT CAUSE FOUND**: Firmware's download watchdog sends `DNLD_FAIL_RESEND` (0x0312) responses
+  from previous failed/abandoned file operations. These stale responses arrive in the TCP buffer
+  and fire `FileWriteFailed` event, setting `needsRetry=true` BEFORE the data transfer begins.
+  The data loop is then skipped (`while (true && !needsRetry)` = false), and WriteFile returns false.
+- **FIX**: Added `dataTransferStarted` guard — `FileWriteFailed` events are ignored until the
+  data transfer phase actually begins. Stale watchdog responses from prior operations are harmless.
+- Also added retry logic (10 attempts) and TimeoutException catch as defense-in-depth
+- `file write` now succeeds on first attempt (previously failed 100% of the time)
 
 **Possible approaches:**
+- [x] ~~Profile HCOM protocol~~ — root cause found: stale DNLD_FAIL_RESEND from firmware watchdog
 - [ ] Bypass QSPI write path similar to read bypass (direct memory writes to flash region)
 - [ ] Increase CLI timeout for emulator connections
 - [ ] Profile where time is spent in the write path (QSPI commands, LFS block ops, DMA waits)
 - [ ] Pre-populate app DLLs in the LittleFS image (skip deploy entirely for testing)
-- [ ] Investigate why single `file write` fails but `app deploy` succeeds for first file
+- [x] ~~Investigate why single `file write` fails but `app deploy` succeeds for first file~~
+  — `app deploy` uses infinite retry loop in `AppManager`; added retry to `SocketConnection.WriteFile`
 
 ### 2.12 — AOT Compilation (FUTURE)
 Ahead-of-time compilation pre-compiles IL → native ARM at build time. Longer-term goal that
@@ -311,6 +323,7 @@ Backup registers now handled natively by the RTC model with `softResettable: fal
 | 2026-03-11 | Fork Renode for RTC fix | One-line change (`BackupEnd = 0x9C` → `0xCC`) in `STM32F4_RTC.cs`. Fork: `bryancostanich/renode`. |
 | 2026-03-11 | `--host-arch aarch64` | macOS Renode build defaults to x86_64 tlib. Must pass `--host-arch aarch64` for Apple Silicon. |
 | 2026-03-11 | Run via `dotnet` not binary | Custom build uses `dotnet Renode.dll` (not native single-file `Renode` binary) since tlib is separate. |
+| 2026-03-11 | WriteFile stale watchdog fix | Root cause: firmware's download watchdog sends `DNLD_FAIL_RESEND` from prior abandoned ops. Fix: `dataTransferStarted` guard ignores `FileWriteFailed` until data phase begins. Also added retry (10x) as defense-in-depth. `file write` now succeeds first attempt. |
 
 ## Repo Clarification
 
