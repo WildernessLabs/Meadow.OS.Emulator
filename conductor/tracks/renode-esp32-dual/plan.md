@@ -1,7 +1,7 @@
 # Plan: Dual-Machine ESP32 Emulation
 
 ## Track ID: `renode-esp32-dual`
-## Status: `in-progress` (Phase 1.1 ✅, Phase 1.2 ✅, Phase 1.3 in-progress — FreeRTOS scheduler runs, retw bug identified and partially fixed, Tmr Svc task blocks next progress)
+## Status: `in-progress` (Phase 1.1 ✅, Phase 1.2 ✅, Phase 1.3 in-progress — arch_tlb_fill bug fixed in tlib, retw workarounds under re-evaluation)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -100,18 +100,16 @@
     after scheduler starts (can't apply during init since these functions are used in queue setup)
   - vTaskSwitchContext: handled by inline trampoline (manual WB adjust + j, no retw)
   - **Problem: can't patch 2-byte retw.n with 3-byte j instruction**
-- [ ] **Tmr Svc task monopolization (CURRENT BLOCKER)**: After IPC demotion, Tmr Svc (pri 1)
-  monopolizes the CPU. It calls xQueueGenericReceive (retw patched), which calls
-  vTaskPlaceOnEventList to block, but vTaskPlaceOnEventList's retw.n at 0x40092CFE is NOT
-  patched. The buggy retw.n returns to the wrong address, so the task never actually blocks.
-  ~20 additional retw.n in the call chain need fixing:
-  - vTaskPlaceOnEventList (0x40092CFE), prvAddCurrentTaskToDelayedList (3 sites),
-    xTaskCheckForTimeOut (5 sites), vTaskSetTimeOutState, prvCopyDataFromQueue,
-    xTaskRemoveFromEventList, vPortYield (2 sites), vTaskPriorityInherit (3 sites)
-  - **Options**: (a) targeted patching — replace preceding instruction + retw.n with j for each;
-    (b) Python hooks at each retw.n to fix AR[0]; (c) build Renode from source to fix retw bug
-    system-wide (correct long-term solution)
-- [ ] No UART output yet (Tmr Svc blocks main task from reaching UART init)
+- [x] **arch_tlb_fill bug fixed (U.8)**: Root cause of "SYSCALL on s32i.n" was `arch_tlb_fill`
+  returning `TRANSLATE_FAIL` (==1==`SYSCALL_CAUSE`) instead of the real MMU cause code. Fixed
+  in tlib (`bryancostanich/renode`, branch `fix/xtensa-retw`, commit `2520925`). This caused
+  cascading PC corruption via the syscall handler adding 3 to EPC1 for non-SYSCALL instructions.
+- [ ] **Re-evaluate retw workarounds**: Code analysis shows retw implementation in tlib is
+  correct (`cpu_R[0]` = `env->regs[0]` = logical A0, properly synced via window mechanism).
+  The "retw bug" may have been a misdiagnosis — symptoms caused by arch_tlb_fill's fake
+  SYSCALL exceptions corrupting EPC1. Need to test with retw workarounds removed.
+- [ ] **Simplify boot script**: Remove retw trampolines, non-windowed list functions, and
+  deferred retw patches if retw works correctly after arch_tlb_fill fix.
 - [ ] Map 0x60000000 (UART FIFO alternate bus address) as a peripheral to capture debug output
 - [ ] Catalog all remaining hardware accesses that fail
 
@@ -223,6 +221,9 @@
 | 2026-03-11 | Python hook scoping via \_\_builtin\_\_ | `python """..."""` blocks and `cpu AddHook` run in different Python scopes. Share functions between them using `import __builtin__; __builtin__._func = func` in the python block, then `_func()` in hook strings. |
 | 2026-03-11 | **Renode retw bug (CRITICAL)** | Confirmed: Renode's retw reads A0 from physical AR[0] instead of AR[WINDOWBASE\*4]. Affects ALL retw/retw.n instructions. Workaround: trampoline at 0x4009F040 saves A0 to EXCSAVE1, sets WB=0, writes A0 to AR[0], restores WB, then retw.n reads correct value from AR[0]. Applied to _frxt_dispatch resume, xQueueGenericReceive, xQueueGenericSend. Long-term fix requires building Renode from source. |
 | 2026-03-11 | Deferred retw patches | xQueueGenericReceive/Send retw patches applied AFTER scheduler starts via Python hook (one-shot at first _frxt_dispatch). These functions are used during queue initialization — patching them before scheduler starts crashes early boot. |
+
+| 2026-03-11 | **arch_tlb_fill root cause found and fixed** | `arch_tlb_fill` returned `TRANSLATE_FAIL` (==1==`SYSCALL_CAUSE`) instead of the real MMU cause. Fixed in tlib by returning the actual error code from `get_physical_address`. This was the root cause of the vListInsertEnd/vListInsert PC corruption. The "retw bug" may have been a misdiagnosis caused by the same issue — retw code analysis shows the implementation is correct. Need to re-test without retw workarounds. |
+| 2026-03-11 | Re-evaluate all retw workarounds | With arch_tlb_fill fixed, the ~500 lines of retw trampolines and non-windowed list functions in the boot script may be unnecessary. Test incrementally by removing workarounds and checking for regressions. |
 
 ## Changes Log
 
