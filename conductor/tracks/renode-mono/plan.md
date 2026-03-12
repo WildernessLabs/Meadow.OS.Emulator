@@ -17,10 +17,20 @@ real-time speed (load ~1x). Key milestones achieved:
 - Mono JIT starts, loads assemblies, runs `MeadowApp.Initialize()` + `Run()`
 - Blinky app cycles colors in a loop (confirmed via `meadow listen`)
 - Emulation runs at ~1x real-time (was 96,000x before SVC fix)
+- Worktree eliminated — main repo at `~/Git_Repos/wilderness_labs/Meadow.OS.Emulator`
+- Renode fork moved to `WildernessLabs/renode` (was `bryancostanich/renode`)
+- `run.sh` auto-detects custom Renode fork as sibling repo
+- LFS pre-population optional — firmware formats fresh LFS on empty flash
 
 **Key upstream fixes** (tracked in `upstream_fixes.md`):
 - U.2: SVC/PRIMASK bug in NVIC — 12,000x speedup
 - U.9: STM32F4 RTC backup register count (20→32)
+
+**Quick start:**
+```bash
+./run.sh --legacy                    # Start emulator (monitor on :1234, HCOM on :4242)
+dotnet meadow.dll listen -s socket://localhost:4242   # Connect CLI
+```
 
 ---
 
@@ -120,7 +130,7 @@ Pre-compile IL → native ARM at build time. Firmware already whitelists `--aot`
 | `mono_ver_skip` | 0x08143590 | Skip `refresh_mono_version` (reads unimplemented QSPI MTD) |
 | `mono_ver_copy` | 0x08143762 | After OS version populated, copy to mono version fields |
 | `mono_str_fix` | 0x080618e8 | Patch deep-copied config's mono version string (+0x80) |
-| `lfs_format_skip` | 0x081714ae | Prevent LFS format from wiping pre-populated image |
+| `lfs_format_skip` | 0x081714ae | Prevent LFS format (only when using pre-populated littlefs.bin) |
 | `gpio_ver_fix` | 0x08141970 | Force board version to F7FeatherV2 (2) |
 | `espcp_spi_bypass` | 0x081480cc | Bypass SPI DMA with direct peripheral calls |
 | `espcp_force_init` | 0x08141d50 | Force ESPCP init (set network type to WiFi) |
@@ -176,16 +186,21 @@ translation blocks. Any future hooks must target cold paths only.
 | 2026-03-12 | Board version → F7FeatherV2 | Blinky targets `F7FeatherBase`, needs version=2 not 3. |
 | 2026-03-12 | SVC fix in Renode NVIC.cs | Root cause of 96,000x load. 12,000x speedup. Hooks on hot paths are catastrophic. |
 | 2026-03-12 | Firmware uses JIT by default | `hcom_mono_control.c:227`. No `--interp` flag. JIT was active the whole time. |
+| 2026-03-12 | Move Renode fork to WildernessLabs | `WildernessLabs/renode` + `WildernessLabs/renode-infrastructure`. Branch `meadow-emulator-fixes`. |
+| 2026-03-12 | Eliminate worktree | Worktree broke sibling repo convention (`../renode/` didn't resolve). Work from main repo on `track/renode-mono` branch. |
+| 2026-03-12 | LFS format skip now optional | Without pre-populated littlefs.bin, firmware needs to format fresh LFS. Hook commented out by default. |
+| 2026-03-12 | CFLAGS for Renode build | WL fork (newer upstream) hits AppleClang C23 warnings in arm64 tlib. Need `CFLAGS="-Wno-error"` to build. |
 
 ## Repo Clarification
 
 | Repo | Path | Role |
 |------|------|------|
-| `Meadow` (legacy) | `/Users/bryan/Git_Repos/wilderness_labs/Meadow/` | Legacy NuttX-based Meadow OS — **what we're building from** |
-| `Meadow.OS.Emulator` | worktree at `track/renode-mono` | Emulator scripts, hooks, build wrapper |
-| `Meadow.CLI` | `/Users/bryan/Git_Repos/wilderness_labs/Meadow.CLI/` | Branch `feature/TCP_Socket_Connection_for_EMU` — TCP socket HCOM |
-| `Meadow.Samples` | `/Users/bryan/Git_Repos/wilderness_labs/Meadow.Samples/` | Sample apps (Blinky, etc.) — needs NuGet PackageReferences |
-| `renode` (fork) | `/Users/bryan/Git_Repos/bryan_costanich/renode/` | Renode fork with RTC + NVIC fixes. Build with `--host-arch aarch64`. |
+| `Meadow` (legacy) | `../Meadow/` | Legacy NuttX-based Meadow OS — firmware source |
+| `Meadow.OS.Emulator` | `../Meadow.OS.Emulator/` | This repo. Emulator scripts, hooks, build wrapper |
+| `Meadow.CLI` | `../Meadow.CLI/` | Branch `feature/TCP_Socket_Connection_for_EMU` — TCP socket HCOM |
+| `Meadow.Samples` | `../Meadow.Samples/` | Sample apps (Blinky, etc.) — needs NuGet PackageReferences |
+| `renode` (fork) | `../renode/` | `WildernessLabs/renode` fork, branch `meadow-emulator-fixes`. Build with `--host-arch aarch64`. |
+| `renode-infrastructure` | (submodule of renode) | `WildernessLabs/renode-infrastructure` fork, branch `meadow-emulator-fixes`. NVIC + RTC fixes. |
 
 ## LittleFS Details
 

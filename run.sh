@@ -3,6 +3,11 @@ set -e
 
 SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
 
+# Ensure dotnet is on PATH (macOS Homebrew installs to /usr/local/share/dotnet)
+if ! command -v dotnet &> /dev/null; then
+    export PATH="/usr/local/share/dotnet:$PATH"
+fi
+
 # Find Renode — custom fork (sibling repo or RENODE_PATH), PATH, or macOS app bundle
 # Check RENODE_PATH env var first, then sibling ../renode, then git root's sibling
 RENODE_FORK=""

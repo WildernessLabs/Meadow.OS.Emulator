@@ -35,10 +35,11 @@ sysbus LoadBinary @build/legacy/nuttx_kernel.bin 0x08140000
 sysbus LoadBinary @build/legacy/nuttx_mono.bin 0x90000000
 sysbus LoadBinary @build/legacy/nuttx_mono.bin 0xC0000000
 
-# LittleFS filesystem image — pre-populated with Mono BCL assemblies
+# LittleFS filesystem image — pre-populated with Mono BCL assemblies (optional)
 # File System partition starts at QSPI offset 0x500000 (see UART: "File System - Offset:0x00500000")
 # Built by: tools/build_lfs_v1_image (LFS v1.7.2 format, compatible with legacy firmware)
-sysbus LoadBinary @build/legacy/littlefs.bin 0x90500000
+# If no LFS image exists, firmware boots without apps — deploy via Meadow CLI.
+# sysbus LoadBinary @build/legacy/littlefs.bin 0x90500000
 
 sysbus.cpu VectorTableOffset 0x08040000
 
@@ -215,13 +216,11 @@ sysbus WriteDoubleWord 0xC0171A94 0x61656D2F
 sysbus WriteDoubleWord 0xC0171A98 0x30776F64
 sysbus WriteDoubleWord 0xC0171A9C 0x00000000
 
-# Workaround: Prevent LittleFS format from wiping pre-populated filesystem data.
-# The firmware tries mount first (NULL options); if that fails with -EFAULT/-EINVAL,
-# it retries with "forceformat" which calls lfs_format() before lfs_mount().
-# Skip lfs_format entirely (return 0 = LFS_ERR_OK) to preserve our BCL assemblies.
-# lfs_format = 0x081714ae
-set lfs_format_skip "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
-cpu AddHook 0x081714ae $lfs_format_skip
+# LFS format skip — only needed when using a pre-populated littlefs.bin image.
+# Without it, firmware formats fresh LFS on empty flash (needed for CLI deploy workflow).
+# Uncomment if loading littlefs.bin above:
+# set lfs_format_skip "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
+# cpu AddHook 0x081714ae $lfs_format_skip
 
 # Workaround: Syslog semaphore leak in hcom_logging_syslog.
 # When malloc fails inside hcom_diag_logging_build_syslog_string, the function returns
