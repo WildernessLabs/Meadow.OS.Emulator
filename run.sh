@@ -3,27 +3,56 @@ set -e
 
 SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
 
-# Find Renode — check PATH first, then known macOS location
-if command -v renode &> /dev/null; then
-    RENODE="renode"
+# Find Renode — custom fork (sibling repo or RENODE_PATH), PATH, or macOS app bundle
+# Check RENODE_PATH env var first, then sibling ../renode, then git root's sibling
+RENODE_FORK=""
+for candidate in \
+    "${RENODE_PATH:-}" \
+    "$SCRIPT_DIR/../renode" \
+    "$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)/../renode" \
+; do
+    if [ -n "$candidate" ] && [ -f "$candidate/output/bin/Release/Renode.dll" ]; then
+        RENODE_FORK="$candidate"
+        break
+    fi
+done
+
+if [ -n "$RENODE_FORK" ]; then
+    # Custom WildernessLabs/renode fork (built from source)
+    RENODE_CMD="dotnet $RENODE_FORK/output/bin/Release/Renode.dll"
+elif command -v renode &> /dev/null; then
+    RENODE_CMD="renode"
 elif [ -f "/Applications/Renode.app/Contents/MacOS/bin/Renode.exe" ]; then
-    # macOS: Renode runs via Mono
-    RENODE="mono /Applications/Renode.app/Contents/MacOS/bin/Renode.exe"
+    RENODE_CMD="mono /Applications/Renode.app/Contents/MacOS/bin/Renode.exe"
 else
     echo "ERROR: Renode not found."
-    echo "       Install from https://renode.io/download"
-    echo "       Or add 'renode' to your PATH"
+    echo ""
+    echo "  Option 1 (recommended): Build the WildernessLabs/renode fork as a sibling repo:"
+    echo "    cd $(dirname "$SCRIPT_DIR")"
+    echo "    git clone https://github.com/WildernessLabs/renode.git"
+    echo "    cd renode"
+    echo "    git checkout meadow-emulator-fixes"
+    echo "    git submodule update --init src/Infrastructure"
+    echo "    bash build.sh --host-arch aarch64 --skip-fetch   # Apple Silicon"
+    echo "    bash build.sh --skip-fetch                       # Intel / Linux"
+    echo ""
+    echo "  Option 2: Install stock Renode from https://renode.io/download"
+    echo "    (missing SVC/PRIMASK and RTC fixes — emulation will be very slow)"
     exit 1
 fi
 
 # Parse arguments
 LEGACY=false
 SCRIPT=""
+MONITOR_PORT=1234
 
 for arg in "$@"; do
     case "$arg" in
         --legacy)
             LEGACY=true
+            ;;
+        --port=*)
+            MONITOR_PORT="${arg#--port=}"
             ;;
         *)
             SCRIPT="$arg"
@@ -34,7 +63,7 @@ done
 # Select default script based on OS variant
 if [ -z "$SCRIPT" ]; then
     if [ "$LEGACY" = true ]; then
-        SCRIPT="meadow-legacy"
+        SCRIPT="meadow-legacy-headless"
     else
         SCRIPT="meadow-os"
     fi
@@ -56,25 +85,21 @@ fi
 if [ "$LEGACY" = true ]; then
     if [ ! -f "$SCRIPT_DIR/build/legacy/nuttx.bin" ]; then
         echo "ERROR: nuttx.bin not found in build/legacy/"
-        echo "       Run ./build-legacy.sh first"
+        echo "       Run ./build-meadow.os_legacy-emulated.sh first"
         exit 1
     fi
 else
     if [ ! -f "$SCRIPT_DIR/build/nuttx.bin" ]; then
         echo "ERROR: nuttx.bin not found in build/"
-        echo "       Run ./build-emulator.sh first"
+        echo "       Run ./build-meadow.os-emulated.sh first"
         exit 1
     fi
 fi
 
 echo "=== Starting Renode with $SCRIPT ==="
+echo "Monitor: telnet localhost $MONITOR_PORT"
+echo "HCOM:    socket://localhost:4242"
+echo "Press Ctrl+C to stop."
+echo ""
 cd "$SCRIPT_DIR"
-# Use --port for headless scripts (console mode can throttle emulation),
-# --console for interactive scripts
-if [[ "$SCRIPT" == *headless* ]]; then
-    echo "Monitor available via: telnet localhost 43210"
-    echo "Press Ctrl+C to stop."
-    $RENODE --disable-xwt --port 43210 --execute "include @$SCRIPT"
-else
-    $RENODE --disable-xwt --console --execute "include @$SCRIPT"
-fi
+$RENODE_CMD --disable-xwt --port "$MONITOR_PORT" --execute "include @$SCRIPT"
