@@ -292,6 +292,33 @@ sysbus WriteByte 0x40091d07 0x06
 sysbus WriteByte 0x40091d08 0x3E
 sysbus WriteByte 0x40091d09 0x00
 
+# Skip task/TCB cleanup functions — all access TCB fields corrupted by Renode
+# window-spill bug. Memory leaks acceptable for emulation.
+# prvDeleteTCB: entry 0x400920a0, retw.n 0x400920ec, j from 0x400920a3
+sysbus WriteByte 0x400920a3 0x46
+sysbus WriteByte 0x400920a4 0x11
+sysbus WriteByte 0x400920a5 0x00
+# prvDeleteTLS: entry 0x4009206c, retw.n 0x4009209b, j from 0x4009206f
+sysbus WriteByte 0x4009206f 0x06
+sysbus WriteByte 0x40092070 0x0A
+sysbus WriteByte 0x40092071 0x00
+# _reclaim_reent: entry 0x4019a764, retw.n 0x4019a846, j from 0x4019a767
+sysbus WriteByte 0x4019a767 0xC6
+sysbus WriteByte 0x4019a768 0x36
+sysbus WriteByte 0x4019a769 0x00
+# vPortReleaseTaskMPUSettings: entry 0x400910b0, retw.n 0x400910b8, j from 0x400910b3
+sysbus WriteByte 0x400910b3 0x46
+sysbus WriteByte 0x400910b4 0x00
+sysbus WriteByte 0x400910b5 0x00
+
+# Patch waiti→nop in esp_pm_impl_waiti (0x401aef88)
+# waiti halts the CPU, which stops Renode's clock source, preventing CCOMPARE0
+# timer interrupt from ever firing. Replace waiti 0 (00 70 00) with nop (20 f0 00).
+# esp_pm_impl_waiti: entry@401aef88, waiti@401aef8b, retw.n@401aef8e
+sysbus WriteByte 0x401aef8b 0xF0
+sysbus WriteByte 0x401aef8c 0x20
+sysbus WriteByte 0x401aef8d 0x00
+
 # Skip esp_log_write — newlib's _reent/stdout not initialized in emulation,
 # causing _vfprintf_r to dereference NULL at offset 0x20 (EXCVADDR=0x20) → kernel exception.
 # Replace first instruction after entry with retw.n (entry at 0x40094d80, patch at 0x40094d83).
@@ -503,7 +530,6 @@ _machine = _emu.Machines[0]
 _bus = _machine['sysbus']
 
 _cpu = _machine['sysbus.cpu']
-_tick_log_interval = [0]  # mutable counter for periodic logging
 _ipc_demoted = [False]  # one-shot flag for IPC task demotion
 
 def _demote_ipc_tasks(R, W):
@@ -557,66 +583,7 @@ def _demote_ipc_tasks(R, W):
                 W(0x3FFC92EC, p)
                 break
 
-def _wake_delayed(R, W, dl, tc):
-    woken = 0
-    for _ in range(20):
-        cnt = R(dl)
-        if cnt == 0:
-            break
-        head = R(dl + 12)
-        iv = R(head)
-        if tc < iv:
-            nub = R(0x3FFBEDC4)
-            if iv < nub:
-                W(0x3FFBEDC4, iv)
-            break
-        nx = R(head + 4)
-        pv = R(head + 8)
-        W(nx + 8, pv)
-        W(pv + 4, nx)
-        pi = R(dl + 4)
-        if pi == head:
-            W(dl + 4, pv)
-        W(head + 16, 0)
-        W(dl, cnt - 1)
-        tcb = R(head + 12)
-        eli = tcb + 28
-        ec = R(eli + 16)
-        if ec != 0:
-            en = R(eli + 4)
-            ep = R(eli + 8)
-            W(en + 8, ep)
-            W(ep + 4, en)
-            ei = R(ec + 4)
-            if ei == eli:
-                W(ec + 4, ep)
-            W(eli + 16, 0)
-            W(ec, R(ec) - 1)
-        pri = R(tcb + 48)
-        sli = tcb + 8
-        rl = 0x3FFC9384 + pri * 20
-        # Validate pxIndex — Renode window-spill bugs can corrupt it with
-        # code addresses (e.g., 0x400xxxxx). Use xListEnd as safe insertion
-        # point when pxIndex is outside DRAM range.
-        ri = R(rl + 4)
-        if ri < 0x3FF00000 or ri > 0x40000000:
-            ri = rl + 8
-            W(rl + 4, ri)
-        rp = R(ri + 8)
-        W(sli + 4, ri)
-        W(sli + 8, rp)
-        W(rp + 4, sli)
-        W(ri + 8, sli)
-        W(sli + 16, rl)
-        W(rl, R(rl) + 1)
-        tp = R(0x3FFC92EC)
-        if pri > tp:
-            W(0x3FFC92EC, pri)
-        woken += 1
-        _cpu.Log(LogLevel.Error, 'WAKE: tcb=0x%x pri=%d -> ready[%d]' % (tcb, pri, pri))
-    return woken
-
-def _tick_process():
+def _dispatch_fixup():
     R = _bus.ReadDoubleWord
     W = _bus.WriteDoubleWord
     # One-shot setup at first dispatch
@@ -627,11 +594,6 @@ def _tick_process():
         # port_xSchedulerRunning[1] (0x3FFC92BC) which is never set in
         # single-core emulation.
         W(0x3FFC92BC, 1)
-    tc = (R(0x3FFC92F0) + 1) & 0xFFFFFFFF
-    W(0x3FFC92F0, tc)
-    _tick_log_interval[0] += 1
-    if _tick_log_interval[0] % 100 == 0:
-        _cpu.Log(LogLevel.Error, 'TICK tc=%d nub=0x%x pxCur=0x%x topPri=%d' % (tc, R(0x3FFBEDC4), R(0x3FFC9578), R(0x3FFC92EC)))
     # Repair any ready-list pxIndex values corrupted by Renode window-spill bugs.
     # The firmware's listGET_OWNER_OF_NEXT_ENTRY dereferences pxIndex, so corrupt
     # values (e.g., IRAM code addresses) must be fixed before the firmware runs.
@@ -640,16 +602,10 @@ def _tick_process():
         pi = R(base + 4)
         if pi < 0x3FF00000 or pi > 0x40000000:
             W(base + 4, base + 8)
-    # Check only the primary delayed list (pxDelayedTaskList pointer).
-    # Do NOT check the overflow delayed list — it holds tasks whose wake time
-    # wrapped; they must wait for the tick counter to overflow and the lists
-    # to swap (handled by FreeRTOS internally).
-    dl1 = R(0x3FFC9358)
-    _wake_delayed(R, W, dl1, tc)
 
-__builtin__._tick_process = _tick_process
+__builtin__._dispatch_fixup = _dispatch_fixup
 """
-cpu AddHook 0x40091360 "_tick_process()"
+cpu AddHook 0x40091360 "_dispatch_fixup()"
 
 # Milestone hooks — track boot progress
 cpu AddHook 0x400d6590 "self.Log(LogLevel.Error, 'MILESTONE: app_main entered!')"
@@ -662,6 +618,15 @@ cpu AddHook 0x40094e14 "self.Log(LogLevel.Error, 'MILESTONE: esp_log_timestamp')
 cpu AddHook 0x400d66f8 "self.Log(LogLevel.Error, 'MILESTONE: NvsManager::Setup')"
 cpu AddHook 0x400d93f8 "self.Log(LogLevel.Error, 'MILESTONE: SpiTransportProvider ctor')"
 cpu AddHook 0x400d91cc "self.Log(LogLevel.Error, 'MILESTONE: MessageDispatcher ctor')"
+# Diagnostic: RequestHandlerBase::Task entry — dump queue handle
+cpu AddHook 0x400d9298 "_rh_task_diag()"
+# Diagnostic: xQueueGenericReceive entry — dump queue handle
+cpu AddHook 0x40091cb8 "_xqr_diag()"
+# Fix: validate lock handle in lock_acquire_generic.
+# Renode window-spill bug can corrupt _lock_t variables with random DRAM addresses,
+# making lock_acquire_generic think the mutex was already created. If the "queue handle"
+# points to uninitialized memory (all-zero lists), clear the lock to force re-creation.
+cpu AddHook 0x40082c14 "_lock_validate()"
 cpu AddHook 0x400d6b50 "self.Log(LogLevel.Error, 'MILESTONE: SendConfigAsInterrupt')"
 cpu AddHook 0x400933fc "self.Log(LogLevel.Error, 'MILESTONE: vTaskSuspend')"
 cpu AddHook 0x401357a8 "self.Log(LogLevel.Error, 'MILESTONE: esp_ipc_call')"
@@ -704,36 +669,157 @@ def _fix_retw():
 __builtin__._fix_retw = _fix_retw
 __builtin__._retw_fix_count = _retw_fix_count
 
-def _fix_ps_intlevel():
-    ps = _cpu.GetRegister(38).RawValue
-    new_ps = ps & 0xFFFFFFF0  # Clear INTLEVEL (bits 3:0)
-    _cpu.SetRegister(38, _RV.Create(int(new_ps), 32))
-    _cpu.Log(LogLevel.Error, 'MILESTONE: app_main entered! PS=0x%08x->0x%08x' % (ps, new_ps))
-__builtin__._fix_ps_intlevel = _fix_ps_intlevel
+_vli_count = [0]
+def _vlist_insert_diag():
+    _vli_count[0] += 1
+    R = _bus.ReadDoubleWord
+    a2 = _cpu.GetRegister(91).RawValue  # A2 = list
+    a3 = _cpu.GetRegister(92).RawValue  # A3 = item
+    a0 = _cpu.GetRegister(89).RawValue
+    caller = (_cpu.GetRegister(0).RawValue & 0xC0000000) | (a0 & 0x3FFFFFFF)
+    cnt = R(a2)
+    pi = R(a2 + 4)
+    end_next = R(a2 + 12)
+    end_prev = R(a2 + 16)
+    # Check for corruption: pxIndex or xListEnd fields pointing to NULL or IRAM
+    bad = False
+    if pi == 0 or (pi >= 0x40000000 and pi < 0x40200000):
+        bad = True
+    if end_next == 0 or end_prev == 0:
+        bad = True
+    if bad or _vli_count[0] <= 5:
+        _cpu.Log(LogLevel.Error, 'VLIST_INSERT #%d caller=0x%08x list=0x%08x cnt=%d pxIdx=0x%08x end.next=0x%08x end.prev=0x%08x item=0x%08x' % (_vli_count[0], caller, a2, cnt, pi, end_next, end_prev, a3))
+        # Walk the list a few steps to see where NULL is
+        node = a2 + 8  # xListEnd
+        for i in range(min(cnt + 2, 6)):
+            n_next = R(node + 4)
+            n_prev = R(node + 8)
+            n_val = R(node)
+            _cpu.Log(LogLevel.Error, '  node[%d]=0x%08x val=0x%08x next=0x%08x prev=0x%08x' % (i, node, n_val, n_next, n_prev))
+            if n_next == 0 or n_next == node:
+                break
+            node = n_next
+__builtin__._vlist_insert_diag = _vlist_insert_diag
 
-# ROM call interceptor: hooks callx8 instructions where a8 targets ROM.
-# Saves {return_address, caller_wb} so the exception handler can recover
-# when the ROM function's retw inevitably crashes.
-_rom_ret_stack = []
-_rom_call_count = [0]
-def _rom_callx8_intercept():
-    a8 = _cpu.GetRegister(97).RawValue  # callx8 target
-    if a8 < 0x40080000 and a8 >= 0x40000000:  # ROM range
-        pc = _cpu.GetRegister(0).RawValue
-        wb = _cpu.GetRegister(34).RawValue
-        # Return address = PC + 3 (callx8 is a 3-byte instruction)
-        ret_addr = pc + 3
-        # After call8, WB increments by 2. When retw should return,
-        # it should decrement WB by 2. Save CURRENT WB (before call8).
-        _rom_ret_stack.append((ret_addr, wb))
-        _rom_call_count[0] += 1
-        if _rom_call_count[0] <= 10:
-            _cpu.Log(LogLevel.Error, 'ROM_CALL #%d PC=0x%08x->0x%08x WB=%d ret=0x%08x' % (_rom_call_count[0], pc, a8, wb, ret_addr))
-__builtin__._rom_callx8_intercept = _rom_callx8_intercept
-__builtin__._rom_ret_stack = _rom_ret_stack
-__builtin__._rom_call_count = _rom_call_count
+_vli_init_count = [0]
+def _vlist_init_diag():
+    _vli_init_count[0] += 1
+    a2 = _cpu.GetRegister(91).RawValue  # A2 = list pointer
+    a0 = _cpu.GetRegister(89).RawValue
+    caller = (_cpu.GetRegister(0).RawValue & 0xC0000000) | (a0 & 0x3FFFFFFF)
+    # Log all vListInitialise calls after the first 100 (boot creates many lists)
+    # Focus on heap area (> 0x3ffd0000)
+    if a2 >= 0x3ffd0000:
+        _cpu.Log(LogLevel.Error, 'VLIST_INIT #%d list=0x%08x caller=0x%08x' % (_vli_init_count[0], a2, caller))
+__builtin__._vlist_init_diag = _vlist_init_diag
+
+def _rh_task_diag():
+    R = _bus.ReadDoubleWord
+    a2 = _cpu.GetRegister(91).RawValue  # A2 = pvParameter = handler this
+    queue = R(a2 + 4)  # this->field_4 = queue handle
+    _cpu.Log(LogLevel.Error, 'RH_TASK: this=0x%08x queue=0x%08x' % (a2, queue))
+    if queue != 0:
+        cnt = R(queue + 56)  # uxMessagesWaiting
+        length = R(queue + 60)  # uxLength
+        isize = R(queue + 64)  # uxItemSize
+        wts_cnt = R(queue + 16)  # xTasksWaitingToSend.uxNumberOfItems
+        wtr_cnt = R(queue + 36)  # xTasksWaitingToReceive.uxNumberOfItems
+        wtr_pi = R(queue + 40)  # xTasksWaitingToReceive.pxIndex
+        _cpu.Log(LogLevel.Error, '  Q: msgs=%d len=%d isize=%d wts_cnt=%d wtr_cnt=%d wtr_pi=0x%08x' % (cnt, length, isize, wts_cnt, wtr_cnt, wtr_pi))
+__builtin__._rh_task_diag = _rh_task_diag
+
+_xqr_count = [0]
+def _xqr_diag():
+    _xqr_count[0] += 1
+    R = _bus.ReadDoubleWord
+    W = _bus.WriteDoubleWord
+    # Hook is at entry instruction (before window rotation)
+    # Queue handle is in A10 (register 99) — set by caller before call8
+    a2 = _cpu.GetRegister(99).RawValue  # A10 = queue handle
+    a0 = _cpu.GetRegister(89).RawValue
+    caller = (_cpu.GetRegister(0).RawValue & 0xC0000000) | (a0 & 0x3FFFFFFF)
+    if a2 < 0x3FF00000 or a2 >= 0x40000000:
+        return
+    wts_pi = R(a2 + 20)
+    wtr_pi = R(a2 + 40)
+    if wts_pi != 0 or wtr_pi != 0:
+        return
+    # Queue has uninitialized lists — initialize them
+    _cpu.Log(LogLevel.Error, 'XQR_FIX #%d: queue=0x%08x uninit, caller=0x%08x' % (_xqr_count[0], a2, caller))
+    try:
+        # xTasksWaitingToSend at queue+16 (List_t, 20 bytes)
+        wts = a2 + 16
+        W(wts, 0)
+        W(wts + 4, wts + 8)
+        W(wts + 8, 0xFFFFFFFF)
+        W(wts + 12, wts + 8)
+        W(wts + 16, wts + 8)
+        # xTasksWaitingToReceive at queue+36 (List_t, 20 bytes)
+        wtr = a2 + 36
+        W(wtr, 0)
+        W(wtr + 4, wtr + 8)
+        W(wtr + 8, 0xFFFFFFFF)
+        W(wtr + 12, wtr + 8)
+        W(wtr + 16, wtr + 8)
+        # Basic Queue_t fields
+        W(a2, a2 + 80)
+        W(a2 + 4, a2 + 80)
+        W(a2 + 8, a2 + 80)
+        W(a2 + 12, 0)
+        W(a2 + 56, 0)
+        W(a2 + 60, 1)
+        W(a2 + 64, 0)
+        # Verify
+        v_pi = R(wtr + 4)
+        v_next = R(wtr + 12)
+        _cpu.Log(LogLevel.Error, 'XQR_FIX: init done wtr=0x%08x pxIdx=0x%08x next=0x%08x' % (wtr, v_pi, v_next))
+    except Exception as e:
+        _cpu.Log(LogLevel.Error, 'XQR_FIX: EXCEPTION: %s' % str(e))
+__builtin__._xqr_diag = _xqr_diag
+
+_lock_fix_count = [0]
+def _lock_validate():
+    R = _bus.ReadDoubleWord
+    W = _bus.WriteDoubleWord
+    # Hook is at entry instruction (before window rotation), so params are in A10/A11/A12
+    a10 = _cpu.GetRegister(99).RawValue  # A10 = lock pointer (becomes A2 after entry)
+    a2 = _cpu.GetRegister(91).RawValue   # A2 (current window - before entry)
+    _lock_fix_count[0] += 1
+    # Try both possible register locations
+    lockptr = a10
+    if lockptr < 0x3FF00000 or lockptr >= 0x40000000:
+        lockptr = a2
+    if lockptr < 0x3FF00000 or lockptr >= 0x40000000:
+        return
+    handle = R(lockptr)
+    if handle == 0:
+        return  # Not yet created, lock_init_generic will handle it
+    if handle >= 0x3ffd2570 and handle <= 0x3ffd2580:
+        _cpu.Log(LogLevel.Error, 'LOCK_VALIDATE: FOUND target handle=0x%08x at lock=0x%08x' % (handle, lockptr))
+    # Validate: a real Queue_t has initialized lists.
+    # xTasksWaitingToSend at +16: pxIndex (+20) should be non-zero
+    # xTasksWaitingToReceive at +36: pxIndex (+40) should be non-zero
+    if handle < 0x3FF00000 or handle >= 0x40000000:
+        # Handle is outside DRAM — definitely corrupt
+        _lock_fix_count[0] += 1
+        _cpu.Log(LogLevel.Error, 'LOCK_FIX #%d: lock=0x%08x has bad handle=0x%08x (not DRAM), clearing' % (_lock_fix_count[0], a2, handle))
+        W(a2, 0)
+        return
+    wts_pi = R(handle + 20)  # xTasksWaitingToSend.pxIndex
+    wtr_pi = R(handle + 40)  # xTasksWaitingToReceive.pxIndex
+    if wts_pi == 0 and wtr_pi == 0:
+        # Both list pxIndex are NULL — queue was never initialized
+        _lock_fix_count[0] += 1
+        _cpu.Log(LogLevel.Error, 'LOCK_FIX #%d: lock=0x%08x has uninit handle=0x%08x, clearing' % (_lock_fix_count[0], a2, handle))
+        W(a2, 0)
+__builtin__._lock_validate = _lock_validate
 """
 cpu AddHook 0x40157d12 "_set_a10_zero()"
+
+# Diagnostic: dump vListInsert args (a2=list, a3=item) to find corrupt list
+cpu AddHook 0x400941d4 "_vlist_insert_diag()"
+# Diagnostic: track vListInitialise calls near the crash queue (0x3ffd2578)
+cpu AddHook 0x40094194 "_vlist_init_diag()"
 # Fix Renode retw bug globally: retw reads AR[0] instead of AR[WINDOWBASE*4].
 # _fix_retw() copies A0 (logical) to AR[0] (physical) before each retw executes.
 # Hook all 6845 retw addresses extracted from the ELF binary.
@@ -820,7 +906,75 @@ cpu AddHook 0x40094935 "_trace_merge_retw()"
 # Also log multi_heap_free entry to see what's going on
 cpu AddHook 0x40094938 "self.Log(LogLevel.Error, 'multi_heap_free entered')"
 # Task entry diagnostics
-cpu AddHook 0x400920F0 "self.Log(LogLevel.Error, 'IDLE_TASK entered')"
+# Tick timer diagnostics
+python """
+_sys_tick_count = [0]
+def _sys_tick_check():
+    _sys_tick_count[0] += 1
+    c = _sys_tick_count[0]
+    if c <= 5 or c % 100 == 0:
+        _cpu.Log(LogLevel.Error, 'SYS_TICK #%d' % c)
+__builtin__._sys_tick_check = _sys_tick_check
+__builtin__._sys_tick_count = _sys_tick_count
+"""
+cpu AddHook 0x40091094 "_sys_tick_check()"
+# Tick injection: CCOUNT doesn't increment in Renode's Xtensa, so CCOMPARE0
+# timer interrupt never fires. We inject ticks by calling xPortSysTickHandler
+# directly from the idle task loop every N iterations.
+# xPortSysTickHandler: call8 xTaskIncrementTick, if non-zero call8 _frxt_setup_switch
+# We can't call C functions from Python, but we CAN set the PC to xPortSysTickHandler
+# after saving/restoring state. However, this is fragile.
+# Simpler approach: trigger the CCOMPARE0 interrupt by poking INTERRUPT bit 6 via
+# the TlibSetIrqPendingBit mechanism through the HandleCompareReached path.
+# Simplest approach: use the innerTimers directly or just set INTERRUPT.
+# Tick injection via trampoline
+# Write tick trampoline at 0x4009F030 (boot trampoline at 0x4009F00C is done)
+# Counter at 0x4009F04C (literal pool), value at 0x4009F050
+#
+# Trampoline code:
+#   0x4009F030: entry a1, 32          ; 36 41 00
+#   0x4009F033: l32r  a8, [0x4009F04C] ; load counter addr => 81 06 00
+#               (literal at 0x4009F04C contains 0x4009F050)
+#   0x4009F036: l32i.n a9, a8, 0     ; 08 09
+#   0x4009F038: addi  a9, a9, -1     ; c0 29 ff
+#   0x4009F03B: s32i.n a9, a8, 0     ; 09 08
+#   0x4009F03D: bnez  a9, 0x4009F047 ; skip (offset +10=0x0A) => 69 0a (bnez.n encoding: target 0x47)
+#               Actually, bnez.n a9, +8 bytes ahead: skip target is 0x4009F047
+#               bnez.n: opcode = Rs[3:0] | imm[5:2]<<4 | 0b11001_x
+#               Better to use full bnez: 96 09 07 means bnez a9, +7... let me calculate
+#   Skip tick call if counter != 0, jump to call idle hook
+#   0x4009F03D: bnez a9, 0x4009F047  ; 16 a9 06 (bnez encoding)
+#               Actually bnez encoding: 16 reg imm8 => beqz/bnez... this is complex.
+#               Let me use a simpler approach.
+#
+# Actually, let me write the trampoline in assembly and use the toolchain:
+python """
+_idle_count = [0]
+_tick_interval = 50
+def _idle_tick_direct():
+    _idle_count[0] += 1
+    c = _idle_count[0]
+    if c % _tick_interval == 0:
+        # Instead of hardware interrupt, directly manipulate xTickCount and
+        # call _frxt_setup_switch. This avoids the interrupt/EXCM mess.
+        # xTickCount is at the address stored in the literal at 0x40092884
+        # Actually, let me just set PC to xPortSysTickHandler but fix PS first.
+        # Save current PS, clear EXCM, set INTLEVEL=0
+        ps = _cpu.GetRegister(38).RawValue
+        # Make sure EXCM is clear and INTLEVEL is 0
+        new_ps = (ps & ~0x1F) | 0x20  # clear INTLEVEL, clear EXCM, set UM
+        _cpu.SetRegister(38, _RV.Create(int(new_ps), 32))
+        # Trigger the interrupt
+        _cpu.OnGPIO(6, True)
+        _cpu.OnGPIO(6, False)
+        # Restore PS after one instruction (the interrupt handler will save it)
+        if c <= 1000 or c % 10000 == 0:
+            _cpu.Log(LogLevel.Error, 'TICK_INJECT #%d PS was 0x%08x now 0x%08x' % (c // _tick_interval, ps, new_ps))
+__builtin__._idle_tick_direct = _idle_tick_direct
+__builtin__._idle_count = _idle_count
+__builtin__._tick_interval = _tick_interval
+"""
+cpu AddHook 0x400920fe "_idle_tick_direct()"
 cpu AddHook 0x400D506C "self.Log(LogLevel.Error, 'MAIN_TASK entered')"
 # General exception path (not 1, 4, 5, or >=32) — detect unexpected exceptions
 cpu AddHook 0x40082782 "self.Log(LogLevel.Error, 'EXC: General handler (EXCCAUSE=0/2/3/6-31)')"
