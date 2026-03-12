@@ -43,6 +43,8 @@
 - [x] Deploy command gets past MONO_DISABLE + reconnect
 - [x] BBR persistence fixed (Renode RTC model patched, tracked under `renode-mono` Phase 2.9)
 - [x] `file write` works — 100% success on first attempt after stale watchdog fix
+- [x] `app trim` + `app deploy` with trimmed binaries — all 33 files transferred successfully
+- [ ] `runtime enable` after deploy — blocked by firmware formatting LFS on boot (tracked under `renode-mono` Phase 2.11)
 
 ## 6 — WriteFile Bug Fix (2026-03-11)
 - [x] Diagnosed: firmware's download watchdog sends stale `DNLD_FAIL_RESEND` (0x0312) from prior
