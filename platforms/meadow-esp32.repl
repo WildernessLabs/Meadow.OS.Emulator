@@ -95,6 +95,12 @@ cpu: CPU.Xtensa @ sysbus
 // UART0 at 0x3FF40000 — primary debug/console UART (boot ROM uses this)
 uart0: UART.ESP32_UART @ sysbus 0x3FF40000
 
+// UART0 data bus mirror at 0x60000000
+// ESP32 maps peripheral registers at 0x3FF40000-0x3FF7FFFF on the AHB bus
+// and mirrors them at 0x60000000-0x6003FFFF on the data bus. ESP-IDF's
+// ets_write_char_uart uses this mirror for debug output.
+uart0Mirror: UART.ESP32_UART @ sysbus 0x60000000
+
 // ============================================================================
 // Peripheral register stubs — prevent bus errors during init
 // These are minimal MappedMemory regions covering peripheral register space.
@@ -178,6 +184,14 @@ mcpwm0: Memory.MappedMemory @ sysbus 0x3FF6C000
 
 // MCPWM1
 mcpwm1: Memory.MappedMemory @ sysbus 0x3FF6D000
+    size: 0x1000
+
+// I2S0
+i2s0: Memory.MappedMemory @ sysbus 0x3FF4F000
+    size: 0x1000
+
+// I2S1
+i2s1: Memory.MappedMemory @ sysbus 0x3FF68000
     size: 0x1000
 
 // WiFi registers (base)

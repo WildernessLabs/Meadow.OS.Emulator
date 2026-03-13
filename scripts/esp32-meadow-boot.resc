@@ -28,6 +28,7 @@ machine LoadPlatformDescription @platforms/meadow-esp32.repl
 emulation CreateServerSocketTerminal 4245 "esp32uart" false
 connector Connect uart0 esp32uart
 
+
 # Load the ESP32 ROM binary at 0x40000000
 # This provides exception vectors, window handlers, and ROM utility functions
 sysbus LoadBinary @roms/esp32-v3-rom.bin 0x40000000
@@ -530,6 +531,29 @@ _machine = _emu.Machines[0]
 _bus = _machine['sysbus']
 
 _cpu = _machine['sysbus.cpu']
+
+# Capture UART debug output
+# ESP-IDF uses ets_printf (ROM @ 0x40007d54) for boot messages.
+# ets_printf calls ets_vprintf which calls through a putc1 function pointer.
+# The per-character path through putc1 doesn't work reliably in emulation
+# (retw bug corrupts returns from ROM callx8), so we capture the format
+# string directly from ets_printf entry instead.
+def _ets_printf_hook():
+    R = _bus.ReadByte
+    a2 = _cpu.GetRegister(91).RawValue  # A2 = format string pointer
+    if a2 < 0x3F000000 or a2 >= 0x50000000:
+        return
+    chars = []
+    for i in range(200):
+        b = R(a2 + i)
+        if b == 0:
+            break
+        chars.append(chr(b) if b >= 0x20 and b < 0x7F else '.')
+    fmt = ''.join(chars)
+    if fmt:
+        _cpu.Log(LogLevel.Warning, 'ETS_PRINTF> %s' % fmt)
+__builtin__._ets_printf_hook = _ets_printf_hook
+
 _ipc_demoted = [False]  # one-shot flag for IPC task demotion
 
 def _demote_ipc_tasks(R, W):
@@ -838,6 +862,8 @@ sysbus WriteByte 0x400d93fd 0x00
 sysbus WriteByte 0x400d6643 0x20
 sysbus WriteByte 0x400d6644 0x11
 sysbus WriteByte 0x400d6645 0x10
+# Capture ets_printf format strings (ROM @ 0x40007d54, entry a1 0x80 is 3 bytes)
+cpu AddHook 0x40007d57 "_ets_printf_hook()"
 cpu AddHook 0x40155884 "self.Log(LogLevel.Error, 'UART: periph_module_enable')"
 cpu AddHook 0x40157bf4 "self.Log(LogLevel.Error, 'UART: uart_pattern_queue_reset')"
 # Exception vector hooks — detect crashes
