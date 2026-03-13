@@ -803,18 +803,10 @@ cpu AddHook 0x40157d12 "_set_a10_zero()"
 cpu AddHook 0x400d93f8 "self.Log(LogLevel.Error, 'SPI_CTOR_ENTER')"
 
 # ── WiFi/BT Setup skips ─────────────────────────────────────────────────────
-# WiFiRequestHandler::Setup() at 0x400de268 calls esp_wifi_restore which hits
-# unmapped WiFi hardware regs (0x3FF71xxx) → esp_restart. Skip body, keep entry.
-# entry at 0x400de268, retw.n at 0x400de2dc, j from 0x400de26b (offset=109)
-sysbus WriteByte 0x400de26b 0x46
-sysbus WriteByte 0x400de26c 0x1B
-sysbus WriteByte 0x400de26d 0x00
-# BluetoothRequestHandler::Setup() at 0x400d9d2c calls esp_bt_controller_init
-# which hits unmapped BT hardware regs. Skip body, keep entry.
-# entry at 0x400d9d2c, retw.n at 0x400d9dcd, j from 0x400d9d2f (offset=154)
-sysbus WriteByte 0x400d9d2f 0x86
-sysbus WriteByte 0x400d9d30 0x26
-sysbus WriteByte 0x400d9d31 0x00
+# WiFi/BT Setup skips temporarily disabled — the firmware runs further without them
+# when the APLL/WiFi BB register stubs are in place. The watchdog is the real blocker.
+# WiFiRequestHandler::Setup() and BluetoothRequestHandler::Setup() access real hardware
+# but the stub memory regions absorb the accesses without crashing.
 # Skip watchdog init — no real timer hardware, watchdog timeouts cause esp_restart.
 # esp_task_wdt_init at 0x400d5b30: return ESP_OK (0) immediately.
 # Replace entry+3 with: movi a2, 0 (3 bytes) + retw.n (2 bytes) = 5 bytes
