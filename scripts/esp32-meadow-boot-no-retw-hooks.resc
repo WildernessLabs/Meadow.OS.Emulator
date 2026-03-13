@@ -801,10 +801,60 @@ cpu AddHook 0x40157d12 "_set_a10_zero()"
 # ── SPI Transport ────────────────────────────────────────────────────────────
 # SpiTransportProvider ctor skip REMOVED — tlib retw fix lets ROM calls return.
 cpu AddHook 0x400d93f8 "self.Log(LogLevel.Error, 'SPI_CTOR_ENTER')"
+# Trace callx8 targets inside SPI ctor to find which one aborts
+# NOP gpio_pad_select_gpio calls inside SPI ctor — ROM function at 0x40009fdc
+# reads function pointers from IO_MUX regs (MappedMemory = all zeros) and calls
+# through them → INST_FETCH_ERROR at address 0. NOP the 3 callx8 a8 instructions:
+# callx8 a8 (E0 08 00) → nop (F0 20 00) — 3 bytes each
+# 0x400d9455: gpio_pad_select_gpio for MOSI? or SendControlMessageToStm32
+sysbus WriteByte 0x400d9455 0xF0
+sysbus WriteByte 0x400d9456 0x20
+sysbus WriteByte 0x400d9457 0x00
+# 0x400d945f: gpio_set_pull_mode for MOSI
+sysbus WriteByte 0x400d945f 0xF0
+sysbus WriteByte 0x400d9460 0x20
+sysbus WriteByte 0x400d9461 0x00
+# 0x400d9467: gpio_pad_select_gpio for CLK
+sysbus WriteByte 0x400d9467 0xF0
+sysbus WriteByte 0x400d9468 0x20
+sysbus WriteByte 0x400d9469 0x00
+# 0x400d9471: gpio_set_pull_mode for CLK
+sysbus WriteByte 0x400d9471 0xF0
+sysbus WriteByte 0x400d9472 0x20
+sysbus WriteByte 0x400d9473 0x00
+# 0x400d947b: gpio_config for CS
+sysbus WriteByte 0x400d947b 0xF0
+sysbus WriteByte 0x400d947c 0x20
+sysbus WriteByte 0x400d947d 0x00
+# 0x400d9485: gpio_pad_select_gpio for CS? (duplicate of 0x400d0678)
+sysbus WriteByte 0x400d9485 0xF0
+sysbus WriteByte 0x400d9486 0x20
+sysbus WriteByte 0x400d9487 0x00
+# 0x400d948f: gpio_set_pull_mode for CS
+sysbus WriteByte 0x400d948f 0xF0
+sysbus WriteByte 0x400d9490 0x20
+sysbus WriteByte 0x400d9491 0x00
 
 # ── WiFi/BT Setup skips ─────────────────────────────────────────────────────
-# WiFi/BT Setup skips temporarily disabled — the firmware runs further without them
-# when the APLL/WiFi BB register stubs are in place. The watchdog is the real blocker.
+# BluetoothRequestHandler::GetInstance at 0x400d9dd0: return NULL.
+# The BT constructor calls ROM BT code (r_ld_reset) which hangs in BT hardware init.
+# Skip entire GetInstance — MessageDispatcher stores NULL for _bluetoothRequestHandler.
+# BT messages won't be dispatched but boot continues.
+sysbus WriteByte 0x400d9dd3 0x22
+sysbus WriteByte 0x400d9dd4 0xA0
+sysbus WriteByte 0x400d9dd5 0x00
+sysbus WriteByte 0x400d9dd6 0x1D
+sysbus WriteByte 0x400d9dd7 0xF0
+# WiFiRequestHandler::Setup at 0x400de268: skip body (calls esp_wifi_restore → hangs).
+# Keep entry for window rotation, jump to retw.n at 0x400de2dc (offset=109).
+sysbus WriteByte 0x400de26b 0x46
+sysbus WriteByte 0x400de26c 0x1B
+sysbus WriteByte 0x400de26d 0x00
+# FileSystem::Setup at 0x400d6f20: skip — calls esp_vfs_littlefs_register which
+# accesses SPI flash partition table (LOAD_PROHIBITED at esp_littlefs_init).
+# entry at 0x400d6f20, retw.n at 0x400d6f2a. Patch entry+3 with retw.n.
+sysbus WriteByte 0x400d6f23 0x1D
+sysbus WriteByte 0x400d6f24 0xF0
 # WiFiRequestHandler::Setup() and BluetoothRequestHandler::Setup() access real hardware
 # but the stub memory regions absorb the accesses without crashing.
 # Skip watchdog init — no real timer hardware, watchdog timeouts cause esp_restart.
@@ -831,9 +881,17 @@ sysbus WriteByte 0x400d5db0 0xF0
 cpu AddHook 0x40007d57 "_ets_printf_hook()"
 # Exception vector hooks — detect crashes
 cpu AddHook 0x40080300 "self.Log(LogLevel.Error, 'KERNEL_EXC EXCCAUSE=%d EPC1=0x%x EXCVADDR=0x%x' % (self.GetRegisterUnsafe(77).RawValue, self.GetRegisterUnsafe(51).RawValue, self.GetRegisterUnsafe(83).RawValue))"
+# _xt_panic at 0x4008b800 — the low-level panic entry (BREAK handler or WDT ISR)
+cpu AddHook 0x4008b800 "self.Log(LogLevel.Error, '_XT_PANIC A0=0x%08x EPC1=0x%x EXCCAUSE=%d' % (self.GetRegisterUnsafe(89).RawValue, self.GetRegisterUnsafe(51).RawValue, self.GetRegisterUnsafe(77).RawValue))"
+# panicHandler at 0x40090fb0
+cpu AddHook 0x40090fb0 "self.Log(LogLevel.Error, 'panicHandler A0=0x%08x' % (self.GetRegisterUnsafe(89).RawValue,))"
 # esp_restart_noos trace — find who triggers restart
 cpu AddHook 0x400821e4 "self.Log(LogLevel.Error, 'ESP_RESTART_NOOS called! A0=0x%08x caller=0x%08x' % (self.GetRegisterUnsafe(89).RawValue, (self.GetRegisterUnsafe(0).RawValue & 0xC0000000) | (self.GetRegisterUnsafe(89).RawValue & 0x3FFFFFFF)))"
 # esp_panic_handler at 0x40090888 — A2 points to XtExcFrame
+# Hook BEFORE entry to get the caller's A0
+cpu AddHook 0x40090888 "self.Log(LogLevel.Error, 'ESP_PANIC_HANDLER_CALLED A0=0x%08x caller=0x%08x' % (self.GetRegisterUnsafe(89).RawValue, (self.GetRegisterUnsafe(0).RawValue & 0xC0000000) | (self.GetRegisterUnsafe(89).RawValue & 0x3FFFFFFF)))"
+# xt_unhandled_exception at 0x40090fc0 — log the EXCCAUSE and EPC1
+cpu AddHook 0x40090fc0 "self.Log(LogLevel.Error, 'XT_UNHANDLED_EXC EXCCAUSE=%d EPC1=0x%08x EXCVADDR=0x%08x' % (self.GetRegisterUnsafe(77).RawValue, self.GetRegisterUnsafe(51).RawValue, self.GetRegisterUnsafe(83).RawValue))"
 # XtExcFrame layout: pc(+0), ps(+4), a0(+8), ..., exccause(+148), excvaddr(+152)
 cpu AddHook 0x40090888 "_panic_handler_trace()"
 python """
@@ -885,6 +943,18 @@ def _abort_trace():
 __builtin__._abort_trace = _abort_trace
 """
 cpu AddHook 0x40097bec "_abort_trace()"
+# esp_system_abort at 0x40090fe0 — A2 has the abort message string
+cpu AddHook 0x40090fe0 "_sys_abort_trace()"
+python """
+def _sys_abort_trace():
+    # Before entry, A2 is caller's A10 (register 99)
+    a10 = _cpu.GetRegister(99).RawValue
+    msg = _read_cstr(a10, 256) if (a10 >= 0x3F000000 and a10 < 0x50000000) else '(bad ptr 0x%x)' % a10
+    a0 = _cpu.GetRegister(89).RawValue
+    caller = (_cpu.GetRegister(0).RawValue & 0xC0000000) | (a0 & 0x3FFFFFFF)
+    _cpu.Log(LogLevel.Error, 'ESP_SYSTEM_ABORT: caller=0x%08x msg=%s' % (caller, msg))
+__builtin__._sys_abort_trace = _sys_abort_trace
+"""
 # Hook the general exception handler to catch the null deref before panic
 cpu AddHook 0x40080180 "_general_exc_trace()"
 python """
