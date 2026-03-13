@@ -88,11 +88,21 @@ kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_SYSLOG_CONSOLE
 kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_SYSLOG_SERIAL_CONSOLE
 kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_SYSLOG_WRITE
 
-# Disable Mono app — requires cross-compiled Mono runtime (build separately)
-kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_EXAMPLES_MONO
+# Verify Mono runtime libraries exist (must be pre-built via Meadow/build-mono.sh)
+MONO_DIR="$MEADOW_DIR/mono/mono"
+if [ ! -f "$MONO_DIR/sgen/.libs/libmonosgen.a" ]; then
+    echo "ERROR: Mono runtime libraries not found at $MONO_DIR/sgen/.libs/"
+    echo "       Build Mono first: cd $MEADOW_DIR && ./build-mono.sh"
+    exit 1
+fi
+echo "--- Mono runtime libraries found ---"
 
 # Prevent reset loops in emulator
 kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_BOARD_RESET_ON_ASSERT 0
+
+# Generate config.h and set up include directories (needed before mbedtls build)
+echo "--- Generating NuttX headers (make context) ---"
+$MAKE context
 
 # Build mbedtls for NuttX (same flags as Meadow/build-mbedtls.sh)
 MBEDTLS_DIR="$MEADOW_DIR/mbedtls"
@@ -107,19 +117,14 @@ if [ -d "$MBEDTLS_DIR/library" ] && [ ! -f "$MBEDTLS_DIR/library/libmbedcrypto.a
             -I$NUTTX_DIR/include/sys -nostdinc -nostdlib -fno-builtin -fno-common -Os"
 fi
 
-# Create mono_main stub (HCOM app calls it unconditionally but Mono isn't built)
-MONO_STUB_DIR="$SCRIPT_DIR/build/legacy"
-mkdir -p "$MONO_STUB_DIR"
-MONO_STUB_C="$MONO_STUB_DIR/mono_main_stub.c"
-MONO_STUB_O="$MONO_STUB_DIR/mono_main_stub.o"
-cat > "$MONO_STUB_C" << 'STUBEOF'
-/* Stub: mono_main is not available without the Mono runtime. */
-int mono_main(int argc, char *argv[]) { return 0; }
-STUBEOF
-echo "--- Compiling mono_main stub ---"
-arm-none-eabi-gcc -c -mthumb -mcpu=cortex-m7 -mfpu=fpv5-d16 -mfloat-abi=hard \
-    -I"$NUTTX_DIR/include" -o "$MONO_STUB_O" "$MONO_STUB_C"
-arm-none-eabi-ar rcs "$MONO_STUB_DIR/libmonostub.a" "$MONO_STUB_O"
+# Version — read from Meadow/version.txt (e.g. "2.5.7") to match real firmware
+if [ -f "$MEADOW_DIR/version.txt" ]; then
+    IFS='.' read -r EMU_VERSION_MAJOR EMU_VERSION_MINOR EMU_VERSION_REVISION <<< "$(cat "$MEADOW_DIR/version.txt")"
+else
+    EMU_VERSION_MAJOR=0; EMU_VERSION_MINOR=0; EMU_VERSION_REVISION=0
+fi
+EMU_VERSION_BUILD=${EMU_VERSION_BUILD:-0}
+echo "--- Version: $EMU_VERSION_MAJOR.$EMU_VERSION_MINOR.$EMU_VERSION_REVISION.$EMU_VERSION_BUILD ---"
 
 # Compute git hash for version injection
 GIT_HASH=$(git -C "$MEADOW_DIR" rev-parse --short HEAD 2>/dev/null || echo "00000000")
@@ -130,10 +135,10 @@ if grep -q '###VERSION_MAJOR###' "$SHARED_HEADER" 2>/dev/null; then
     echo "--- Injecting version placeholders ---"
     cp "$SHARED_HEADER" "$SHARED_HEADER.emubak"
     sed -i.bak \
-        -e 's/###VERSION_MAJOR###/0/g' \
-        -e 's/###VERSION_MINOR###/0/g' \
-        -e 's/###VERSION_REVISION###/0/g' \
-        -e 's/###VERSION_BUILD###/0/g' \
+        -e "s/###VERSION_MAJOR###/$EMU_VERSION_MAJOR/g" \
+        -e "s/###VERSION_MINOR###/$EMU_VERSION_MINOR/g" \
+        -e "s/###VERSION_REVISION###/$EMU_VERSION_REVISION/g" \
+        -e "s/###VERSION_BUILD###/$EMU_VERSION_BUILD/g" \
         -e "s/###BUILD_DAY###/$((10#$(date -u +%d)))/g" \
         -e "s/###BUILD_TWO_DIGIT_DAY###/$(date -u +%d)/g" \
         -e "s/###BUILD_MONTH###/$((10#$(date -u +%m)))/g" \
@@ -161,10 +166,10 @@ if grep -q '###VERSION_MAJOR###' "$USER_LD" 2>/dev/null; then
     echo "--- Injecting version placeholders in user-space.ld ---"
     cp "$USER_LD" "$USER_LD.emubak"
     sed -i.bak \
-        -e 's/###VERSION_MAJOR###/0/g' \
-        -e 's/###VERSION_MINOR###/0/g' \
-        -e 's/###VERSION_REVISION###/0/g' \
-        -e 's/###VERSION_BUILD###/0/g' \
+        -e "s/###VERSION_MAJOR###/$EMU_VERSION_MAJOR/g" \
+        -e "s/###VERSION_MINOR###/$EMU_VERSION_MINOR/g" \
+        -e "s/###VERSION_REVISION###/$EMU_VERSION_REVISION/g" \
+        -e "s/###VERSION_BUILD###/$EMU_VERSION_BUILD/g" \
         -e "s/###BUILD_DAY###/$((10#$(date -u +%d)))/g" \
         -e "s/###BUILD_MONTH###/$((10#$(date -u +%m)))/g" \
         -e "s/###BUILD_YEAR###/$((10#$(date -u +%y)))/g" \
@@ -172,23 +177,10 @@ if grep -q '###VERSION_MAJOR###' "$USER_LD" 2>/dev/null; then
         -e "s/###BUILD_MINUTE###/$((10#$(date -u +%M)))/g" \
         -e "s/###BUILD_SECOND###/$((10#$(date -u +%S)))/g" \
         -e "s/###BUILD_HASH###/0x${GIT_HASH:-00000000}/g" \
-        -e 's/###MONO_GIT_REF###/\/\* mono not built \*\//g' \
+        -e "s/###MONO_GIT_REF###/$(git -C "$MEADOW_DIR/mono" rev-parse --short HEAD 2>/dev/null || echo 'emulator')/g" \
         "$USER_LD"
     rm -f "$USER_LD.bak"
     RESTORE_USER_LD=true
-fi
-
-# Patch kernel Makefile: add MBEDTLS_AOBJS fallback (not set when CONFIG_EXAMPLES_MONO=n)
-# and mono stub library. Keep LD=ld.lld — it's the correct linker (from toolchain/macos).
-KERNEL_MAKEFILE="$NUTTX_DIR/configs/stm32f777zit6-meadow/kernel/Makefile"
-MBEDTLS_LIB_DIR="$MEADOW_DIR/mbedtls/library"
-if ! grep -q 'MBEDTLS_AOBJS ?=' "$KERNEL_MAKEFILE" 2>/dev/null; then
-    echo "--- Patching kernel Makefile: adding MBEDTLS_AOBJS fallback ---"
-    cp "$KERNEL_MAKEFILE" "$KERNEL_MAKEFILE.emubak"
-    sed -i.bak "/^LD=ld.lld/a\\
-MBEDTLS_AOBJS ?= $MBEDTLS_LIB_DIR/libmbedcrypto.a $MBEDTLS_LIB_DIR/libmbedtls.a $MBEDTLS_LIB_DIR/libmbedx509.a $MONO_STUB_DIR/libmonostub.a" "$KERNEL_MAKEFILE"
-    rm -f "$KERNEL_MAKEFILE.bak"
-    RESTORE_KERNEL_MAKEFILE=true
 fi
 
 # Cleanup function to restore modified files
@@ -199,21 +191,19 @@ cleanup() {
     if [ "$RESTORE_USER_LD" = true ] && [ -f "$USER_LD.emubak" ]; then
         mv "$USER_LD.emubak" "$USER_LD"
     fi
-    if [ "$RESTORE_KERNEL_MAKEFILE" = true ] && [ -f "$KERNEL_MAKEFILE.emubak" ]; then
-        mv "$KERNEL_MAKEFILE.emubak" "$KERNEL_MAKEFILE"
-    fi
 }
 trap cleanup EXIT
 
-# Parallel job count — set MEADOW_ADDITIONAL_MAKE_OPTIONS=-j1 if link phase fails
+# Parallel job count — set MEADOW_ADDITIONAL_MAKE_OPTIONS=-j1 if all passes should be single-threaded
 JOBS="${MEADOW_ADDITIONAL_MAKE_OPTIONS:--j$(sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 
 # Build — legacy uses protected mode (pass2 → pass1deps → pass1)
 echo "--- Building mksyscall ---"
 $MAKE -C "$NUTTX_DIR/tools" -f Makefile.host mksyscall 2>/dev/null || true
 
+# pass2 uses -j1 to avoid ar race condition when building mono example into libapps.a
 echo "--- Building (PROTECTED mode, pass 2) ---"
-$MAKE $JOBS pass2
+$MAKE -j1 pass2
 
 echo "--- Building pass1 dependencies ---"
 $MAKE $JOBS pass1deps
@@ -248,6 +238,46 @@ arm-none-eabi-objcopy -O binary \
     --remove-section=.mono_bss \
     "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_user.bin"
 echo "--- Created nuttx_user.bin (mono sections stripped)"
+
+# 3a. Extract Mono runtime sections for SDRAM loading (0xC0000000)
+# These sections contain the Mono JIT/interpreter runtime linked at SDRAM addresses.
+# Renode loads them separately into the emulated SDRAM region.
+#
+# Note: objcopy -O binary silently drops .mono_signature (0xC0000000) when extracting
+# multiple sections — the output starts at .mono (0xC0000020). We extract the signature
+# separately using dd from the ELF and prepend it to create a complete binary.
+if arm-none-eabi-objdump -h "$NUTTX_DIR/nuttx_user.elf" | grep -q '\.mono '; then
+    # Extract code sections (starts at 0xC0000020)
+    arm-none-eabi-objcopy -O binary \
+        --only-section=.mono \
+        --only-section=.mono_data \
+        --only-section=.mono_comment \
+        "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_mono_code.bin"
+
+    # Extract .mono_signature (30 bytes at 0xC0000000) directly from ELF
+    SIG_OFFSET=$(arm-none-eabi-readelf -S "$NUTTX_DIR/nuttx_user.elf" | \
+        awk '/\.mono_signature/ {print "0x" $5}')
+    SIG_SIZE=$(arm-none-eabi-readelf -S "$NUTTX_DIR/nuttx_user.elf" | \
+        awk '/\.mono_signature/ {print "0x" $6}')
+    python3 -c "
+import sys
+with open('$NUTTX_DIR/nuttx_user.elf', 'rb') as f:
+    f.seek($SIG_OFFSET)
+    sig = f.read($SIG_SIZE)
+    # Pad to 32 bytes (0x20) to align with .mono section start
+    sig = sig.ljust(0x20, b'\x00')
+    with open('$BUILD_DIR/nuttx_mono_sig.bin', 'wb') as out:
+        out.write(sig)
+print(f'Signature: {sig[:4].hex()} version={int.from_bytes(sig[16:20], \"little\")}.{int.from_bytes(sig[12:16], \"little\")}.{int.from_bytes(sig[8:12], \"little\")}.{int.from_bytes(sig[4:8], \"little\")}')
+"
+
+    # Combine: signature (32 bytes) + code = complete SDRAM binary starting at 0xC0000000
+    cat "$BUILD_DIR/nuttx_mono_sig.bin" "$BUILD_DIR/nuttx_mono_code.bin" > "$BUILD_DIR/nuttx_mono.bin"
+    rm -f "$BUILD_DIR/nuttx_mono_code.bin" "$BUILD_DIR/nuttx_mono_sig.bin"
+    echo "--- Created nuttx_mono.bin (Mono runtime for SDRAM at 0xC0000000, $(du -h "$BUILD_DIR/nuttx_mono.bin" | cut -f1))"
+else
+    echo "--- WARNING: No .mono sections found in nuttx_user.elf"
+fi
 
 # 4. Also keep the full nuttx.bin for reference (production-style single binary)
 cp "$NUTTX_DIR/nuttx.bin" "$BUILD_DIR/nuttx.bin"

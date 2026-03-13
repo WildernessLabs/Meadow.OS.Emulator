@@ -1,280 +1,170 @@
 # Meadow.OS Emulator
 
-Full hardware emulation of Meadow.OS (NuttX RTOS on STM32F777ZIT6) using the [Renode](https://renode.io) framework.
+Full hardware emulation of Meadow.OS (NuttX RTOS on STM32F777ZIT6) using the [Renode](https://renode.io) framework. Runs Meadow.NET apps (Mono JIT) at near real-time speed.
+
+## Current Status
+
+The legacy Meadow firmware boots with Mono JIT, loads .NET assemblies from LittleFS, and runs Meadow apps end-to-end. A Blinky sample app has been validated running its full lifecycle (`Initialize` -> `Run` -> color cycling loop).
 
 ## Prerequisites
 
-- **Renode v1.16.1+** — Install from [renode.io/download](https://renode.io/download)
-  - macOS: Install the `.dmg`, which places Renode in `/Applications/Renode.app`
-  - Linux: Renode binary on `PATH`
-- **Mono** (macOS only) — Renode on macOS runs via Mono runtime
+- **.NET SDK 8.0+** — `dotnet` must be on PATH (macOS: `brew install dotnet`)
 - **ARM toolchain** — `arm-none-eabi-gcc` (install via `brew install --cask gcc-arm-embedded`)
 - **GNU Make 4.x+** — macOS ships Make 3.81; install `gmake` via `brew install make`
-- **Meadow.OS source** — Must be checked out as a sibling directory (`../Meadow.OS/`)
-- **Meadow (legacy) source** — For legacy OS emulation, checked out as `../Meadow/`
-- **Meadow.CLI** — For CLI interaction with the emulator, checked out and built (see [Using Meadow.CLI](#using-meadowcli))
+
+### Required Sibling Repos
+
+These repos must be checked out as siblings to `Meadow.OS.Emulator/`:
+
+```
+wilderness_labs/
+├── Meadow.OS.Emulator/    # This repo
+├── Meadow/                # Legacy NuttX-based Meadow OS firmware source
+├── Meadow.CLI/            # Branch: feature/TCP_Socket_Connection_for_EMU
+├── Meadow.Samples/        # Sample apps (Blinky, etc.)
+└── renode/                # WildernessLabs/renode fork (branch: meadow-emulator-fixes)
+```
+
+### Building the Custom Renode Fork
+
+The emulator requires the [WildernessLabs/renode](https://github.com/WildernessLabs/renode) fork which includes critical fixes for SVC/PRIMASK handling in the NVIC and STM32F4 RTC backup register support. Without these fixes, emulation is ~12,000x slower.
+
+```bash
+cd ../renode
+git checkout meadow-emulator-fixes
+git submodule update --init src/Infrastructure
+export PATH="/usr/local/share/dotnet:$PATH"
+bash build.sh --host-arch aarch64 --skip-fetch   # Apple Silicon
+# bash build.sh --skip-fetch                     # Intel / Linux
+```
 
 ## Project Structure
 
 ```
 Meadow.OS.Emulator/
-├── build/                    # Build output (new OS)
 ├── build/legacy/             # Build output (legacy OS)
-├── build-meadow.os-emulated.sh    # Builds new Meadow.OS with emulator defconfig
 ├── build-meadow.os_legacy-emulated.sh  # Builds legacy Meadow with emulator tweaks
-├── run.sh                    # Launches Renode with a given script
+├── run.sh                    # Launches Renode (auto-finds custom fork)
 ├── platforms/
-│   ├── stm32f777.repl        # STM32F777 chip-level platform (all on-die peripherals)
-│   └── meadow-f7.repl        # Meadow F7 board (uses chip + SDRAM + QSPI flash)
-├── peripherals/              # C# peripherals (loaded at runtime via AdHoc Compiler)
-│   └── Winbond_W25QXXXJV.cs  # 64MB QSPI flash (GenericSpiFlash subclass)
+│   ├── stm32f777.repl        # STM32F777 chip-level platform
+│   └── meadow-f7.repl        # Meadow F7 board (chip + SDRAM + QSPI flash)
+├── peripherals/              # C# extensions (loaded at runtime)
+│   ├── Winbond_W25QXXXJV.cs  # 64MB QSPI NOR flash
+│   ├── QspiDmaBypass.cs      # QSPI DMA bypass — direct memcpy via SystemBus
+│   └── MqReceiveIntercept.cs  # ESPCP mq_receive interception
 ├── scripts/
-│   ├── meadow-os.resc        # Main emulation script (interactive, with UART analyzer)
-│   ├── meadow-os-gdb.resc    # GDB-enabled script (starts paused, GDB on port 3333)
-│   ├── meadow-os-headless.resc # Headless script (UART to file, no analyzer)
-│   ├── meadow-os-diag.resc   # Diagnostic script with SVC/context-switch logging hooks
-│   ├── meadow-os-test.resc   # Test script with verbose logging
-│   ├── meadow-nsh.resc       # NSH-only flat build (no user binary, no workarounds)
-│   ├── meadow-legacy.resc    # Legacy OS — interactive mode
-│   ├── meadow-legacy-headless.resc  # Legacy OS — headless mode
-│   └── pydev/                # Python peripherals and hook references
-│       ├── rcc.py            # RCC clock controller (ready-bit handling)
-│       ├── otg_fs.py         # USB OTG FS stub (GRSTCTL/AHBIDL)
-│       ├── qspi_dma_bypass.py # QSPI DMA bypass hook (reference/docs)
-│       └── flipflop.py       # Simple read-back peripheral (PWR, LPTIM1)
+│   ├── meadow-legacy-headless.resc  # Legacy OS — headless (recommended)
+│   ├── meadow-legacy.resc          # Legacy OS — interactive
+│   ├── meadow-legacy-debug.resc    # Legacy OS — with GDB server
+│   └── ...                         # Other scripts (new OS, diag, etc.)
 ├── tools/
-│   ├── hcom_test.py          # HCOM protocol test tool (COBS + socket)
-│   └── kconfig-tweak         # Kconfig shim for NuttX build
+│   ├── build_lfs_v1_image.c  # LittleFS v1 image builder
+│   └── hcom_test.py          # HCOM protocol test tool
+├── upstream_fixes.md         # Tracker for fixes to upstream Renode
 └── conductor/                # Project planning and track documents
 ```
 
-## Building
-
-### New OS (Meadow.OS)
-
-```bash
-./build-meadow.os-emulated.sh
-```
-
-Configures NuttX with `stm32f777zit6-meadow:meadow_os_emu`, builds in protected mode, and copies artifacts to `build/`.
-
-For a flat NSH-only build:
-```bash
-./build-meadow.os-emulated.sh nsh
-```
-
-### Legacy OS (Meadow)
+## Building the Firmware
 
 ```bash
 ./build-meadow.os_legacy-emulated.sh
 ```
 
-Builds from the legacy `Meadow/` repo (NuttX 7.x, `mono` defconfig) with emulator kconfig tweaks applied at build time. Outputs split binaries to `build/legacy/` (vectors, kernel, and user loaded separately to avoid zero-fill issues in the protected-mode memory layout).
-
-Requires the legacy `Meadow/` repo checked out as a sibling directory and ARM GCC 10.3 installed at `/Applications/ARM/bin`.
+Builds from the legacy `Meadow/` repo with emulator kconfig tweaks. Outputs split binaries to `build/legacy/`. Requires ARM GCC 10.3 at `/Applications/ARM/bin`.
 
 ## Running
 
 ```bash
-./run.sh                    # Interactive mode (default: new OS)
-./run.sh --legacy           # Interactive mode (legacy OS)
-./run.sh meadow-os-gdb      # GDB mode (paused, GDB server on port 3333)
-./run.sh meadow-os-diag     # Diagnostic mode with SVC/context logging
+./run.sh --legacy                         # Default: headless mode, monitor on port 1234
+./run.sh --legacy meadow-legacy           # Interactive mode
+./run.sh --legacy meadow-legacy-debug     # GDB mode (port 3333)
+./run.sh --legacy --port=5555             # Custom monitor port
 ```
 
-The script auto-detects Renode on `PATH` or in `/Applications/Renode.app` (macOS).
+`run.sh` auto-detects the custom Renode fork in `../renode/`, falling back to PATH or `/Applications/Renode.app`.
 
-HCOM is exposed as a TCP socket on port 4242 for both OS variants.
+On startup, the script prints connection info:
+```
+=== Starting Renode with scripts/meadow-legacy-headless.resc ===
+Monitor: telnet localhost 1234
+HCOM:    socket://localhost:4242
+```
+
+### Using Meadow.CLI
+
+Connect Meadow.CLI to the emulator via TCP socket:
+
+```bash
+# From the Meadow.CLI build output directory:
+export PATH="/usr/local/share/dotnet:$PATH"
+dotnet meadow.dll listen -s socket://localhost:4242     # Live output
+dotnet meadow.dll device info -s socket://localhost:4242
+dotnet meadow.dll app deploy -s socket://localhost:4242
+```
+
+Or configure the route once:
+```bash
+dotnet meadow.dll config route socket://localhost:4242
+dotnet meadow.dll device info    # Uses saved route
+```
+
+### Deploying an App
+
+Two options:
+
+1. **Via Meadow.CLI** (normal workflow):
+   ```bash
+   dotnet meadow.dll app deploy -s socket://localhost:4242
+   ```
+
+2. **Via pre-populated LFS image** (faster, bypasses HCOM transfer):
+   ```bash
+   ./build_lfs_v1_image build/legacy/assemblies build/legacy/littlefs.bin
+   # Image is loaded automatically by the .resc script via sysbus LoadBinary
+   ```
 
 ### GDB Debugging
 
-1. Start the emulator in GDB mode:
-   ```bash
-   ./run.sh meadow-os-gdb
-   ```
-
-2. In another terminal, connect GDB:
-   ```bash
-   arm-none-eabi-gdb build/nuttx.elf
-   (gdb) target remote :3333
-   (gdb) continue
-   ```
-
-3. UART output is written to `/tmp/renode-uart.txt` (tail it in another terminal).
-
-## Platform Description
-
-The platform is split into chip-level and board-level definitions:
-
-### Chip: `stm32f777.repl`
-
-All on-die STM32F777 peripherals:
-
-| Category | Peripherals |
-|---|---|
-| CPU | Cortex-M7, 462 MIPS, SysTick @ 216 MHz, FPU IRQ |
-| Memory | Flash 2MB (+ mirror), DTCM 128KB, SRAM1 368KB, SRAM2 16KB, ROM 64KB |
-| Serial | USART1-3/6, UART4/5/7/8 (all as STM32F7_USART) |
-| SPI | SPI1-6, QUADSPI controller (STM32H7_QuadSPI) |
-| I2C | I2C1-4 |
-| DMA | DMA1, DMA2 |
-| Timers | TIM1-14 with AF pin mappings |
-| GPIO | GPIOA-K (11 ports) with correct reset values |
-| Analog | ADC1-3 (shared IRQ) |
-| Bus | CAN1-3, Ethernet MAC, SDMMC, LTDC, DMA2D |
-| System | NVIC, EXTI, SYSCFG, DWT, Flash controller, RCC, PWR, RTC, RNG |
-
-### Board: `meadow-f7.repl`
-
-External hardware on the Meadow F7 board:
-
-| Peripheral | Address | Notes |
-|---|---|---|
-| SDRAM | 0xC0000000 | 32 MB external (via FMC) |
-| QSPI Flash Memory | 0x90000000 | 64 MB memory-mapped region |
-| W25QXXXJV | via QUADSPI | Winbond SPI NOR flash (C# peripheral) |
-
-## Python Peripherals
-
-### RCC (`rcc.py`)
-Custom clock controller that auto-sets ready bits when the corresponding clock enable is written. Handles: `HSIRDY`, `HSERDY`, `PLLRDY`, `PLLI2SRDY`, `PLLSAIRDY`, `LSIRDY`, `LSERDY`, and mirrors clock switch bits (SW) to status (SWS) in `RCC_CFGR`.
-
-### USB OTG FS (`otg_fs.py`)
-Stub for USB OTG FS controller. Keeps AHBIDL bit set in `GRSTCTL` (`AHB` bus always idle), auto-clears software reset bits, and implements write-1-to-clear for `GINTSTS`.
-
-### Flipflop (`flipflop.py`)
-Simple read-back peripheral used for `PWR_CR1`, `PWR_CSR1`, and `LPTIM1` registers that just need to return whatever was last written.
-
-## Workarounds
-
-All workarounds use IronPython hooks in the `.resc` scripts. Hook addresses are binary-specific and must be re-scanned after kernel rebuild. See [KnownIssues_and_Errata.md](KnownIssues_and_Errata.md) for full details on each issue, including severity, upstream tracking, and workaround code.
-
-Summary of active workarounds:
-
-| Issue | Fix | Impact |
-|---|---|---|
-| SVC-with-PRIMASK skipped | PRIMASK=0 hooks at all SVC sites | Critical — prevents PANIC on context restore |
-| GPIO board version | Hook forces CCMv2 (3) | Boot stalls without it |
-| QUADSPI TCF never set | Skip `qspi_waitstatusflags` | Flash I/O hangs without it |
-| QUADSPI DMA not driven | Direct memcpy via SystemBus | LittleFS mount fails without it |
-| RCC ready bits | Custom Python peripheral | Clock init hangs without it |
-| LSI calibration thread | Skip thread entry | CPU burn without it |
-| USB OTG FS | Stub peripheral | Prevents access faults |
-| ESPCP SPI DMA | Bypass with EspcpStub calls | ESPCP init hangs without it |
-| ESPCP SPI lock | Skip lock/unlock | Deadlock without it |
-| ESPCP init gate | Force R5=1 (WiFi) | ESPCP never starts without it |
-| Mono runtime check | Return 0 (not running) | ESP32 HCOM commands blocked without it |
-| FPU frame mismatch | `fix_fpu_frame.py` (new OS only) | Non-critical; legacy build unaffected |
-
-## NuttX Configuration
-
-The emulator uses `stm32f777zit6-meadow:meadow_os_emu` defconfig with key settings:
-
-- `CONFIG_BUILD_PROTECTED=y` — Protected build with kernel/user separation
-- `CONFIG_NUTTX_USERSPACE=0x08100000` — User binary loaded at this address
-- `CONFIG_INIT_ENTRYPOINT="hcom_main"` — Initial user-space task
-- `CONFIG_SYSLOG_SERIAL_CONSOLE=y` — Syslog output to USART1
-- `CONFIG_BOARD_RESET_ON_ASSERT=0` — Don't reset on assertion failures
-- `CONFIG_STM32F7_UART4=y` — UART4 enabled for HCOM transport
-- `CONFIG_HCOM_COMMS_DEVICE_NAME="/dev/ttyS1"` — HCOM redirected from USB to UART4
-- USB CDC-ACM, USBDEV, and OTG FS disabled (not emulatable)
-
-## Current Boot Status
-
-NuttX boots through hardware init, task scheduling, QSPI flash init, MTD partition detection, LittleFS filesystem creation, and reaches a stable idle state.
-
-```
-MTD Geo info - total erase sectors 16384, eraseSize 4096 block/page size 256
-Runtime       part:0, size: 3145728 ( 3072 Kb), Byte Offset:0x00000000, Block Offset     0
-Meadow update part:1, size: 1835008 ( 1792 Kb), Byte Offset:0x00300000, Block Offset 12288
-OTA State     part:2, size:    4096 (    4 Kb), Byte Offset:0x004c0000, Block Offset 19456
-OS Persisted  part:3, size:    4096 (    4 Kb), Byte Offset:0x004c1000, Block Offset 19472
-Assert Data   part:4, size:   32768 (   32 Kb), Byte Offset:0x004c2000, Block Offset 19488
-Unused        part:5, size:  221184 (  216 Kb), Byte Offset:0x004ca000, Block Offset 19616
-File System   part:6, size:61865984 (60416 Kb), Byte Offset:0x00500000, Block Offset 20480
-Created 7 partitions, Total size:67108864 bytes (65536 Kb)
-F/S creation complete.
-Meadow reset code: 0x00, reset count: 1, power cycle count 1
-Mono runtime was not found flashed in external flash.
-```
-
-Remaining:
-- Mono runtime not found (expected — not flashed in QSPI backing memory)
-
-## HCOM Communication
-
-HCOM is the host-to-device protocol used by Meadow.CLI. In the emulator, HCOM is redirected from USB CDC-ACM to UART4, which is exposed as a TCP socket on port 4242.
-
 ```bash
-# Test HCOM communication (emulator must be running):
-python3 tools/hcom_test.py info       # Get device information
-python3 tools/hcom_test.py name       # Get device name
-python3 tools/hcom_test.py listen     # Listen for unsolicited messages
+./run.sh --legacy meadow-legacy-debug
+# In another terminal:
+arm-none-eabi-gdb build/legacy/nuttx.elf
+(gdb) target remote :3333
+(gdb) continue
 ```
 
-## Using Meadow.CLI
+## Renode Fork Fixes
 
-Meadow.CLI can connect to the emulated device over the HCOM TCP socket instead of USB. This requires the `SocketConnection` support in Meadow.CLI (available on the `feature/TCP_Socket_Connection_for_EMU` branch or later).
+The WildernessLabs/renode fork (`meadow-emulator-fixes` branch) contains two critical fixes. See `upstream_fixes.md` for full details.
 
-### Setup
+| Fix | File | Impact |
+|-----|------|--------|
+| SVC/PRIMASK handling | `NVIC.cs` | Renode silently skipped SVCall when PRIMASK was set. Per ARMv7-M ARM B1.5.14, SVC is synchronous and should not be masked. Without this fix, per-address hooks on every SVC site are needed, destroying performance (12,000x slower). |
+| RTC backup register count | `STM32F4_RTC.cs` | Extended from 20 to 32 registers (`BackupEnd = 0x9C` -> `0xCC`) to support STM32F7. Meadow uses BKP31R at offset 0xCC for runtime state persistence across resets. |
 
-1. Build Meadow.CLI (one time):
-   ```bash
-   cd ../Meadow.CLI
-   dotnet build
-   ```
+## Firmware Hooks
 
-2. From the build output directory (e.g., `Source/Meadow.CLI/bin/Debug/net8.0/`), configure the socket route:
-   ```bash
-   dotnet meadow.dll config route socket://localhost:4242
-   ```
+The emulator uses address-specific hooks to work around unimplemented peripherals and firmware bugs. Hook addresses are binary-specific and must be re-scanned after firmware rebuild. See the `.resc` script for the current hook list.
 
-   This persists the connection setting — you only need to do it once.
+Key workarounds:
 
-3. Make sure the emulator is running, then use Meadow.CLI as normal:
-   ```bash
-   dotnet meadow.dll device info
-   ```
+| Issue | Impact |
+|-------|--------|
+| QSPI DMA not driven by Renode | LittleFS mount fails without bypass |
+| GPIO board version detection | Boot stalls; hook forces F7FeatherV2 |
+| ESPCP SPI DMA/locking | ESPCP init hangs without bypass |
+| Syslog semaphore leak (firmware bug) | Deadlocks all Mono threads on malloc failure |
+| Download watchdog (wall time vs virtual time) | File transfers fail without bypass |
+| LSI clock calibration thread | CPU burn without skip |
 
-### Example Output
+## Wall Time vs. Virtual Time
 
-```
-Getting device info...
-Meadow by Wilderness Labs
-Board Information
-    Model: F7Micro
-    Hardware version: F7CoreComputeV2
-    Device name: MeadowF7
+Renode runs in virtual time. Any firmware timeout guarding external I/O (HCOM downloads, WiFi, BLE) can misfire because the emulated CPU burns virtual seconds while waiting for data that arrives in wall-time milliseconds. Each such timeout needs a skip hook. See the [plan](conductor/tracks/renode-mono/plan.md) for details.
 
-Hardware Information
-    Processor type: STM32F777IIK6
-    ID: 00-00-00-00-00-00-00-00-00-00-00-00
-    Serial number: 0000000A0000
-    Coprocessor type: ESP32
+## Known Issues
 
-Firmware Versions
-    OS:
-    Runtime:
-    Coprocessor:
-    Protocol: 8
-```
+See [KnownIssues_and_Errata.md](KnownIssues_and_Errata.md) for a full list. Key items:
 
-Firmware versions are blank because the emulator injects placeholder version numbers (0.0.0.0) and the Mono runtime is not flashed.
-
-### Switching Back to USB
-
-To revert Meadow.CLI to USB for use with a physical device:
-```bash
-dotnet meadow.dll config route
-```
-
-## Known Issues and Errata
-
-See [KnownIssues_and_Errata.md](KnownIssues_and_Errata.md) for a consolidated list of all known Renode bugs, peripheral gaps, ESPCP workarounds, flash limitations, and operational issues.
-
-## Next Steps
-
-- **Flash persistence** — Investigate Renode `MappedMemory` file backing for persistent QSPI flash contents across runs; pre-populate with filesystem image if needed
-- **ESP32 coprocessor** — Emulate the ESPCP protocol over SPI2 (see `renode-esp32` track)
-- **CI integration** — Automated boot tests (see `renode-ci` track)
-- **Upstream contributions** — PR STM32F777 platform, SVC bug fix, RCC ready bits, W25Q flash, QuadSPI completeness to Renode (see `renode-upstream` track)
+- **MemFault on `runtime disable` -> `runtime enable`** — first boot works, re-enable crashes. Non-blocking.
+- **ESPCP polling disabled** — needed for WiFi/BLE, must re-enable without CPU starvation.
+- **Deploy throughput** — HCOM over UART is byte-by-byte. Pre-populated LFS image is the fast path.

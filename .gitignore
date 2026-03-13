@@ -420,5 +420,15 @@ FodyWeavers.xsd
 # Renode emulator build artifacts
 build/
 
+# Compiled native tools
+tools/build_littlefs_image_native
+tools/build_lfs_v1_image
+
+# Vendored LittleFS v1.7.2 source (clone from GitHub to build tools/build_lfs_v1_image)
+tools/lfs.c
+tools/lfs.h
+tools/lfs_util.c
+tools/lfs_util.h
+
 # Mac Bullshit
 .DS_Store

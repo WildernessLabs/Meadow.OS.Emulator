@@ -1,0 +1,144 @@
+using sysbus
+include @peripherals/Winbond_W25QXXXJV.cs
+include @peripherals/EspcpStub.cs
+mach create "meadow-legacy"
+machine LoadPlatformDescription @platforms/meadow-f7.repl
+
+# RCC peripheral with proper clock ready bit handling
+machine PyDevFromFile @scripts/pydev/rcc.py 0x40023800 0x400 true "rcc"
+
+# USB OTG FS stub — handles GRSTCTL polling (AHBIDL bit)
+machine PyDevFromFile @scripts/pydev/otg_fs.py 0x50000000 0x40000 true "otg_fs"
+
+# FMC (Flexible Memory Controller) stub — SDRAM init writes to 0xA0000000
+machine PyDevFromFile @scripts/pydev/fmc.py 0xA0000000 0x1000 true "fmc"
+
+# ESP32 coprocessor stub
+sysbus.spi2.espcpStub Reset
+
+# Legacy memory layout
+sysbus LoadBinary @build/legacy/nuttx_user.bin 0x08040000
+sysbus LoadBinary @build/legacy/nuttx_vectors.bin 0x08040000
+sysbus LoadBinary @build/legacy/nuttx_kernel.bin 0x08140000
+
+# Mono runtime — aligned binary with 32-byte header gap for correct trampoline addresses
+# QSPI uses original binary (for kernel checks), SDRAM uses aligned binary
+# Then copy first 32 bytes from QSPI to SDRAM to fill signature gap
+sysbus LoadBinary @build/legacy/nuttx_mono.bin 0x90000000
+sysbus LoadBinary @build/legacy/nuttx_mono_aligned.bin 0xC0000000
+# Fill the 32-byte signature gap at 0xC0000000 with original binary's first bytes
+# (firmware reads from SDRAM to verify Mono binary was loaded; zeros = no Mono)
+sysbus WriteDoubleWord 0xC0000000 0x477008C0
+sysbus WriteDoubleWord 0xC0000004 0x6849680B
+sysbus WriteDoubleWord 0xC0000008 0x4718681B
+sysbus WriteDoubleWord 0xC000000C 0x21002201
+sysbus WriteDoubleWord 0xC0000010 0xBB71F004
+sysbus WriteDoubleWord 0xC0000014 0xE92D4B23
+sysbus WriteDoubleWord 0xC0000018 0xF8D341F0
+sysbus WriteDoubleWord 0xC000001C 0x250030F0
+
+# LittleFS filesystem image — pre-populated with Mono BCL assemblies
+sysbus LoadBinary @build/legacy/littlefs.bin 0x90500000
+
+sysbus.cpu VectorTableOffset 0x08040000
+
+# USART1: Console/syslog output to file
+usart1 CreateFileBackend @/tmp/renode-uart-debug.txt true
+
+# UART4: HCOM transport
+emulation CreateServerSocketTerminal 4242 "hcom" false
+connector Connect sysbus.uart4 hcom
+
+# =============================================================================
+# IronPython hooks (same as meadow-legacy-headless.resc)
+# =============================================================================
+
+set svc_fix "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.PRIMASK = RegisterValue.Create(0, 32)"
+cpu AddHook 0x08163b5a $svc_fix
+cpu AddHook 0x08163da6 $svc_fix
+cpu AddHook 0x08163db6 $svc_fix
+cpu AddHook 0x08163dc0 $svc_fix
+cpu AddHook 0x08163dcc $svc_fix
+cpu AddHook 0x0817bd30 $svc_fix
+
+set gpio_ver_fix "machine.SystemBus.WriteByte(0x20020e74, 1); machine.SystemBus.WriteDoubleWord(0x20020e78, 3); cpu.PC = cpu.LR"
+cpu AddHook 0x08141970 $gpio_ver_fix
+
+set qspi_wait_skip "cpu.PC = cpu.LR"
+cpu AddHook 0x08161f46 $qspi_wait_skip
+cpu AddHook 0x08161e58 $qspi_wait_skip
+
+set qspi_dma_bypass "meminfo = cpu.GetRegisterUnsafe(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 4) & 0xFFFF; faddr = machine.SystemBus.ReadDoubleWord(meminfo + 8); buf = machine.SystemBus.ReadDoubleWord(meminfo + 16); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
+cpu AddHook 0x08161f52 $qspi_dma_bypass
+
+set mono_copy_bypass "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
+cpu AddHook 0x0805ebf0 $mono_copy_bypass
+
+set mono_ver_bypass "r0 = cpu.GetRegisterUnsafe(0).RawValue; fw30 = machine.SystemBus.ReadDoubleWord(r0 + 0x30); fw34 = machine.SystemBus.ReadDoubleWord(r0 + 0x34); fw38 = machine.SystemBus.ReadDoubleWord(r0 + 0x38); fw3c = machine.SystemBus.ReadDoubleWord(r0 + 0x3c); machine.SystemBus.WriteDoubleWord(r0 + 0x5c, fw30); machine.SystemBus.WriteDoubleWord(r0 + 0x60, fw34); machine.SystemBus.WriteDoubleWord(r0 + 0x64, fw38); machine.SystemBus.WriteDoubleWord(r0 + 0x68, fw3c); fwstr = machine.SystemBus.ReadDoubleWord(r0 + 0x54); machine.SystemBus.WriteDoubleWord(r0 + 0x80, fwstr); machine.SystemBus.WriteDoubleWord(r0 + 0x84, fwstr); cpu.PC = cpu.LR"
+cpu AddHook 0x08143590 $mono_ver_bypass
+
+set mono_str_fix "r0 = cpu.GetRegisterUnsafe(0).RawValue; monostr = machine.SystemBus.ReadDoubleWord(r0 + 0x80); fwstr = machine.SystemBus.ReadDoubleWord(r0 + 0x54); [machine.SystemBus.WriteDoubleWord(r0 + 0x80, fwstr), machine.SystemBus.WriteDoubleWord(r0 + 0x84, fwstr)] if monostr == 0 else None"
+cpu AddHook 0x08061940 $mono_str_fix
+
+set asm_scan_bypass "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(4, RegisterValue.Create(0, 32))"
+cpu AddHook 0x08061a74 $asm_scan_bypass
+
+set espcp_spi_bypass "from System import Array, Byte; stub = [p.Peripheral for p in machine.GetRegisteredPeripherals() if type(p.Peripheral).__name__ == 'EspcpStub'][0]; tx = cpu.GetRegisterUnsafe(0).RawValue; rx = cpu.GetRegisterUnsafe(1).RawValue; length = int(cpu.GetRegisterUnsafe(2).RawValue); txdata = machine.SystemBus.ReadBytes(tx, length) if tx else Array.CreateInstance(Byte, length); rxarr = Array.CreateInstance(Byte, length); [rxarr.__setitem__(i, stub.Transmit(txdata[i])) for i in range(length)]; stub.FinishTransmission(); machine.SystemBus.WriteBytes(rxarr, rx) if rx else None; cpu.PC = cpu.LR"
+cpu AddHook 0x081488a0 $espcp_spi_bypass
+
+set espcp_force_init "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(5, RegisterValue.Create(1, 32))"
+cpu AddHook 0x08141d50 $espcp_force_init
+
+set spi_lock_skip "cpu.PC = cpu.LR"
+cpu AddHook 0x08148918 $spi_lock_skip
+cpu AddHook 0x08148924 $spi_lock_skip
+
+set lsi_skip "cpu.PC = cpu.LR"
+cpu AddHook 0x0814dbe8 $lsi_skip
+
+set mq_intercept "from Antmicro.Renode.Peripherals.CPU import RegisterValue; lr = cpu.LR.RawValue; poll = machine.SystemBus.ReadByte(0x2007FFF0); [machine.SystemBus.WriteDoubleWord(cpu.GetRegisterUnsafe(1).RawValue, 0x2007C010), cpu.SetRegisterUnsafe(0, RegisterValue.Create(4, 32)), setattr(cpu, 'PC', cpu.LR)] if (lr == 0x0814e95b and poll == 1) else None"
+cpu AddHook 0x08157c40 $mq_intercept
+
+# ESPCP post-boot polling disabled during Mono init to avoid CPU starvation.
+# Enable later via: sysbus WriteByte 0x2007FFF0 1
+# set espcp_poll_enable "machine.SystemBus.WriteByte(0x2007FFF0, 1)"
+# cpu AddHook 0x0814e938 $espcp_poll_enable
+
+# =============================================================================
+# DEBUG: Trace hooks for Mono init progress
+# Write trace data to SDRAM 0xC03FF000+ region
+# Addresses adjusted for 0xC0000020 base (binary load offset)
+# =============================================================================
+
+# Hook at mono_main entry (0x08068bc8) — in user flash
+cpu AddHook 0x08068bc8 "machine.SystemBus.WriteDoubleWord(0xC03FF040, cpu.GetRegisterUnsafe(0).RawValue); machine.SystemBus.WriteDoubleWord(0xC03FF044, 0x5555)"
+
+# Hook at hcom_mono_ctrl_start_mono_main (0x080618f8)
+cpu AddHook 0x080618f8 "machine.SystemBus.WriteDoubleWord(0xC03FF060, cpu.GetRegisterUnsafe(0).RawValue); machine.SystemBus.WriteDoubleWord(0xC03FF064, 0x8888)"
+
+# Hook at hcom_mono_ctrl_is_mono_enabled (0x080618e6)
+cpu AddHook 0x080618e6 "machine.SystemBus.WriteDoubleWord(0xC03FF068, 0x9999)"
+
+# Hook at mono_main_proxy (0x08061674)
+cpu AddHook 0x08061674 "machine.SystemBus.WriteDoubleWord(0xC03FF070, 0xAAAA)"
+
+# Hook at mono_copy_bypass target (0x0805ebf0)
+cpu AddHook 0x0805ebf0 "machine.SystemBus.WriteDoubleWord(0xC03FF078, 0xBBBB)"
+
+# Hook at mono_set_assemblies_path (0xc00d42cc with +0x20 = real func entry)
+# With corrected load, trampoline target 0xC00D42CC IS the push instruction
+cpu AddHook 0xc00d42cc "machine.SystemBus.WriteDoubleWord(0xC03FF020, cpu.GetRegisterUnsafe(0).RawValue); machine.SystemBus.WriteDoubleWord(0xC03FF024, 0x1111)"
+
+# Hook at mono_main_driver (0xc0022748 with corrected load = push instruction)
+cpu AddHook 0xc0022748 "machine.SystemBus.WriteDoubleWord(0xC03FF048, cpu.GetRegisterUnsafe(0).RawValue); machine.SystemBus.WriteDoubleWord(0xC03FF04C, 0x7777)"
+
+# Hook at mono_jit_init (approximate — we'll search for it later)
+# For now, track if mono_main_driver is reached
+
+# Workaround: Prevent LittleFS format from wiping pre-populated filesystem data.
+# lfs_format = 0x08171df6
+set lfs_format_skip "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
+cpu AddHook 0x08171df6 $lfs_format_skip
+
+# NOTE: Do NOT start here — start from console after all hooks are registered
+# start
