@@ -1,7 +1,7 @@
 # Plan: Dual-Machine ESP32 Emulation
 
 ## Track ID: `renode-esp32-dual`
-## Status: `in-progress` (Phase 1.1 ✅, Phase 1.2 ✅, Phase 1.3 in-progress — full boot to idle task with working FreeRTOS ticks; app_main → Logging → NVS → SPI → MessageDispatcher all complete; tick injection via OnGPIO; next: capture debug UART output, catalog remaining peripheral stubs needed)
+## Status: `in-progress` (Phase 1.1 ✅, Phase 1.2 ✅, Phase 1.3 in-progress — full boot to idle task with working FreeRTOS ticks; UART debug capture via ets_printf hook; zero unmapped peripheral warnings; next: consider Renode retw source fix)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -228,8 +228,14 @@
   `fix/xtensa-esp32-emulation`, Infrastructure `bcc70d280` on `fix/xtensa-esp32-emulation`,
   renode `e7098410` on `fix/xtensa-retw`. Build requires: `build.sh` for tlib .so, then
   `dotnet build Renode_NET.sln -c Release` to re-embed .so in .NET assembly.
-- [ ] Map 0x60000000 (UART FIFO alternate bus address) as a peripheral to capture debug output
-- [ ] Catalog all remaining hardware accesses that fail
+- [x] **UART debug output capture**: Hooked ets_printf (ROM @ 0x40007d54) to capture format strings
+  directly. Per-character capture via putc1→uart_tx_one_char doesn't work because the retw bug
+  corrupts returns from ROM callx8 to the function pointer. Format strings show all 16 ESP-IDF
+  boot messages (Pro cpu up, Application info, memory regions, Pro cpu start user code).
+  Added uart0Mirror (ESP32_UART @ 0x60000000) for the AHB→data bus mirror — absorbs FIFO writes.
+- [x] **Complete peripheral map — zero unmapped access warnings**: Added I2S0 (0x3FF4F000) and
+  I2S1 (0x3FF68000) stub memory regions. All hardware accesses during boot are now covered.
+  Previous: 1 warning for I2S0 access at 0x3FF4F0AC. Now: zero "non existing peripheral" warnings.
 - [ ] Consider Renode source patch for retw bug (eliminate 6845-hook overhead)
 
 ### Key FreeRTOS Addresses (ESP-IDF 4.2.4 dual-core)
@@ -417,3 +423,5 @@
 | 2026-03-12 | `scripts/test_set_reg.py` | Helper: tests IronPython register read/write via _cpu.GetRegister/SetRegister |
 | 2026-03-12 | `scripts/esp32-meadow-boot.resc` | (1) Disabled ROM retw hooks (partial hooking corrupts AR[0]). (2) NOP'd strftime callx8 at 0x400d65ca. (3) Skip SpiTransportProvider ctor (j 0x400d95f4 at 0x400d93fb). (4) Patched lock_acquire_generic and lock_release_generic to force non-ISR path (movi a11,0 replacing extui INTLEVEL extraction). (5) Boot now reaches app_main → MessageDispatcher ctor → spi_slave_hal_prepare_data (null ptr crash). |
 | 2026-03-12 | `scripts/retw_hooks_rom.resc` | 23 ROM retw hooks (narrowed from 621) — currently DISABLED via comment in boot script. Kept for reference. |
+| 2026-03-12 | `scripts/esp32-meadow-boot.resc` | Added ets_printf format string capture hook (reads A2 after entry at 0x40007d57). Captures all 16 ESP-IDF boot messages. Per-character hooks (uart_tx_one_char, uart_tx_char, uart_hal_write_txfifo) don't fire because retw bug corrupts putc1 function pointer returns. |
+| 2026-03-12 | `platforms/meadow-esp32.repl` | Added uart0Mirror (ESP32_UART @ 0x60000000) for data bus mirror, I2S0 (0x3FF4F000), I2S1 (0x3FF68000). Zero "non existing peripheral" warnings during boot. |
