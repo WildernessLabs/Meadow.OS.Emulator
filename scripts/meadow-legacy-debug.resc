@@ -47,11 +47,9 @@ connector Connect sysbus.uart5 esp32ctrl
 # =============================================================================
 # Hook addresses (auto-generated) and hook definitions (shared)
 # =============================================================================
-include @build/legacy/addresses.resc
-include @scripts/meadow-legacy-hooks.resc
-
-# Workaround: Patch Mono's compiled-in /usr/local paths to /meadow0
-include @scripts/meadow-legacy-sdram-patches.resc
+# Hook definitions and SDRAM patches (auto-generated with resolved addresses)
+include @build/legacy/hooks.resc
+include @build/legacy/sdram-patches.resc
 
 # =============================================================================
 # DEBUG: Trace hooks for Mono init progress
