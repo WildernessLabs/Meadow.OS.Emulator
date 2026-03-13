@@ -1,7 +1,7 @@
 # Plan: Dual-Machine ESP32 Emulation
 
 ## Track ID: `renode-esp32-dual`
-## Status: `in-progress` (Phase 1.1 ✅, Phase 1.2 ✅, Phase 1.3 in-progress — full boot to idle task with working FreeRTOS ticks; UART debug capture via ets_printf hook; zero unmapped peripheral warnings; next: consider Renode retw source fix)
+## Status: `in-progress` (Phase 1 ✅, Phase 2.1 ✅ design, Phase 2.2 in-progress — SpiBridge C# done, ESP32 ctor skip confirmed)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -194,9 +194,12 @@
 - [x] **strftime ROM call crash**: After disabling ROM hooks, strftime (0x40059ab4) called from
   app_main returned to NULL. NOP'd the callx8 at 0x400d65ca (replaced with movi a8, 0).
   Result not needed since esp_log_write is also NOP'd.
-- [x] **SpiTransportProvider ctor skip**: Ctor at 0x400d93f8 calls ROM functions (gpio_pad_select_gpio,
-  spi_bus_initialize) that crash at deep call depths. Patched entry+3 (0x400d93fb) with
-  `j 0x400d95f4` (retw.n) to skip entire ctor body. SPI hardware init not needed for emulation.
+- [x] **SpiTransportProvider ctor skip (final)**: Ctor at 0x400d93f8 must be fully skipped.
+  Attempted partial un-skip (GPIO init skipped, buffer alloc/queue/task creation kept) but:
+  (1) `or a1,a1,a1` used as NOP corrupts A1 in Renode (tlib bug), (2) ClearTransmitAndReceiveBuffers
+  calls ROM memset (retw crash), (3) xTaskCreatePinnedToCore triggers window overflow/underflow
+  with corrupted stack (DOUBLE_EXC on retw at ctor exit). Reverted to full skip: entry+3
+  (0x400d93fb) → `j 0x400d95f4` (retw.n). SpiBridge handles SPI communication at peripheral level.
 - [x] **PS.INTLEVEL / FreeRTOS lock abort**: NOP'd _xtos_set_intlevel calls left PS.INTLEVEL=3
   permanently, causing lock_acquire_generic to think we're in ISR context → abort(). Fix:
   patched `extui a11,a11,0,4` → `movi a11,0` in lock_acquire_generic (0x40082c49) and
@@ -222,12 +225,10 @@
   NvsManager::Setup → SpiTransportProvider ctor (skipped) → MessageDispatcher ctor →
   idle task. Tick injection fires every ~50 idle loops, context switches work, system
   runs stably for 90+ seconds with no crashes.
-- [ ] **tlib fix: arch_tlb_fill (U.8)**: Fixed in `bryancostanich/renode` branch
-  `fix/xtensa-retw`. Changed `return TRANSLATE_FAIL` → `return ret` in `helper.c` to
-  propagate real MMU cause codes. Submodule chain: tlib `2520925`→`2574b54` on
-  `fix/xtensa-esp32-emulation`, Infrastructure `bcc70d280` on `fix/xtensa-esp32-emulation`,
-  renode `e7098410` on `fix/xtensa-retw`. Build requires: `build.sh` for tlib .so, then
-  `dotnet build Renode_NET.sln -c Release` to re-embed .so in .NET assembly.
+- [x] **tlib fixes pushed to bryancostanich/renode**: 5 patches on branch `fix/xtensa-esp32-patches`:
+  arch_tlb_fill (return real MMU cause), WAITI (don't halt CPU), CCOUNT/CCOMPARE (fix time
+  unit conversion), clock_freq_khz (240MHz), win_helper (assert→logging). Pushed via SSH.
+  Patched build at `/Users/bryancostanich/Git_Repos/Pub_Code/renode-retw-fix/output/bin/Release/Renode`.
 - [x] **UART debug output capture**: Hooked ets_printf (ROM @ 0x40007d54) to capture format strings
   directly. Per-character capture via putc1→uart_tx_one_char doesn't work because the retw bug
   corrupts returns from ROM callx8 to the function pointer. Format strings show all 16 ESP-IDF
@@ -262,19 +263,56 @@
 
 ## Phase 2: SPI Bridge Peripheral
 
-**Goal:** Connect SPI buses across two Renode machines.
+**Goal:** Connect STM32 and ESP32 machines so ESPCP frames flow through the real ESP32 firmware instead of EspcpStub.
+
+### Architecture
+
+```
+┌─────────────────────────┐                    ┌─────────────────────────┐
+│ Machine: stm32          │                    │ Machine: esp32          │
+│                         │                    │                         │
+│  NuttX ESPCP driver     │                    │  ESP-IDF firmware       │
+│     │                   │                    │  (SPI ctor skipped)     │
+│  espcp_send_data_over_  │                    │                         │
+│  spi (bypassed via hook)│                    │  ESP32-side ESPCP       │
+│     │                   │                    │  handler (TBD: Python   │
+│  SpiBridge (ISPIPeripheral)  ──── frames ────►  or C# peripheral)     │
+│  on SPI2                │◄── frames ─────────                         │
+│     │                   │                    │                         │
+│  Ready ── ── ── ── ── ──│── ── ── ── ── ── ──  (managed by SpiBridge) │
+│  MsgWaiting ── ── ── ── │── ── ── ── ── ── ──  (managed by SpiBridge) │
+└─────────────────────────┘                    └─────────────────────────┘
+```
+
+**Design decisions:**
+- SpiBridge is a C# peripheral on STM32 SPI2, replacing EspcpStub
+- ESP32 firmware's SPI ctor is fully skipped — the ctor's deep call chain triggers Renode
+  window overflow/underflow bugs with corrupted stack pointers (DOUBLE_EXC). Since the firmware's
+  SPI slave driver can't run, SpiBridge handles ALL SPI communication at the peripheral level.
+- Frame-level forwarding (not byte-level) — the bridge captures complete ESPCP frames and passes them as byte arrays
+- SpiBridge exposes public methods (`DequeueFrameFromStm32`, `EnqueueFrameToStm32`) for the ESP32 side
+- GPIO signals (Ready, MessageWaiting) managed by SpiBridge directly
+- ESP32-side ESPCP message handling will need to be implemented in Python or C# rather than
+  running the firmware's ProcessMessages state machine (which requires the SPI task)
 
 ### 2.1 — Design SPI Bridge
-- [ ] C# peripheral implementing ISPIPeripheral on both sides
-- [ ] Machine A (STM32): appears as SPI slave on SPI2 (replaces EspcpStub)
-- [ ] Machine B (ESP32): appears as SPI master or hooks into SPI slave driver
-- [ ] Frame buffering: capture full MOSI frame, forward to other machine, return MISO
-- [ ] GPIO forwarding: Ready, MessageWaiting, Reset signals between machines
+- [x] Architecture: SpiBridge (C#) on STM32 SPI2 + Python hooks on ESP32 SPI slave driver
+- [x] STM32 side: ISPIPeripheral, replaces EspcpStub, same GPIO wiring (Ready→gpioPortI@10, MsgWaiting→gpioPortI@0)
+- [x] ESP32 side: Python hooks intercept spi_slave_queue_trans / spi_slave_get_trans_result
+- [x] Frame buffering: thread-safe queues in both directions (STM32→ESP32, ESP32→STM32)
+- [x] GPIO forwarding: bridge outputs Ready/MessageWaiting, ESP32 hooks update via bridge API
 
 ### 2.2 — Implement and Test Bridge
-- [ ] Create `peripherals/SpiBridge.cs`
-- [ ] Test with loopback (single machine, bridge to self)
-- [ ] Test with two machines (STM32 ↔ ESP32)
+- [x] Create `peripherals/SpiBridge.cs` with ISPIPeripheral + cross-machine frame queues
+- [x] SpiTransportProvider ctor: confirmed must be fully skipped (window spill corruption).
+  Attempted partial un-skip but `or a1,a1,a1` NOP corrupts A1, ROM memset crashes, and
+  deep call chains corrupt stack. SpiBridge handles SPI at peripheral level.
+- [x] Cleaned up boot script: removed SPI driver stubs, xTaskNotifyWait patch, and Python
+  frame inject/capture hooks (all were for firmware SPI task that no longer runs)
+- [ ] Wire SpiBridge into STM32 platform (replace EspcpStub on SPI2)
+- [ ] Implement ESP32-side ESPCP message handler (Python or C# — processes frames from SpiBridge)
+- [ ] Test: STM32 sends GetConfiguration → handler processes → response returns via SpiBridge
+- [ ] Test: ESP32 queues event → STM32 polls via SendResponse → event delivered
 - [ ] Verify frame integrity (CRC checks pass on both sides)
 
 ## Phase 3: ESP32 Peripheral Stubs
@@ -396,6 +434,10 @@
 | 2026-03-12 | **PS.INTLEVEL fix via lock function patches** | NOP'd _xtos_set_intlevel leaves PS.INTLEVEL permanently elevated (=3). This makes lock_acquire_generic think code is running in ISR context → abort(). Patched `extui a11,a11,0,4` → `movi a11,0` in both lock_acquire_generic (0x40082c49) and lock_release_generic (0x40082ca7) to always take the non-ISR path. Safe for single-core emulation with no real interrupts. |
 | 2026-03-12 | **SpiTransportProvider ctor skip** | Ctor at 0x400d93f8 has 20 callx8 instructions targeting ROM functions (gpio_pad_select_gpio, spi_bus_initialize, gpio_set_pull_mode). Patched entry+3 (0x400d93fb) with `j 0x400d95f4` (retw.n). SPI hardware init not needed for emulation. Leaves SPI HAL structs uninitialized — may need to provide dummy initialized state for later SPI operations. |
 | 2026-03-12 | **movi encoding: 82 A0 00 (not 82 C0 00)** | Verified `movi a8, 0` = bytes `82 A0 00` from objdump. Previous patches using `82 C0 00` encoded a different (nonzero) immediate but happened to work as harmless NOPs. Corrected encoding for lock function patches uses `B2 A0 00` for `movi a11, 0`. |
+| 2026-03-12 | **Renode `or a1,a1,a1` corrupts A1 (tlib bug)** | Using `or a1,a1,a1` (bytes 20 11 10) as a NOP zeroes A1 (SP) under certain conditions in Renode's Xtensa tlib. The proper `nop` instruction (bytes 00 20 f0) does not have this issue. All `call8 → NOP` patches must use `nop` (00 20 f0) not `or a1,a1,a1` (20 11 10). |
+| 2026-03-12 | **SpiTransportProvider ctor must be fully skipped** | Attempted partial un-skip (skip GPIO init, keep buffer alloc + task creation). Three blocking issues: (1) `or a1,a1,a1` NOP corrupts SP, (2) ClearTransmitAndReceiveBuffers calls ROM memset (retw crash), (3) deep call chain corrupts stack during window overflow → DOUBLE_EXC on ctor retw. Full skip (entry+3 → j retw.n) is the only viable approach. SpiBridge handles SPI at peripheral level. |
+| 2026-03-12 | **IPC demotion now runs every dispatch** | Changed from one-shot to per-dispatch to catch the SPI task (created after initial demotion). Returns immediately when no pri-24 tasks exist (checks count first). Moot now that SPI task doesn't run, but correct for any future pri-24 tasks. |
+| 2026-03-12 | **tlib patches pushed to bryancostanich/renode** | 5 patches on branch `fix/xtensa-esp32-patches`: arch_tlb_fill, WAITI, CCOUNT, clock_freq_khz, win_helper assert→logging. Pushed via SSH to `git@github.com:bryancostanich/renode.git`. Old patched build was recovered from Trash after accidental deletion. |
 
 ## Changes Log
 
@@ -433,3 +475,6 @@
 | 2026-03-12 | `scripts/retw_hooks_rom.resc` | 23 ROM retw hooks (narrowed from 621) — currently DISABLED via comment in boot script. Kept for reference. |
 | 2026-03-12 | `scripts/esp32-meadow-boot.resc` | Added ets_printf format string capture hook (reads A2 after entry at 0x40007d57). Captures all 16 ESP-IDF boot messages. Per-character hooks (uart_tx_one_char, uart_tx_char, uart_hal_write_txfifo) don't fire because retw bug corrupts putc1 function pointer returns. |
 | 2026-03-12 | `platforms/meadow-esp32.repl` | Added uart0Mirror (ESP32_UART @ 0x60000000) for data bus mirror, I2S0 (0x3FF4F000), I2S1 (0x3FF68000). Zero "non existing peripheral" warnings during boot. |
+| 2026-03-12 | `peripherals/SpiBridge.cs` | Created SPI bridge peripheral: ISPIPeripheral + IGPIOReceiver, cross-machine frame queues (toEsp32Queue/toStm32Queue), Ready/MessageWaiting GPIO outputs, public API for ESP32 side (DequeueFrameFromStm32, EnqueueFrameToStm32, SetReady, SetMessageWaiting). |
+| 2026-03-12 | `scripts/esp32-meadow-boot.resc` | Phase 2 SPI changes: (1) Reverted to full SpiTransportProvider ctor skip (partial un-skip failed due to tlib bugs). (2) Removed SPI driver stubs, xTaskNotifyWait patch, Python frame inject/capture hooks — all for firmware SPI task that no longer runs. (3) IPC demotion now runs every dispatch (not one-shot). (4) Fixed DOUBLE_EXC diagnostic hook (RegisterValue → GetRegisterUnsafe). (5) Discovered `or a1,a1,a1` NOP corrupts A1 in Renode — use proper `nop` (00 20 f0). |
+| 2026-03-12 | `bryancostanich/renode` branch `fix/xtensa-esp32-patches` | Pushed 5 tlib patches to GitHub fork. Submodule chain: tlib commit → Infrastructure commit → renode commit. All patches preserved from recovered build. |

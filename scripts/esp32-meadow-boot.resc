@@ -674,13 +674,12 @@ def _demote_ipc_tasks(R, W):
 def _dispatch_fixup():
     R = _bus.ReadDoubleWord
     W = _bus.WriteDoubleWord
-    # One-shot setup at first dispatch
+    # Demote any priority-24 tasks to 0 on every dispatch. IPC tasks exist at
+    # first dispatch; SPI task is created later. Keep demoting until none remain.
+    _demote_ipc_tasks(R, W)
+    # One-shot: fake core 1 scheduler as running
     if not _ipc_demoted[0]:
         _ipc_demoted[0] = True
-        _demote_ipc_tasks(R, W)
-        # Fake core 1 scheduler as running — main_task busy-waits on
-        # port_xSchedulerRunning[1] (0x3FFC92BC) which is never set in
-        # single-core emulation.
         W(0x3FFC92BC, 1)
     # Repair any ready-list pxIndex values corrupted by Renode window-spill bugs.
     # The firmware's listGET_OWNER_OF_NEXT_ENTRY dereferences pxIndex, so corrupt
@@ -823,17 +822,21 @@ cpu AddHook 0x40157d12 "_set_a10_zero()"
 # _fix_retw() copies A0 (logical) to AR[0] (physical) before each retw executes.
 # Hook all 6845 retw addresses extracted from the ELF binary.
 include @scripts/retw_hooks.resc
-# Skip SpiTransportProvider ctor body — calls ROM functions (gpio_pad_select_gpio,
-# spi_bus_initialize) that crash due to Renode retw bug + window overflow at call
-# depths > 8. SPI hardware init is not needed for emulation.
-# Patch: entry at 0x400d93f8 (3 bytes), then j to retw.n at 0x400d95f4.
-# j offset = 0x400d95f4 - (0x400d93fb + 4) = 0x1F5
-# j encoding: (0x1F5 << 6) | 0x06 = 0x7D46 → bytes: 46 7D 00
+# ── SPI Transport: enable real firmware processing ──────────────────────────
+# SpiTransportProvider ctor (0x400d93f8): skip entire body. The ctor's deep
+# call chain (calloc, xQueue*, xTaskCreate) triggers Renode window overflow/underflow
+# with corrupted stack pointers, causing DOUBLE_EXC on retw. Since SpiBridge handles
+# SPI communication, the firmware's SPI infrastructure isn't needed.
+# Keep entry at 0x400d93f8 (window rotation), jump body to retw.n at 0x400d95f4.
+# j offset = 0x400d95f4 - (0x400d93fb + 4) = 0x1F5 → bytes: 46 7D 00
 sysbus WriteByte 0x400d93fb 0x46
 sysbus WriteByte 0x400d93fc 0x7D
 sysbus WriteByte 0x400d93fd 0x00
-# Skip SendConfigurationAsInterruptMessage — uses SPI (skipped above), null HAL pointer
-# crashes in spi_slave_hal_prepare_data. call8 at 0x400d6643 (3 bytes: E5 50 00) → NOP.
+# NOTE: spi_slave_queue_trans, spi_slave_get_trans_result, and
+# ProcessMessages xTaskNotifyWait stubs removed — SPI task no longer runs.
+# SpiBridge C# peripheral handles all SPI communication.
+# Skip SendConfigurationAsInterruptMessage — null HAL pointer crashes in
+# spi_slave_hal_prepare_data. call8 at 0x400d6643 (3 bytes) → NOP.
 sysbus WriteByte 0x400d6643 0x20
 sysbus WriteByte 0x400d6644 0x11
 sysbus WriteByte 0x400d6645 0x10
@@ -841,7 +844,7 @@ sysbus WriteByte 0x400d6645 0x10
 cpu AddHook 0x40007d57 "_ets_printf_hook()"
 # Exception vector hooks — detect crashes
 cpu AddHook 0x40080300 "self.Log(LogLevel.Error, 'KERNEL_EXC @40080300')"
-cpu AddHook 0x400803C0 "self.Log(LogLevel.Error, 'DOUBLE_EXC @400803C0')"
+cpu AddHook 0x400803C0 "self.Log(LogLevel.Error, 'DOUBLE_EXC EXCCAUSE=%d DEPC=0x%x EPC1=0x%x EXCVADDR=0x%x' % (self.GetRegisterUnsafe(77).RawValue, self.GetRegisterUnsafe(58).RawValue, self.GetRegisterUnsafe(51).RawValue, self.GetRegisterUnsafe(83).RawValue))"
 # Tick injection: CCOUNT doesn't increment in Renode's Xtensa, so CCOMPARE0
 # timer interrupt never fires. Inject ticks via OnGPIO(6) from idle task loop.
 python """
@@ -892,5 +895,9 @@ def _queue_recv_sched_check():
 __builtin__._queue_recv_sched_check = _queue_recv_sched_check
 """
 cpu AddHook 0x40091cf8 "_queue_recv_sched_check()"
+
+# ── SPI Bridge: frame injection into ProcessMessages ──────────────────────
+# NOTE: SPI Python hooks (frame inject/capture) removed — SPI task no longer runs.
+# SpiBridge C# peripheral handles all SPI communication at the peripheral level.
 
 log "ESP32 Meadow boot ready (ROM + firmware loaded). Use 'start' to run."
