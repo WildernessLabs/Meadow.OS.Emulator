@@ -799,13 +799,67 @@ __builtin__._lock_validate = _lock_validate
 cpu AddHook 0x40157d12 "_set_a10_zero()"
 # RETW HOOKS REMOVED — testing tlib source fix (tcg_temp_local_new_i32 in translate_retw)
 # ── SPI Transport ────────────────────────────────────────────────────────────
-# SpiTransportProvider ctor skip REMOVED — testing with tlib retw fix.
-# The ctor's ROM calls (gpio_*, spi_slave_initialize, memset) should now
-# return properly via retw without the TCG temp corruption.
+# SpiTransportProvider ctor skip REMOVED — tlib retw fix lets ROM calls return.
+cpu AddHook 0x400d93f8 "self.Log(LogLevel.Error, 'SPI_CTOR_ENTER')"
+
+# ── WiFi/BT Setup skips ─────────────────────────────────────────────────────
+# WiFiRequestHandler::Setup() at 0x400de268 calls esp_wifi_restore which hits
+# unmapped WiFi hardware regs (0x3FF71xxx) → esp_restart. Skip body, keep entry.
+# entry at 0x400de268, retw.n at 0x400de2dc, j from 0x400de26b (offset=109)
+sysbus WriteByte 0x400de26b 0x46
+sysbus WriteByte 0x400de26c 0x1B
+sysbus WriteByte 0x400de26d 0x00
+# BluetoothRequestHandler::Setup() at 0x400d9d2c calls esp_bt_controller_init
+# which hits unmapped BT hardware regs. Skip body, keep entry.
+# entry at 0x400d9d2c, retw.n at 0x400d9dcd, j from 0x400d9d2f (offset=154)
+sysbus WriteByte 0x400d9d2f 0x86
+sysbus WriteByte 0x400d9d30 0x26
+sysbus WriteByte 0x400d9d31 0x00
+# Skip watchdog init — no real timer hardware, watchdog timeouts cause esp_restart.
+# esp_task_wdt_init at 0x400d5b30: return ESP_OK (0) immediately.
+# Replace entry+3 with: movi a2, 0 (3 bytes) + retw.n (2 bytes) = 5 bytes
+# Overwrites: movi.n a10, 9 (2b) + l32r a4, ... (3b) = 5 bytes. Perfect fit.
+sysbus WriteByte 0x400d5b33 0x22
+sysbus WriteByte 0x400d5b34 0xA0
+sysbus WriteByte 0x400d5b35 0x00
+sysbus WriteByte 0x400d5b36 0x1D
+sysbus WriteByte 0x400d5b37 0xF0
+# esp_task_wdt_add at 0x400d5c38: return ESP_OK (0) immediately.
+# Without wdt init, wdt_add returns INVALID_STATE → ESP_ERROR_CHECK aborts.
+sysbus WriteByte 0x400d5c3b 0x22
+sysbus WriteByte 0x400d5c3c 0xA0
+sysbus WriteByte 0x400d5c3d 0x00
+sysbus WriteByte 0x400d5c3e 0x1D
+sysbus WriteByte 0x400d5c3f 0xF0
+# esp_int_wdt_init at 0x400d5dac: return immediately (void function).
+# Replace entry+3 with: retw.n (2 bytes). Overwrites first 2 bytes of movi.n.
+sysbus WriteByte 0x400d5daf 0x1D
+sysbus WriteByte 0x400d5db0 0xF0
 # Capture ets_printf format strings (ROM @ 0x40007d54, entry a1 0x80 is 3 bytes)
 cpu AddHook 0x40007d57 "_ets_printf_hook()"
 # Exception vector hooks — detect crashes
-cpu AddHook 0x40080300 "self.Log(LogLevel.Error, 'KERNEL_EXC @40080300')"
+cpu AddHook 0x40080300 "self.Log(LogLevel.Error, 'KERNEL_EXC EXCCAUSE=%d EPC1=0x%x EXCVADDR=0x%x' % (self.GetRegisterUnsafe(77).RawValue, self.GetRegisterUnsafe(51).RawValue, self.GetRegisterUnsafe(83).RawValue))"
+# esp_restart_noos trace — find who triggers restart
+cpu AddHook 0x400821e4 "self.Log(LogLevel.Error, 'ESP_RESTART_NOOS called! A0=0x%08x caller=0x%08x' % (self.GetRegisterUnsafe(89).RawValue, (self.GetRegisterUnsafe(0).RawValue & 0xC0000000) | (self.GetRegisterUnsafe(89).RawValue & 0x3FFFFFFF)))"
+# esp_panic_handler at 0x40090888 — A2 points to XtExcFrame
+# XtExcFrame layout: pc(+0), ps(+4), a0(+8), ..., exccause(+148), excvaddr(+152)
+cpu AddHook 0x40090888 "_panic_handler_trace()"
+python """
+def _panic_handler_trace():
+    R = _bus.ReadDoubleWord
+    # A2 is in caller's window (before entry), so it's A10 = register 99
+    frame = _cpu.GetRegister(99).RawValue
+    if frame < 0x3FF00000 or frame >= 0x40000000:
+        _cpu.Log(LogLevel.Error, 'PANIC_HANDLER: bad frame ptr 0x%08x' % frame)
+        return
+    pc = R(frame + 0)
+    ps = R(frame + 4)
+    a0 = R(frame + 8)
+    exccause = R(frame + 148)
+    excvaddr = R(frame + 152)
+    _cpu.Log(LogLevel.Error, 'PANIC_HANDLER: PC=0x%08x PS=0x%08x A0=0x%08x EXCCAUSE=%d EXCVADDR=0x%08x' % (pc, ps, a0, exccause, excvaddr))
+__builtin__._panic_handler_trace = _panic_handler_trace
+"""
 cpu AddHook 0x400803C0 "self.Log(LogLevel.Error, 'DOUBLE_EXC EXCCAUSE=%d DEPC=0x%x EPC1=0x%x EXCVADDR=0x%x' % (self.GetRegisterUnsafe(77).RawValue, self.GetRegisterUnsafe(58).RawValue, self.GetRegisterUnsafe(51).RawValue, self.GetRegisterUnsafe(83).RawValue))"
 # Tick injection: CCOUNT doesn't increment in Renode's Xtensa, so CCOMPARE0
 # timer interrupt never fires. Inject ticks via OnGPIO(6) from idle task loop.
@@ -839,6 +893,19 @@ def _abort_trace():
 __builtin__._abort_trace = _abort_trace
 """
 cpu AddHook 0x40097bec "_abort_trace()"
+# Hook the general exception handler to catch the null deref before panic
+cpu AddHook 0x40080180 "_general_exc_trace()"
+python """
+def _general_exc_trace():
+    exccause = _cpu.GetRegister(77).RawValue
+    epc1 = _cpu.GetRegister(51).RawValue
+    excvaddr = _cpu.GetRegister(83).RawValue
+    a0 = _cpu.GetRegister(89).RawValue
+    pc = _cpu.GetRegister(0).RawValue
+    if epc1 < 0x100:  # likely a null deref
+        _cpu.Log(LogLevel.Error, 'GENERAL_EXC: PC=0x%08x EPC1=0x%08x EXCCAUSE=%d EXCVADDR=0x%08x A0=0x%08x' % (pc, epc1, exccause, excvaddr, a0))
+__builtin__._general_exc_trace = _general_exc_trace
+"""
 # xQueueGenericReceive pre-scheduler fix: after call8 xTaskGetSchedulerState returns at
 # 0x40091cf8, a10 has the scheduler state. The beqz.n only branches on 0 (SUSPENDED).
 # With state 1 (NOT_STARTED), code falls through to the normal blocking path which

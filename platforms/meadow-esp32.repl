@@ -202,5 +202,13 @@ wifiRegs: Memory.MappedMemory @ sysbus 0x3FF73000
 btRegs: Memory.MappedMemory @ sysbus 0x3FF6B000
     size: 0x1000
 
+// APLL / SDIO registers (RTC I2C bus for PLL configuration)
+apllRegs: Memory.MappedMemory @ sysbus 0x3FF66000
+    size: 0x1000
+
+// WiFi BB (baseband) registers
+wifiBB: Memory.MappedMemory @ sysbus 0x3FF71000
+    size: 0x1000
+
 // Semihosting UART — fallback for debug output if ESP32_UART doesn't work
 uartSemihosting: UART.SemihostingUart @ cpu
