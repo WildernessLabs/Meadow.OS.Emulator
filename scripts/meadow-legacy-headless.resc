@@ -43,6 +43,11 @@ sysbus LoadBinary @build/legacy/nuttx_mono.bin 0xC0000000
 
 sysbus.cpu VectorTableOffset 0x08040000
 
+# =============================================================================
+# Hook addresses (auto-generated) — must be loaded before reset macro uses them
+# =============================================================================
+include @build/legacy/addresses.resc
+
 # Reset macro — called by Renode on SYSRESETREQ (NVIC AIRCR write).
 # Reloads binaries and resets vector table so the firmware boots cleanly after restart.
 macro reset
@@ -56,14 +61,19 @@ macro reset
     # The LFS image is loaded once at initial boot; the firmware manages QSPI flash after that.
     sysbus.cpu VectorTableOffset 0x08040000
     sysbus.spi2.espcpStub Reset
-    sysbus WriteDoubleWord 0xC01696F6 0x61656D2F
-    sysbus WriteDoubleWord 0xC01696FA 0x30776F64
-    sysbus WriteDoubleWord 0xC01696FE 0x00000000
-    sysbus WriteByte 0xC0169702 0x00
-    sysbus WriteByte 0xC0169703 0x00
-    sysbus WriteDoubleWord 0xC0171A94 0x61656D2F
-    sysbus WriteDoubleWord 0xC0171A98 0x30776F64
-    sysbus WriteDoubleWord 0xC0171A9C 0x00000000
+    # SDRAM string patches (Mono /usr/local → /meadow0)
+    sysbus WriteDoubleWord $sdram_USR_LOCAL_LIB_W0 0x61656D2F
+    sysbus WriteDoubleWord $sdram_USR_LOCAL_LIB_W1 0x30776F64
+    sysbus WriteDoubleWord $sdram_USR_LOCAL_LIB_W2 0x00000000
+    sysbus WriteByte $sdram_USR_LOCAL_LIB_B12 0x00
+    sysbus WriteByte $sdram_USR_LOCAL_LIB_B13 0x00
+    sysbus WriteByte $sdram_USR_LOCAL_LIB_B14 0x00
+    sysbus WriteDoubleWord $sdram_USR_LOCAL_ETC_W0 0x61656D2F
+    sysbus WriteDoubleWord $sdram_USR_LOCAL_ETC_W1 0x30776F64
+    sysbus WriteDoubleWord $sdram_USR_LOCAL_ETC_W2 0x00000000
+    sysbus WriteByte $sdram_USR_LOCAL_ETC_B12 0x00
+    sysbus WriteByte $sdram_USR_LOCAL_ETC_B13 0x00
+    sysbus WriteByte $sdram_USR_LOCAL_ETC_B14 0x00
     # No BBR restoration needed — RTC backup registers have softResettable: false.
 """
 runMacro $reset
@@ -83,25 +93,12 @@ connector Connect sysbus.uart5 esp32ctrl
 
 
 # =============================================================================
-# Hook addresses (auto-generated) and hook definitions (shared)
+# Hook definitions (shared) — addresses already loaded above
 # =============================================================================
-include @build/legacy/addresses.resc
 include @scripts/meadow-legacy-hooks.resc
 
-# Workaround: Mono was built with --prefix=/usr/local (default), so its compiled-in lib
-# directory is "/usr/local/lib" and it looks for BCL at /usr/local/lib/mono/4.5/.
-# Patch the string in SDRAM to "/meadow0" so Mono looks at /meadow0/mono/4.5/ instead.
-# The LittleFS image has assemblies at /mono/4.5/ which maps to /meadow0/mono/4.5/.
-# String "/usr/local/lib\0" at SDRAM 0xC01696F6 → "/meadow0\0\0\0\0\0\0\0"
-sysbus WriteDoubleWord 0xC01696F6 0x61656D2F
-sysbus WriteDoubleWord 0xC01696FA 0x30776F64
-sysbus WriteDoubleWord 0xC01696FE 0x00000000
-sysbus WriteByte 0xC0169702 0x00
-sysbus WriteByte 0xC0169703 0x00
-# Also patch "/usr/local/etc\0" at SDRAM 0xC0171A94 → "/meadow0\0"
-sysbus WriteDoubleWord 0xC0171A94 0x61656D2F
-sysbus WriteDoubleWord 0xC0171A98 0x30776F64
-sysbus WriteDoubleWord 0xC0171A9C 0x00000000
+# Workaround: Patch Mono's compiled-in /usr/local paths to /meadow0
+include @scripts/meadow-legacy-sdram-patches.resc
 
 
 start

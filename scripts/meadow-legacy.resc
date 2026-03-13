@@ -54,15 +54,7 @@ connector Connect sysbus.uart5 esp32ctrl
 include @build/legacy/addresses.resc
 include @scripts/meadow-legacy-hooks.resc
 
-# Workaround: Patch Mono's compiled-in lib directory from /usr/local/lib to /meadow0
-# NOTE: These SDRAM addresses depend on the mono binary — update if nuttx_mono.bin changes.
-sysbus WriteDoubleWord 0xC01696F6 0x61656D2F
-sysbus WriteDoubleWord 0xC01696FA 0x30776F64
-sysbus WriteDoubleWord 0xC01696FE 0x00000000
-sysbus WriteByte 0xC0169702 0x00
-sysbus WriteByte 0xC0169703 0x00
-sysbus WriteDoubleWord 0xC0171A94 0x61656D2F
-sysbus WriteDoubleWord 0xC0171A98 0x30776F64
-sysbus WriteDoubleWord 0xC0171A9C 0x00000000
+# Workaround: Patch Mono's compiled-in /usr/local paths to /meadow0
+include @scripts/meadow-legacy-sdram-patches.resc
 
 start

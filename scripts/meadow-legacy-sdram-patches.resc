@@ -1,0 +1,26 @@
+# =============================================================================
+# Legacy Meadow OS — SDRAM String Patches
+# =============================================================================
+# Patches Mono's compiled-in /usr/local paths to /meadow0 so Mono finds BCL
+# assemblies at /meadow0/mono/4.5/ (the LittleFS mount point).
+#
+# Uses $sdram_* variables from build/legacy/addresses.resc (auto-generated).
+# The "/meadow0\0" replacement is encoded as little-endian 32-bit words:
+#   0x61656D2F = "/mea"  0x30776F64 = "dow0"  0x00000000 = "\0\0\0\0"
+# =============================================================================
+
+# Patch "/usr/local/lib\0" -> "/meadow0\0\0\0\0\0\0\0"
+sysbus WriteDoubleWord $sdram_USR_LOCAL_LIB_W0 0x61656D2F
+sysbus WriteDoubleWord $sdram_USR_LOCAL_LIB_W1 0x30776F64
+sysbus WriteDoubleWord $sdram_USR_LOCAL_LIB_W2 0x00000000
+sysbus WriteByte $sdram_USR_LOCAL_LIB_B12 0x00
+sysbus WriteByte $sdram_USR_LOCAL_LIB_B13 0x00
+sysbus WriteByte $sdram_USR_LOCAL_LIB_B14 0x00
+
+# Patch "/usr/local/etc\0" -> "/meadow0\0\0\0\0\0\0\0"
+sysbus WriteDoubleWord $sdram_USR_LOCAL_ETC_W0 0x61656D2F
+sysbus WriteDoubleWord $sdram_USR_LOCAL_ETC_W1 0x30776F64
+sysbus WriteDoubleWord $sdram_USR_LOCAL_ETC_W2 0x00000000
+sysbus WriteByte $sdram_USR_LOCAL_ETC_B12 0x00
+sysbus WriteByte $sdram_USR_LOCAL_ETC_B13 0x00
+sysbus WriteByte $sdram_USR_LOCAL_ETC_B14 0x00
