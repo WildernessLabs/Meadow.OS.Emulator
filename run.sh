@@ -26,8 +26,14 @@ if [ -n "$RENODE_FORK" ]; then
     # Custom WildernessLabs/renode fork (built from source)
     RENODE_CMD="dotnet $RENODE_FORK/output/bin/Release/Renode.dll"
 elif command -v renode &> /dev/null; then
+    echo "WARNING: Using stock Renode (missing SVC/PRIMASK fix — emulation will be ~12,000x slower)."
+    echo "         Run ./setup.sh to install the WildernessLabs/renode fork."
+    echo ""
     RENODE_CMD="renode"
 elif [ -f "/Applications/Renode.app/Contents/MacOS/bin/Renode.exe" ]; then
+    echo "WARNING: Using stock Renode.app (missing SVC/PRIMASK fix — emulation will be ~12,000x slower)."
+    echo "         Run ./setup.sh to install the WildernessLabs/renode fork."
+    echo ""
     RENODE_CMD="mono /Applications/Renode.app/Contents/MacOS/bin/Renode.exe"
 else
     echo "ERROR: Renode not found."

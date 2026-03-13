@@ -6,7 +6,19 @@ Full hardware emulation of Meadow.OS (NuttX RTOS on STM32F777ZIT6) using the [Re
 
 The legacy Meadow firmware boots with Mono JIT, loads .NET assemblies from LittleFS, and runs Meadow apps end-to-end. A Blinky sample app has been validated running its full lifecycle (`Initialize` -> `Run` -> color cycling loop).
 
+## Quick Start
+
+```bash
+./setup.sh --legacy                        # Check & install all prerequisites
+./build-meadow.os_legacy-emulated.sh       # Build firmware
+./run.sh --legacy                          # Start emulator
+```
+
+The setup script checks for .NET SDK, ARM toolchain, GNU Make, the custom Renode fork, and all sibling repos. It installs anything missing (delegating to the Meadow repo's own `install-packages.sh` and `build-tools.sh` where possible) and clones/builds the Renode fork if needed.
+
 ## Prerequisites
+
+The `setup.sh` script handles all of this automatically. For manual setup:
 
 - **.NET SDK 8.0+** — `dotnet` must be on PATH (macOS: `brew install dotnet`)
 - **ARM toolchain** — `arm-none-eabi-gcc` (install via `brew install --cask gcc-arm-embedded`)
@@ -25,18 +37,22 @@ wilderness_labs/
 └── renode/                # WildernessLabs/renode fork (branch: meadow-emulator-fixes)
 ```
 
-### Building the Custom Renode Fork
+### Custom Renode Fork (required)
 
-The emulator requires the [WildernessLabs/renode](https://github.com/WildernessLabs/renode) fork which includes critical fixes for SVC/PRIMASK handling in the NVIC and STM32F4 RTC backup register support. Without these fixes, emulation is ~12,000x slower.
+The emulator requires the [WildernessLabs/renode](https://github.com/WildernessLabs/renode) fork which includes critical fixes for SVC/PRIMASK handling in the NVIC and STM32F4 RTC backup register support. **Without these fixes, emulation is ~12,000x slower** — the firmware won't boot fast enough for the CLI to connect.
+
+`./setup.sh` clones and builds this automatically. To do it manually:
 
 ```bash
 cd ../renode
 git checkout meadow-emulator-fixes
 git submodule update --init src/Infrastructure
 export PATH="/usr/local/share/dotnet:$PATH"
-bash build.sh --host-arch aarch64 --skip-fetch   # Apple Silicon
-# bash build.sh --skip-fetch                     # Intel / Linux
+bash build.sh --host-arch aarch64    # Apple Silicon
+# bash build.sh                      # Intel / Linux
 ```
+
+> **Note:** Stock Renode (from renode.io or `/Applications/Renode.app`) is missing these fixes. `run.sh` will use it as a fallback but the emulator will be effectively unusable.
 
 ## Project Structure
 
