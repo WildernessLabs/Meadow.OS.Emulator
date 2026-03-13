@@ -534,25 +534,89 @@ _cpu = _machine['sysbus.cpu']
 
 # Capture UART debug output
 # ESP-IDF uses ets_printf (ROM @ 0x40007d54) for boot messages.
-# ets_printf calls ets_vprintf which calls through a putc1 function pointer.
-# The per-character path through putc1 doesn't work reliably in emulation
-# (retw bug corrupts returns from ROM callx8), so we capture the format
-# string directly from ets_printf entry instead.
-def _ets_printf_hook():
+# After entry a1, 0x80: A2=fmt, A3-A7=first 5 variadic args.
+# We resolve format specifiers to produce readable output.
+def _read_cstr(addr, maxlen=128):
     R = _bus.ReadByte
-    a2 = _cpu.GetRegister(91).RawValue  # A2 = format string pointer
-    if a2 < 0x3F000000 or a2 >= 0x50000000:
-        return
+    if addr < 0x3F000000 or addr >= 0x50000000:
+        return ''
     chars = []
-    for i in range(200):
-        b = R(a2 + i)
+    for i in range(maxlen):
+        b = R(addr + i)
         if b == 0:
             break
-        chars.append(chr(b) if b >= 0x20 and b < 0x7F else '.')
-    fmt = ''.join(chars)
-    if fmt:
-        _cpu.Log(LogLevel.Warning, 'ETS_PRINTF> %s' % fmt)
+        if b >= 0x20 and b < 0x7F:
+            chars.append(chr(b))
+        elif b == 0x1B:
+            chars.append(chr(b))  # ESC for ANSI codes
+        elif b == 0x0A:
+            chars.append('\n')
+        else:
+            chars.append('.')
+    return ''.join(chars)
+
+def _ets_printf_hook():
+    fmt_addr = _cpu.GetRegister(91).RawValue  # A2 = format string
+    if fmt_addr < 0x3F000000 or fmt_addr >= 0x50000000:
+        return
+    fmt = _read_cstr(fmt_addr, 200)
+    if not fmt:
+        return
+    # Collect variadic args from A3-A7 (registers 92-96)
+    args = []
+    for reg in (92, 93, 94, 95, 96):
+        args.append(_cpu.GetRegister(reg).RawValue)
+    # Resolve format specifiers
+    result = []
+    ai = 0
+    i = 0
+    while i < len(fmt):
+        if fmt[i] == '%' and i + 1 < len(fmt):
+            i += 1
+            # Skip flags/width/precision
+            while i < len(fmt) and fmt[i] in '0123456789.-+ #l':
+                i += 1
+            if i >= len(fmt):
+                break
+            spec = fmt[i]
+            if ai < len(args):
+                v = args[ai]
+                ai += 1
+                if spec == 's':
+                    result.append(_read_cstr(v, 64))
+                elif spec == 'd' or spec == 'i':
+                    if v >= 0x80000000:
+                        v = v - 0x100000000
+                    result.append(str(v))
+                elif spec == 'u':
+                    result.append(str(v))
+                elif spec == 'x':
+                    result.append('%x' % v)
+                elif spec == 'X':
+                    result.append('%08X' % v)
+                elif spec == 'p':
+                    result.append('0x%x' % v)
+                elif spec == 'c':
+                    result.append(chr(v & 0x7F) if v >= 0x20 and v < 0x7F else '.')
+                elif spec == '%':
+                    result.append('%')
+                    ai -= 1  # %% doesn't consume an arg
+                else:
+                    result.append('%%%s' % spec)
+            else:
+                result.append('%%%s' % spec)
+        else:
+            result.append(fmt[i])
+        i += 1
+    msg = ''.join(result)
+    # Strip ANSI escape codes for cleaner output
+    import re
+    msg = re.sub(r'\x1B\[[0-9;]*m', '', msg)
+    msg = msg.strip()
+    if msg:
+        _cpu.Log(LogLevel.Warning, 'UART> %s' % msg)
 __builtin__._ets_printf_hook = _ets_printf_hook
+__builtin__._read_cstr = _read_cstr
 
 _ipc_demoted = [False]  # one-shot flag for IPC task demotion
 
@@ -631,35 +695,10 @@ __builtin__._dispatch_fixup = _dispatch_fixup
 """
 cpu AddHook 0x40091360 "_dispatch_fixup()"
 
-# Milestone hooks — track boot progress
-cpu AddHook 0x400d6590 "self.Log(LogLevel.Error, 'MILESTONE: app_main entered!')"
-cpu AddHook 0x4009262C "_ps=self.GetRegister(38).RawValue; self.Log(LogLevel.Error, 'MILESTONE: vTaskStartScheduler PS=0x%08x' % _ps)"
-cpu AddHook 0x401b0cd0 "self.Log(LogLevel.Error, 'MILESTONE: esp_event_loop_create_default')"
-cpu AddHook 0x40158644 "self.Log(LogLevel.Error, 'MILESTONE: uart_driver_install')"
-# app_main sub-function milestones
-cpu AddHook 0x400d76c0 "self.Log(LogLevel.Error, 'MILESTONE: Logging::Setup')"
-cpu AddHook 0x40094e14 "self.Log(LogLevel.Error, 'MILESTONE: esp_log_timestamp')"
-cpu AddHook 0x400d66f8 "self.Log(LogLevel.Error, 'MILESTONE: NvsManager::Setup')"
-cpu AddHook 0x400d93f8 "self.Log(LogLevel.Error, 'MILESTONE: SpiTransportProvider ctor')"
-cpu AddHook 0x400d91cc "self.Log(LogLevel.Error, 'MILESTONE: MessageDispatcher ctor')"
-# Diagnostic: RequestHandlerBase::Task entry — dump queue handle
-cpu AddHook 0x400d9298 "_rh_task_diag()"
-# Diagnostic: xQueueGenericReceive entry — dump queue handle
+# Fix: xQueueGenericReceive — initialize uninitialized Queue_t structs
 cpu AddHook 0x40091cb8 "_xqr_diag()"
-# Fix: validate lock handle in lock_acquire_generic.
-# Renode window-spill bug can corrupt _lock_t variables with random DRAM addresses,
-# making lock_acquire_generic think the mutex was already created. If the "queue handle"
-# points to uninitialized memory (all-zero lists), clear the lock to force re-creation.
+# Fix: validate lock handle in lock_acquire_generic — clear corrupt locks
 cpu AddHook 0x40082c14 "_lock_validate()"
-cpu AddHook 0x400d6b50 "self.Log(LogLevel.Error, 'MILESTONE: SendConfigAsInterrupt')"
-cpu AddHook 0x400933fc "self.Log(LogLevel.Error, 'MILESTONE: vTaskSuspend')"
-cpu AddHook 0x401357a8 "self.Log(LogLevel.Error, 'MILESTONE: esp_ipc_call')"
-cpu AddHook 0x401357d0 "self.Log(LogLevel.Error, 'MILESTONE: esp_ipc_call_blocking')"
-# uart_driver_install sub-function hooks
-cpu AddHook 0x40157fbc "self.Log(LogLevel.Error, 'UART: uart_param_config')"
-cpu AddHook 0x40157d20 "self.Log(LogLevel.Error, 'UART: uart_set_pin')"
-cpu AddHook 0x40157cb0 "self.Log(LogLevel.Error, 'UART: uart_isr_register')"
-cpu AddHook 0x400d5810 "self.Log(LogLevel.Error, 'UART: esp_intr_alloc')"
 # Set A10=0 (ESP_OK) after NOPed esp_intr_alloc call in uart_isr_register.
 # The callx8 at 0x40157d0f was replaced with movi a8,0; the next instruction
 # at 0x40157d12 is mov a2,a10, so A10 must contain the return value.
@@ -692,65 +731,6 @@ def _fix_retw():
     _cpu.SetRegister(1, _RV.Create(a0, 32))
 __builtin__._fix_retw = _fix_retw
 __builtin__._retw_fix_count = _retw_fix_count
-
-_vli_count = [0]
-def _vlist_insert_diag():
-    _vli_count[0] += 1
-    R = _bus.ReadDoubleWord
-    a2 = _cpu.GetRegister(91).RawValue  # A2 = list
-    a3 = _cpu.GetRegister(92).RawValue  # A3 = item
-    a0 = _cpu.GetRegister(89).RawValue
-    caller = (_cpu.GetRegister(0).RawValue & 0xC0000000) | (a0 & 0x3FFFFFFF)
-    cnt = R(a2)
-    pi = R(a2 + 4)
-    end_next = R(a2 + 12)
-    end_prev = R(a2 + 16)
-    # Check for corruption: pxIndex or xListEnd fields pointing to NULL or IRAM
-    bad = False
-    if pi == 0 or (pi >= 0x40000000 and pi < 0x40200000):
-        bad = True
-    if end_next == 0 or end_prev == 0:
-        bad = True
-    if bad or _vli_count[0] <= 5:
-        _cpu.Log(LogLevel.Error, 'VLIST_INSERT #%d caller=0x%08x list=0x%08x cnt=%d pxIdx=0x%08x end.next=0x%08x end.prev=0x%08x item=0x%08x' % (_vli_count[0], caller, a2, cnt, pi, end_next, end_prev, a3))
-        # Walk the list a few steps to see where NULL is
-        node = a2 + 8  # xListEnd
-        for i in range(min(cnt + 2, 6)):
-            n_next = R(node + 4)
-            n_prev = R(node + 8)
-            n_val = R(node)
-            _cpu.Log(LogLevel.Error, '  node[%d]=0x%08x val=0x%08x next=0x%08x prev=0x%08x' % (i, node, n_val, n_next, n_prev))
-            if n_next == 0 or n_next == node:
-                break
-            node = n_next
-__builtin__._vlist_insert_diag = _vlist_insert_diag
-
-_vli_init_count = [0]
-def _vlist_init_diag():
-    _vli_init_count[0] += 1
-    a2 = _cpu.GetRegister(91).RawValue  # A2 = list pointer
-    a0 = _cpu.GetRegister(89).RawValue
-    caller = (_cpu.GetRegister(0).RawValue & 0xC0000000) | (a0 & 0x3FFFFFFF)
-    # Log all vListInitialise calls after the first 100 (boot creates many lists)
-    # Focus on heap area (> 0x3ffd0000)
-    if a2 >= 0x3ffd0000:
-        _cpu.Log(LogLevel.Error, 'VLIST_INIT #%d list=0x%08x caller=0x%08x' % (_vli_init_count[0], a2, caller))
-__builtin__._vlist_init_diag = _vlist_init_diag
-
-def _rh_task_diag():
-    R = _bus.ReadDoubleWord
-    a2 = _cpu.GetRegister(91).RawValue  # A2 = pvParameter = handler this
-    queue = R(a2 + 4)  # this->field_4 = queue handle
-    _cpu.Log(LogLevel.Error, 'RH_TASK: this=0x%08x queue=0x%08x' % (a2, queue))
-    if queue != 0:
-        cnt = R(queue + 56)  # uxMessagesWaiting
-        length = R(queue + 60)  # uxLength
-        isize = R(queue + 64)  # uxItemSize
-        wts_cnt = R(queue + 16)  # xTasksWaitingToSend.uxNumberOfItems
-        wtr_cnt = R(queue + 36)  # xTasksWaitingToReceive.uxNumberOfItems
-        wtr_pi = R(queue + 40)  # xTasksWaitingToReceive.pxIndex
-        _cpu.Log(LogLevel.Error, '  Q: msgs=%d len=%d isize=%d wts_cnt=%d wtr_cnt=%d wtr_pi=0x%08x' % (cnt, length, isize, wts_cnt, wtr_cnt, wtr_pi))
-__builtin__._rh_task_diag = _rh_task_diag
 
 _xqr_count = [0]
 def _xqr_diag():
@@ -839,11 +819,6 @@ def _lock_validate():
 __builtin__._lock_validate = _lock_validate
 """
 cpu AddHook 0x40157d12 "_set_a10_zero()"
-
-# Diagnostic: dump vListInsert args (a2=list, a3=item) to find corrupt list
-cpu AddHook 0x400941d4 "_vlist_insert_diag()"
-# Diagnostic: track vListInitialise calls near the crash queue (0x3ffd2578)
-cpu AddHook 0x40094194 "_vlist_init_diag()"
 # Fix Renode retw bug globally: retw reads AR[0] instead of AR[WINDOWBASE*4].
 # _fix_retw() copies A0 (logical) to AR[0] (physical) before each retw executes.
 # Hook all 6845 retw addresses extracted from the ELF binary.
@@ -864,116 +839,11 @@ sysbus WriteByte 0x400d6644 0x11
 sysbus WriteByte 0x400d6645 0x10
 # Capture ets_printf format strings (ROM @ 0x40007d54, entry a1 0x80 is 3 bytes)
 cpu AddHook 0x40007d57 "_ets_printf_hook()"
-cpu AddHook 0x40155884 "self.Log(LogLevel.Error, 'UART: periph_module_enable')"
-cpu AddHook 0x40157bf4 "self.Log(LogLevel.Error, 'UART: uart_pattern_queue_reset')"
 # Exception vector hooks — detect crashes
 cpu AddHook 0x40080300 "self.Log(LogLevel.Error, 'KERNEL_EXC @40080300')"
 cpu AddHook 0x400803C0 "self.Log(LogLevel.Error, 'DOUBLE_EXC @400803C0')"
-# User exception vector monitoring — detect tight exception loops
-# Register indices: EPC1=51, EXCCAUSE=77, EXCVADDR=83, PS=38, EXCSAVE1=65
-python "exc_count = [0]"
-python """
-def _exc_monitor():
-    exc_count[0] += 1
-    c = exc_count[0]
-    epc1 = _cpu.GetRegister(51).RawValue
-    cause = _cpu.GetRegister(77).RawValue
-    # ROM retw recovery: when retw reads AR[0] instead of AR[WB*4], it jumps
-    # to address 0 or other junk. The correct return address is still in the
-    # register that WAS A0 in the pre-retw window. After WB decrement by CALLINC,
-    # that register is accessible as A8 (call8, CALLINC=2) or A4 (call4, CALLINC=1).
-    # Detect this: EPC1 is in low memory (< 0x3F000000) = not a valid code address.
-    # Recovery: set PC directly to the correct return address and restore PS from EPS1,
-    # effectively performing an rfe to skip the exception handler entirely.
-    pass
-    # Not a ROM retw crash — log normally
-    if c <= 5:
-        vaddr = _cpu.GetRegister(83).RawValue
-        ps = _cpu.GetRegister(38).RawValue
-        pc = _cpu.GetRegister(0).RawValue
-        _cpu.Log(LogLevel.Error, 'USER_EXC #%d PC=0x%08x EPC1=0x%08x CAUSE=%d VADDR=0x%08x PS=0x%08x' % (c, pc, epc1, cause, vaddr, ps))
-    elif c % 2000 == 0:
-        _cpu.Log(LogLevel.Error, 'USER_EXC #%d (still looping)' % c)
-__builtin__._exc_monitor = _exc_monitor
-__builtin__.exc_count = exc_count
-"""
-cpu AddHook 0x40080340 "_exc_monitor()"
-# Diagnostic: trace app_main after Logging::Setup returns
-python """
-def _trace_app_main_post_logging():
-    a8 = _cpu.GetRegister(97).RawValue
-    a2 = _cpu.GetRegister(91).RawValue
-    pc = _cpu.GetRegister(0).RawValue
-    _cpu.Log(LogLevel.Error, 'APP_MAIN post-Logging PC=0x%08x A2=0x%08x' % (pc, a2))
-__builtin__._trace_app_main_post_logging = _trace_app_main_post_logging
-"""
-cpu AddHook 0x400d6599 "_trace_app_main_post_logging()"
-# Trace callx8 target in app_main
-python """
-def _trace_app_main_callx8():
-    a8 = _cpu.GetRegister(97).RawValue
-    _cpu.Log(LogLevel.Error, 'APP_MAIN callx8 A8=0x%08x' % a8)
-__builtin__._trace_app_main_callx8 = _trace_app_main_callx8
-"""
-cpu AddHook 0x400d65ca "_trace_app_main_callx8()"
-# Diagnostic: log merge_adjacent retw to find bad return address
-python """
-def _trace_merge_retw():
-    a0 = _cpu.GetRegister(89).RawValue
-    pc = _cpu.GetRegister(0).RawValue
-    wb = _cpu.GetRegister(34).RawValue
-    ret_pc = (pc & 0xC0000000) | (a0 & 0x3FFFFFFF)
-    _cpu.Log(LogLevel.Error, 'MERGE_ADJ_RETW PC=0x%08x A0=0x%08x WB=%d ret=0x%08x' % (pc, a0, wb, ret_pc))
-__builtin__._trace_merge_retw = _trace_merge_retw
-"""
-cpu AddHook 0x400947f5 "_trace_merge_retw()"
-cpu AddHook 0x4009482c "_trace_merge_retw()"
-cpu AddHook 0x40094935 "_trace_merge_retw()"
-# Also log multi_heap_free entry to see what's going on
-cpu AddHook 0x40094938 "self.Log(LogLevel.Error, 'multi_heap_free entered')"
-# Task entry diagnostics
-# Tick timer diagnostics
-python """
-_sys_tick_count = [0]
-def _sys_tick_check():
-    _sys_tick_count[0] += 1
-    c = _sys_tick_count[0]
-    if c <= 5 or c % 100 == 0:
-        _cpu.Log(LogLevel.Error, 'SYS_TICK #%d' % c)
-__builtin__._sys_tick_check = _sys_tick_check
-__builtin__._sys_tick_count = _sys_tick_count
-"""
-cpu AddHook 0x40091094 "_sys_tick_check()"
 # Tick injection: CCOUNT doesn't increment in Renode's Xtensa, so CCOMPARE0
-# timer interrupt never fires. We inject ticks by calling xPortSysTickHandler
-# directly from the idle task loop every N iterations.
-# xPortSysTickHandler: call8 xTaskIncrementTick, if non-zero call8 _frxt_setup_switch
-# We can't call C functions from Python, but we CAN set the PC to xPortSysTickHandler
-# after saving/restoring state. However, this is fragile.
-# Simpler approach: trigger the CCOMPARE0 interrupt by poking INTERRUPT bit 6 via
-# the TlibSetIrqPendingBit mechanism through the HandleCompareReached path.
-# Simplest approach: use the innerTimers directly or just set INTERRUPT.
-# Tick injection via trampoline
-# Write tick trampoline at 0x4009F030 (boot trampoline at 0x4009F00C is done)
-# Counter at 0x4009F04C (literal pool), value at 0x4009F050
-#
-# Trampoline code:
-#   0x4009F030: entry a1, 32          ; 36 41 00
-#   0x4009F033: l32r  a8, [0x4009F04C] ; load counter addr => 81 06 00
-#               (literal at 0x4009F04C contains 0x4009F050)
-#   0x4009F036: l32i.n a9, a8, 0     ; 08 09
-#   0x4009F038: addi  a9, a9, -1     ; c0 29 ff
-#   0x4009F03B: s32i.n a9, a8, 0     ; 09 08
-#   0x4009F03D: bnez  a9, 0x4009F047 ; skip (offset +10=0x0A) => 69 0a (bnez.n encoding: target 0x47)
-#               Actually, bnez.n a9, +8 bytes ahead: skip target is 0x4009F047
-#               bnez.n: opcode = Rs[3:0] | imm[5:2]<<4 | 0b11001_x
-#               Better to use full bnez: 96 09 07 means bnez a9, +7... let me calculate
-#   Skip tick call if counter != 0, jump to call idle hook
-#   0x4009F03D: bnez a9, 0x4009F047  ; 16 a9 06 (bnez encoding)
-#               Actually bnez encoding: 16 reg imm8 => beqz/bnez... this is complex.
-#               Let me use a simpler approach.
-#
-# Actually, let me write the trampoline in assembly and use the toolchain:
+# timer interrupt never fires. Inject ticks via OnGPIO(6) from idle task loop.
 python """
 _idle_count = [0]
 _tick_interval = 50
@@ -981,19 +851,11 @@ def _idle_tick_direct():
     _idle_count[0] += 1
     c = _idle_count[0]
     if c % _tick_interval == 0:
-        # Instead of hardware interrupt, directly manipulate xTickCount and
-        # call _frxt_setup_switch. This avoids the interrupt/EXCM mess.
-        # xTickCount is at the address stored in the literal at 0x40092884
-        # Actually, let me just set PC to xPortSysTickHandler but fix PS first.
-        # Save current PS, clear EXCM, set INTLEVEL=0
         ps = _cpu.GetRegister(38).RawValue
-        # Make sure EXCM is clear and INTLEVEL is 0
         new_ps = (ps & ~0x1F) | 0x20  # clear INTLEVEL, clear EXCM, set UM
         _cpu.SetRegister(38, _RV.Create(int(new_ps), 32))
-        # Trigger the interrupt
         _cpu.OnGPIO(6, True)
         _cpu.OnGPIO(6, False)
-        # Restore PS after one instruction (the interrupt handler will save it)
         if c <= 1000 or c % 10000 == 0:
             _cpu.Log(LogLevel.Error, 'TICK_INJECT #%d PS was 0x%08x now 0x%08x' % (c // _tick_interval, ps, new_ps))
 __builtin__._idle_tick_direct = _idle_tick_direct
@@ -1001,9 +863,6 @@ __builtin__._idle_count = _idle_count
 __builtin__._tick_interval = _tick_interval
 """
 cpu AddHook 0x400920fe "_idle_tick_direct()"
-cpu AddHook 0x400D506C "self.Log(LogLevel.Error, 'MAIN_TASK entered')"
-# General exception path (not 1, 4, 5, or >=32) — detect unexpected exceptions
-cpu AddHook 0x40082782 "self.Log(LogLevel.Error, 'EXC: General handler (EXCCAUSE=0/2/3/6-31)')"
 # abort() hook — detect assertion failures and panics
 python """
 def _abort_trace():
@@ -1015,10 +874,6 @@ def _abort_trace():
 __builtin__._abort_trace = _abort_trace
 """
 cpu AddHook 0x40097bec "_abort_trace()"
-# configASSERT hooks — detect exactly which break fires
-cpu AddHook 0x40090883 "self.Log(LogLevel.Error, 'BREAK: panic_abort')"
-cpu AddHook 0x40094c59 "self.Log(LogLevel.Error, 'BREAK: multi_heap_realloc assert')"
-cpu AddHook 0x4011a6e8 "self.Log(LogLevel.Error, 'BREAK: bta_gattc assert')"
 # xQueueGenericReceive pre-scheduler fix: after call8 xTaskGetSchedulerState returns at
 # 0x40091cf8, a10 has the scheduler state. The beqz.n only branches on 0 (SUSPENDED).
 # With state 1 (NOT_STARTED), code falls through to the normal blocking path which
@@ -1037,10 +892,5 @@ def _queue_recv_sched_check():
 __builtin__._queue_recv_sched_check = _queue_recv_sched_check
 """
 cpu AddHook 0x40091cf8 "_queue_recv_sched_check()"
-# Boot sequence milestones
-cpu AddHook 0x40081b07 "self.Log(LogLevel.Error, 'vTaskStartScheduler called')"
-cpu AddHook 0x4009244c "self.Log(LogLevel.Error, 'xTaskCreatePinnedToCore called')"
-cpu AddHook 0x4009262c "self.Log(LogLevel.Error, 'vTaskStartScheduler entry')"
-cpu AddHook 0x40081d7f "self.Log(LogLevel.Error, 'call_start_cpu0: call8 start_cpu0_default')"
 
 log "ESP32 Meadow boot ready (ROM + firmware loaded). Use 'start' to run."
