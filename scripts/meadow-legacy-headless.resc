@@ -83,123 +83,10 @@ connector Connect sysbus.uart5 esp32ctrl
 
 
 # =============================================================================
-# IronPython hooks
-# Addresses extracted from: arm-none-eabi-nm build/legacy/nuttx.elf
+# Hook addresses (auto-generated) and hook definitions (shared)
 # =============================================================================
-
-# FIXED IN RENODE: SVC with PRIMASK=1 now handled correctly in NVIC.cs.
-# Previously Renode skipped SVC when PRIMASK was set; the fix lets SVCall through
-# (matching real ARM behavior where SVC is a synchronous exception).
-# The SvcPrimaskFix.cs hook is no longer needed — removing it eliminates hook overhead
-# on every syscall, which is critical for Mono performance (thousands of syscalls/sec).
-
-# Workaround: Force GPIO board version to F7FeatherV2 (2).
-# Hook meadow_hw_version_find_device_ver (0x08141970) at entry.
-# Write initialized=1 and version=2 to hw_version struct at 0x20020ce4.
-# Values: 1=F7FeatherV1, 2=F7FeatherV2, 3=F7CoreComputeV2
-set gpio_ver_fix "machine.SystemBus.WriteByte(0x20020e74, 1); machine.SystemBus.WriteDoubleWord(0x20020e78, 2); cpu.PC = cpu.LR"
-cpu AddHook 0x08141970 $gpio_ver_fix
-
-# Workaround: Renode's STM32H7_QuadSPI doesn't set TCF in SR.
-# qspi_waitstatusflags.constprop.0 = 0x081615fe
-# qspi_waitstatusflags.part.0 = 0x08161510
-set qspi_wait_skip "cpu.PC = cpu.LR"
-cpu AddHook 0x081615fe $qspi_wait_skip
-cpu AddHook 0x08161510 $qspi_wait_skip
-
-# Workaround: QUADSPI doesn't drive DMA requests — bypass qspi_memory with direct memcpy.
-# qspi_memory = 0x0816160a (entry point of qspi_memory function)
-# Uses compiled C# hook (QspiDmaBypass.cs) instead of IronPython for 10-100x speedup.
-# Critical for Mono JIT which makes millions of QSPI reads during assembly loading.
-cpu InstallQspiBypass 0x0816160a 0x90000000
-
-# Workaround: Mono runtime binary is pre-loaded into SDRAM via LoadBinary, but the firmware
-# tries to copy it from QSPI flash (which is empty). Bypass the copy function to return 0 (success).
-# hcom_via_nx_copy_mono_runtime_to_ram = 0x0805eb98
-set mono_copy_bypass "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
-cpu AddHook 0x0805eb98 $mono_copy_bypass
-
-# Workaround: Mono version check reads from QSPI flash MTD device (not memory-mapped).
-# The MTD read goes through SPI commands to the GenericSpiFlash model, which may not see
-# our LoadBinary data. We need TWO hooks:
-# 1. Skip hcom_nx_config_refresh_mono_version (which tries to read QSPI MTD and fails)
-# 2. After OS version is populated (hcom_nx_config_init+0xee = 0x08143762), copy OS version
-#    to mono version fields so the version match check passes.
-# Config struct layout (R4 = config pointer):
-#   +0x30..0x3C = firmware version numbers (major, minor, revision, build)
-#   +0x40..0x57 = firmware date/hash/strings
-#   +0x54       = firmware short version string pointer
-#   +0x58       = firmware long version string pointer
-#   +0x5C..0x68 = mono version numbers (must match firmware)
-#   +0x80       = mono short version string pointer (must be non-NULL)
-#   +0x84       = mono long version string pointer
-# Hook 1: Skip refresh_mono_version entirely (return immediately)
-set mono_ver_skip "cpu.PC = cpu.LR"
-cpu AddHook 0x08143590 $mono_ver_skip
-# Hook 2: After OS version is fully populated, copy to mono version
-# Fires at hcom_nx_config_init after get_long_version_string stores to [r4, #0x58]
-# R4 = config pointer at this point
-set mono_ver_copy "r4 = cpu.GetRegisterUnsafe(4).RawValue; fw30 = machine.SystemBus.ReadDoubleWord(r4 + 0x30); fw34 = machine.SystemBus.ReadDoubleWord(r4 + 0x34); fw38 = machine.SystemBus.ReadDoubleWord(r4 + 0x38); fw3c = machine.SystemBus.ReadDoubleWord(r4 + 0x3c); machine.SystemBus.WriteDoubleWord(r4 + 0x5c, fw30); machine.SystemBus.WriteDoubleWord(r4 + 0x60, fw34); machine.SystemBus.WriteDoubleWord(r4 + 0x64, fw38); machine.SystemBus.WriteDoubleWord(r4 + 0x68, fw3c); fwstr = machine.SystemBus.ReadDoubleWord(r4 + 0x54); fwlstr = machine.SystemBus.ReadDoubleWord(r4 + 0x58); machine.SystemBus.WriteDoubleWord(r4 + 0x80, fwstr); machine.SystemBus.WriteDoubleWord(r4 + 0x84, fwlstr)"
-cpu AddHook 0x08143762 $mono_ver_copy
-
-# Note: hcom_mono_ctrl_is_mono_enabled (0x080618e6) checks BBR bit 0x800.
-# With BBR defaulting to 0, it naturally returns 1 (enabled) — no bypass needed.
-
-# Workaround: hcom_mono_ctrl_start_mono_main checks config+0x80 (mono version string).
-# The deep_copy_config doesn't copy our bypass-written value, so patch it directly.
-# Hook at 0x08061852 (after deep_copy_config returns non-NULL in R0/R4):
-# If config+0x80 is NULL, copy config+0x54 (firmware version string) to config+0x80.
-set mono_str_fix "r0 = cpu.GetRegisterUnsafe(0).RawValue; monostr = machine.SystemBus.ReadDoubleWord(r0 + 0x80); fwstr = machine.SystemBus.ReadDoubleWord(r0 + 0x54); [machine.SystemBus.WriteDoubleWord(r0 + 0x80, fwstr), machine.SystemBus.WriteDoubleWord(r0 + 0x84, fwstr)] if monostr == 0 else None"
-cpu AddHook 0x080618e8 $mono_str_fix
-
-# Workaround: start_mono_main scans for .NET assembly DLLs on the filesystem.
-# When no assemblies are deployed, the scan correctly finds missing files (r4 != 0)
-# and Mono does NOT start — leaving the OS in HCOM-ready state for app deployment.
-# Only enable this bypass if you want Mono to start without deployed assemblies.
-# hcom_mono_ctrl_start_mono_main+0x17c = 0x08061a1c (after scan loop, cmp r4, #0)
-# set asm_scan_bypass "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(4, RegisterValue.Create(0, 32))"
-# cpu AddHook 0x08061a1c $asm_scan_bypass
-
-# Workaround: STM32SPI doesn't drive DMA — bypass espcp_send_data_over_spi with direct
-# peripheral calls. Reads TX buffer from memory, feeds each byte through EspcpStub.Transmit(),
-# writes returned bytes to RX buffer, then calls FinishTransmission() to trigger message handling.
-# espcp_send_data_over_spi(void *tx, void *rx, size_t length) = 0x081480cc
-# R0 = tx buffer (0 for receive-only), R1 = rx buffer (0 for send-only), R2 = buffer length
-set espcp_spi_bypass "from System import Array, Byte; stub = [p.Peripheral for p in machine.GetRegisteredPeripherals() if type(p.Peripheral).__name__ == 'EspcpStub'][0]; tx = cpu.GetRegisterUnsafe(0).RawValue; rx = cpu.GetRegisterUnsafe(1).RawValue; length = int(cpu.GetRegisterUnsafe(2).RawValue); txdata = machine.SystemBus.ReadBytes(tx, length) if tx else Array.CreateInstance(Byte, length); rxarr = Array.CreateInstance(Byte, length); [rxarr.__setitem__(i, stub.Transmit(txdata[i])) for i in range(length)]; stub.FinishTransmission(); machine.SystemBus.WriteBytes(rxarr, rx) if rx else None; cpu.PC = cpu.LR"
-cpu AddHook 0x081480cc $espcp_spi_bypass
-
-# Workaround: Force ESPCP initialization by setting selected network type to WiFi (1).
-# hcom_nx_setup_mgr gates espcp_late_init on config[8] & 0xFF — if 0, ESPCP is skipped.
-# At 0x08141d4e (ands.w r0, r5, #255), R5 holds config[8]. Force R5=1 so branch is not taken.
-set espcp_force_init "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(5, RegisterValue.Create(1, 32))"
-cpu AddHook 0x08141d50 $espcp_force_init
-
-# Workaround: ESPCP SPI lock semaphore starts at 0 — first espcp_spi_interface_lock blocks.
-# Since we bypass real SPI with the DMA bypass hook, skip the lock/unlock entirely.
-set spi_lock_skip "cpu.PC = cpu.LR"
-cpu AddHook 0x08148144 $spi_lock_skip
-cpu AddHook 0x08148150 $spi_lock_skip
-
-# Workaround: LSI clock calibration thread polls Timer 5 capture/compare which
-# Renode doesn't emulate. Skip the thread function to avoid burning CPU.
-# pwrmgmt_lsi_calc_prep_thread_func = 0x0814d2c0
-set lsi_skip "cpu.PC = cpu.LR"
-cpu AddHook 0x0814d2c0 $lsi_skip
-
-# BBR: STM32F4_RTC.cs patched to extend BackupEnd from 0x9C to 0xCC (32 registers).
-# Firmware reads/writes 0x400028CC (BKP31R) natively via the RTC model.
-# softResettable: false ensures BBR values persist across resets.
-# No hooks needed — both kernel functions and ioctl handlers hit the real register.
-
-# Post-boot ESPCP polling via mq_receive intercept.
-# Uses compiled C# hook (MqReceiveIntercept.cs) instead of IronPython for performance.
-# Fires on ALL mq_receive calls system-wide; must be fast.
-cpu InstallMqIntercept 0x08157318 0x0814e033 0x2007C010 0x2007FFF0
-
-# ESPCP post-boot polling disabled during Mono init to avoid CPU starvation.
-# Enable later via: sysbus WriteByte 0x2007FFF0 1
-# set espcp_poll_enable "machine.SystemBus.WriteByte(0x2007FFF0, 1)"
-# cpu AddHook 0x0814deda $espcp_poll_enable
+include @build/legacy/addresses.resc
+include @scripts/meadow-legacy-hooks.resc
 
 # Workaround: Mono was built with --prefix=/usr/local (default), so its compiled-in lib
 # directory is "/usr/local/lib" and it looks for BCL at /usr/local/lib/mono/4.5/.
@@ -215,32 +102,6 @@ sysbus WriteByte 0xC0169703 0x00
 sysbus WriteDoubleWord 0xC0171A94 0x61656D2F
 sysbus WriteDoubleWord 0xC0171A98 0x30776F64
 sysbus WriteDoubleWord 0xC0171A9C 0x00000000
-
-# LFS format skip — only needed when using a pre-populated littlefs.bin image.
-# Without it, firmware formats fresh LFS on empty flash (needed for CLI deploy workflow).
-# Uncomment if loading littlefs.bin above:
-# set lfs_format_skip "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
-# cpu AddHook 0x081714ae $lfs_format_skip
-
-# Workaround: Syslog semaphore leak in hcom_logging_syslog.
-# When malloc fails inside hcom_diag_logging_build_syslog_string, the function returns
-# -ENOMEM and hcom_logging_syslog returns WITHOUT posting _f7syslogSem (at 0x20046164).
-# This permanently deadlocks all subsequent syslog calls (including from Mono threads).
-# In the emulator, malloc failures are more likely due to Mono's constrained GC heap.
-# Fix: skip hcom_logging_syslog entirely — Mono's managed logging uses meadow.log file,
-# not the firmware syslog path. Boot-time kernel syslog() calls are unaffected.
-# hcom_logging_syslog = 0x0805cf78
-set syslog_skip "cpu.PC = cpu.LR"
-cpu AddHook 0x0805cf78 $syslog_skip
-
-# Workaround: Download watchdog SIGALRM handler fires too early in emulator.
-# Renode's virtual time advances faster than wall time, so the 3-second POSIX timer
-# expires before TCP data from the CLI arrives. The handler at 0x0805f9c4 just sets
-# a flag (_hcom_host_process_wdog_timedout at 0x200461a0) to true.
-# Skip it entirely so file downloads aren't aborted.
-# hcom_host_watchdog_timeout_expired = 0x0805f9c4
-set wdog_skip "cpu.PC = cpu.LR"
-cpu AddHook 0x0805f9c4 $wdog_skip
 
 
 start

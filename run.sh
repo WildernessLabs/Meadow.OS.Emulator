@@ -92,12 +92,24 @@ if [ ! -f "$SCRIPT_DIR/$SCRIPT" ]; then
     exit 1
 fi
 
-# Check for built binary
+# Check for built binary and generated hook addresses
 if [ "$LEGACY" = true ]; then
     if [ ! -f "$SCRIPT_DIR/build/legacy/nuttx.bin" ]; then
         echo "ERROR: nuttx.bin not found in build/legacy/"
         echo "       Run ./build-meadow.os_legacy-emulated.sh first"
         exit 1
+    fi
+    # Check hook addresses are generated and not stale
+    ADDR_FILE="$SCRIPT_DIR/build/legacy/addresses.resc"
+    ELF_FILE="$SCRIPT_DIR/build/legacy/nuttx.elf"
+    if [ ! -f "$ADDR_FILE" ]; then
+        echo "WARNING: Hook addresses not generated. Extracting now..."
+        python3 "$SCRIPT_DIR/tools/extract-hook-addresses.py" \
+            "$SCRIPT_DIR/build/legacy/nuttx.elf" "$SCRIPT_DIR/build/legacy/nuttx_user.elf"
+    elif [ -f "$ELF_FILE" ] && [ "$ELF_FILE" -nt "$ADDR_FILE" ]; then
+        echo "WARNING: ELF is newer than addresses.resc — regenerating hook addresses..."
+        python3 "$SCRIPT_DIR/tools/extract-hook-addresses.py" \
+            "$SCRIPT_DIR/build/legacy/nuttx.elf" "$SCRIPT_DIR/build/legacy/nuttx_user.elf"
     fi
 else
     if [ ! -f "$SCRIPT_DIR/build/nuttx.bin" ]; then

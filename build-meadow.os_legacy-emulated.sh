@@ -287,5 +287,10 @@ cp "$NUTTX_DIR/nuttx.elf" "$BUILD_DIR/nuttx.elf"
 cp "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_user.elf"
 echo "--- Copied ELFs for debugging"
 
+# 6. Extract hook addresses from ELF files for Renode .resc scripts
+echo "--- Extracting hook addresses for Renode ---"
+python3 "$SCRIPT_DIR/tools/extract-hook-addresses.py" \
+    "$BUILD_DIR/nuttx.elf" "$BUILD_DIR/nuttx_user.elf"
+
 echo "=== Legacy build complete ==="
 ls -lh "$BUILD_DIR/"
