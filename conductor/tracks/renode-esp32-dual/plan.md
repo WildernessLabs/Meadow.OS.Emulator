@@ -1,7 +1,7 @@
 # Plan: Dual-Machine ESP32 Emulation
 
 ## Track ID: `renode-esp32-dual`
-## Status: `in-progress` (Phase 1 ✅, Phase 2.1 ✅ design, Phase 2.2 in-progress — SpiBridge C# done, ESP32 ctor skip confirmed)
+## Status: `in-progress` (Phase 1 ✅, retw source fix ✅, SPI ctor works ✅, Phase 2.2 in-progress — WiFi stubs needed)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -237,15 +237,26 @@
 - [x] **Complete peripheral map — zero unmapped access warnings**: Added I2S0 (0x3FF4F000) and
   I2S1 (0x3FF68000) stub memory regions. All hardware accesses during boot are now covered.
   Previous: 1 warning for I2S0 access at 0x3FF4F0AC. Now: zero "non existing peripheral" warnings.
-- [ ] **Renode retw source fix** (deferred — low priority, hooks work):
-  Analysis of tlib source reveals retw implementation uses `env->regs[0]` (logical register)
-  which should be correct. The _fix_retw hook works by copying A0 (logical, `cpu->regs[0]`)
-  to AR0 (physical, `cpu->phys_regs[0]`), suggesting the issue may be in how physical
-  registers are synced during window rotation or underflow handling, not in retw itself.
-  Key files: `win_helper.c` (HELPER(retw)/test_ill_retw/test_underflow_retw),
-  `translate.c` (translate_retw), `cpu_registers.c` (A0→regs[0], AR0→phys_regs[0]).
-  The 6845-hook approach works but adds ~40s startup time. A tlib source fix would
-  eliminate this overhead entirely.
+- [x] **Renode retw source fix — ROOT CAUSE FOUND AND FIXED**:
+  The bug was in `translate_retw()` in `tlib/arch/xtensa/translate.c`. The function used
+  `tcg_const_i32(1)` to create a non-local TCG temporary for the return address, then used
+  it AFTER a `gen_helper_retw()` call. In Renode's older TCG (forked from QEMU), non-local
+  temps are NOT preserved across helper calls — the register allocator can reuse the native
+  register, causing `gen_jump(dc, tmp)` to jump to a garbage address.
+  - **Root cause**: QEMU modernized their TCG to make all temps preserved across calls
+    (removing the local/non-local distinction). Renode's tlib still uses the old TCG where
+    the distinction matters. The translate_retw code was ported without adjustment.
+  - **Fix**: One line — `tcg_const_i32(1)` → `tcg_temp_local_new_i32()` + `tcg_gen_movi_i32(tmp, 1)`
+  - **Impact**: Eliminates ALL 6845 retw hooks, ~40s startup delay, and the `_fix_retw()` Python
+    function. Boot is instant. The previous `_fix_retw` hook worked not because of the
+    phys_regs[0] write (which was irrelevant for WB != 0), but because Python hooks act as
+    TB execution barriers that changed register allocation behavior.
+  - **SPI ctor now works**: With retw fixed, the SpiTransportProvider constructor runs
+    successfully — all ROM function calls (gpio_*, spi_slave_initialize, memset) return
+    properly. The SPI task and sync task are created. No more DOUBLE_EXC.
+  - **Boot reaches WiFi init**: Firmware now executes through SPI ctor → MessageDispatcher →
+    WiFiRequestHandler::Setup() → esp_wifi_init → hits unmapped WiFi registers → esp_restart.
+    This is a Phase 3 problem (WiFi stubs), not a retw problem.
 
 ### Key FreeRTOS Addresses (ESP-IDF 4.2.4 dual-core)
 - xTickCount: 0x3FFC92F0
@@ -272,28 +283,28 @@
 │ Machine: stm32          │                    │ Machine: esp32          │
 │                         │                    │                         │
 │  NuttX ESPCP driver     │                    │  ESP-IDF firmware       │
-│     │                   │                    │  (SPI ctor skipped)     │
-│  espcp_send_data_over_  │                    │                         │
-│  spi (bypassed via hook)│                    │  ESP32-side ESPCP       │
-│     │                   │                    │  handler (TBD: Python   │
-│  SpiBridge (ISPIPeripheral)  ──── frames ────►  or C# peripheral)     │
-│  on SPI2                │◄── frames ─────────                         │
-│     │                   │                    │                         │
-│  Ready ── ── ── ── ── ──│── ── ── ── ── ── ──  (managed by SpiBridge) │
-│  MsgWaiting ── ── ── ── │── ── ── ── ── ── ──  (managed by SpiBridge) │
+│     │                   │                    │  SpiTransportProvider   │
+│  espcp_send_data_over_  │                    │     │ (real ctor runs)  │
+│  spi (bypassed via hook)│                    │  ProcessMessages loop   │
+│     │                   │                    │     │                   │
+│  SpiBridge (ISPIPeripheral)  ──── frames ────►  spi_slave_queue_trans  │
+│  on SPI2                │◄── frames ─────────  spi_slave_get_trans_   │
+│     │                   │                    │  result (stubbed)       │
+│  Ready ── ── ── ── ── ──│── ── ── ── ── ── ──  GPIO0 (Ready)         │
+│  MsgWaiting ── ── ── ── │── ── ── ── ── ── ──  GPIO3 (MsgWaiting)    │
 └─────────────────────────┘                    └─────────────────────────┘
 ```
 
 **Design decisions:**
 - SpiBridge is a C# peripheral on STM32 SPI2, replacing EspcpStub
-- ESP32 firmware's SPI ctor is fully skipped — the ctor's deep call chain triggers Renode
-  window overflow/underflow bugs with corrupted stack pointers (DOUBLE_EXC). Since the firmware's
-  SPI slave driver can't run, SpiBridge handles ALL SPI communication at the peripheral level.
+- ~~ESP32 firmware's SPI ctor is fully skipped~~ **SPI ctor now runs successfully** after the
+  tlib retw source fix. The SPI task and sync task are created by FreeRTOS. The firmware's
+  ProcessMessages state machine is live and ready to process frames.
 - Frame-level forwarding (not byte-level) — the bridge captures complete ESPCP frames and passes them as byte arrays
 - SpiBridge exposes public methods (`DequeueFrameFromStm32`, `EnqueueFrameToStm32`) for the ESP32 side
 - GPIO signals (Ready, MessageWaiting) managed by SpiBridge directly
-- ESP32-side ESPCP message handling will need to be implemented in Python or C# rather than
-  running the firmware's ProcessMessages state machine (which requires the SPI task)
+- ESP32-side: the firmware's SPI task calls `spi_slave_queue_trans` / `spi_slave_get_trans_result`
+  which need to be stubbed to feed frames from SpiBridge instead of real SPI hardware
 
 ### 2.1 — Design SPI Bridge
 - [x] Architecture: SpiBridge (C#) on STM32 SPI2 + Python hooks on ESP32 SPI slave driver
@@ -304,14 +315,15 @@
 
 ### 2.2 — Implement and Test Bridge
 - [x] Create `peripherals/SpiBridge.cs` with ISPIPeripheral + cross-machine frame queues
-- [x] SpiTransportProvider ctor: confirmed must be fully skipped (window spill corruption).
-  Attempted partial un-skip but `or a1,a1,a1` NOP corrupts A1, ROM memset crashes, and
-  deep call chains corrupt stack. SpiBridge handles SPI at peripheral level.
+- [x] ~~SpiTransportProvider ctor: confirmed must be fully skipped~~ **RESOLVED by tlib retw fix**.
+  SPI ctor now runs successfully. All ROM calls (gpio_*, spi_slave_initialize, memset) return
+  properly. SPI task + sync task created via xTaskCreate.
 - [x] Cleaned up boot script: removed SPI driver stubs, xTaskNotifyWait patch, and Python
   frame inject/capture hooks (all were for firmware SPI task that no longer runs)
+- [ ] Stub WiFi init to prevent esp_restart (blocks boot before SPI task runs)
+- [ ] Stub `spi_slave_queue_trans` / `spi_slave_get_trans_result` to feed frames from SpiBridge
 - [ ] Wire SpiBridge into STM32 platform (replace EspcpStub on SPI2)
-- [ ] Implement ESP32-side ESPCP message handler (Python or C# — processes frames from SpiBridge)
-- [ ] Test: STM32 sends GetConfiguration → handler processes → response returns via SpiBridge
+- [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns via SpiBridge
 - [ ] Test: ESP32 queues event → STM32 polls via SendResponse → event delivered
 - [ ] Verify frame integrity (CRC checks pass on both sides)
 
@@ -438,6 +450,9 @@
 | 2026-03-12 | **SpiTransportProvider ctor must be fully skipped** | Attempted partial un-skip (skip GPIO init, keep buffer alloc + task creation). Three blocking issues: (1) `or a1,a1,a1` NOP corrupts SP, (2) ClearTransmitAndReceiveBuffers calls ROM memset (retw crash), (3) deep call chain corrupts stack during window overflow → DOUBLE_EXC on ctor retw. Full skip (entry+3 → j retw.n) is the only viable approach. SpiBridge handles SPI at peripheral level. |
 | 2026-03-12 | **IPC demotion now runs every dispatch** | Changed from one-shot to per-dispatch to catch the SPI task (created after initial demotion). Returns immediately when no pri-24 tasks exist (checks count first). Moot now that SPI task doesn't run, but correct for any future pri-24 tasks. |
 | 2026-03-12 | **tlib patches pushed to bryancostanich/renode** | 5 patches on branch `fix/xtensa-esp32-patches`: arch_tlb_fill, WAITI, CCOUNT, clock_freq_khz, win_helper assert→logging. Pushed via SSH to `git@github.com:bryancostanich/renode.git`. Old patched build was recovered from Trash after accidental deletion. |
+| 2026-03-13 | **RETW SOURCE FIX — TCG temp corruption** | `translate_retw()` in `translate.c` used `tcg_const_i32(1)` (non-local temp) for the return address, then read it after `gen_helper_retw()`. In Renode's older TCG, non-local temps are NOT preserved across helper calls. QEMU modernized their TCG to preserve all temps; Renode's fork didn't. Fix: `tcg_temp_local_new_i32()`. This one-line change eliminates 6845 retw hooks, ~40s startup, and unblocks the SPI ctor. |
+| 2026-03-13 | **SPI ctor no longer needs skip** | With the retw fix, all ROM function calls in the SpiTransportProvider constructor (gpio_set_pull_mode, gpio_config, spi_slave_initialize, heap_caps_calloc, memset, xTaskCreate) return properly. The SPI task and sync task are created. ProcessMessages state machine is live. |
+| 2026-03-13 | **Boot now reaches WiFi init** | With retw fix + SPI ctor un-skipped, firmware boots through: ROM → heap → FreeRTOS → app_main → SPI ctor → MessageDispatcher → WiFiRequestHandler::Setup() → esp_wifi_init → hits unmapped WiFi regs at 0x3FF71xxx → esp_restart_noos. Next: stub WiFi init. |
 
 ## Changes Log
 
@@ -478,3 +493,5 @@
 | 2026-03-12 | `peripherals/SpiBridge.cs` | Created SPI bridge peripheral: ISPIPeripheral + IGPIOReceiver, cross-machine frame queues (toEsp32Queue/toStm32Queue), Ready/MessageWaiting GPIO outputs, public API for ESP32 side (DequeueFrameFromStm32, EnqueueFrameToStm32, SetReady, SetMessageWaiting). |
 | 2026-03-12 | `scripts/esp32-meadow-boot.resc` | Phase 2 SPI changes: (1) Reverted to full SpiTransportProvider ctor skip (partial un-skip failed due to tlib bugs). (2) Removed SPI driver stubs, xTaskNotifyWait patch, Python frame inject/capture hooks — all for firmware SPI task that no longer runs. (3) IPC demotion now runs every dispatch (not one-shot). (4) Fixed DOUBLE_EXC diagnostic hook (RegisterValue → GetRegisterUnsafe). (5) Discovered `or a1,a1,a1` NOP corrupts A1 in Renode — use proper `nop` (00 20 f0). |
 | 2026-03-12 | `bryancostanich/renode` branch `fix/xtensa-esp32-patches` | Pushed 5 tlib patches to GitHub fork. Submodule chain: tlib commit → Infrastructure commit → renode commit. All patches preserved from recovered build. |
+| 2026-03-13 | tlib `arch/xtensa/translate.c` | **RETW source fix**: Changed `tcg_const_i32(1)` → `tcg_temp_local_new_i32()` + `tcg_gen_movi_i32(tmp, 1)` in `translate_retw()`. Non-local TCG temp was invalidated across `gen_helper_retw()` call, causing `gen_jump()` to use garbage return address. This is the 6th tlib patch (after arch_tlb_fill, WAITI, CCOUNT, clock_freq, win_helper). |
+| 2026-03-13 | `scripts/esp32-meadow-boot-no-retw-hooks.resc` | Test script: copy of esp32-meadow-boot.resc with retw hooks removed (`_fix_retw` function, `include @scripts/retw_hooks.resc`) and SPI ctor skip removed. Validates tlib source fix. |
