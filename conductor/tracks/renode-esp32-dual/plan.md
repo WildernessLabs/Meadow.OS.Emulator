@@ -315,12 +315,22 @@
 
 ### 2.2 — Implement and Test Bridge
 - [x] Create `peripherals/SpiBridge.cs` with ISPIPeripheral + cross-machine frame queues
-- [x] ~~SpiTransportProvider ctor: confirmed must be fully skipped~~ **RESOLVED by tlib retw fix**.
-  SPI ctor now runs successfully. All ROM calls (gpio_*, spi_slave_initialize, memset) return
-  properly. SPI task + sync task created via xTaskCreate.
+- [x] ~~SpiTransportProvider ctor: confirmed must be fully skipped~~ **PARTIALLY RESOLVED by tlib
+  retw fix**. Retw no longer crashes ROM function returns. However, the SPI ctor still aborts
+  during execution — one of the `callx8` targets inside the ctor body (likely gpio_set_pull_mode,
+  gpio_config, or spi_slave_initialize) triggers abort(). The singleton check passes (first-time
+  init), entry works, but a ROM/driver call fails. Needs further tracing.
 - [x] Cleaned up boot script: removed SPI driver stubs, xTaskNotifyWait patch, and Python
   frame inject/capture hooks (all were for firmware SPI task that no longer runs)
-- [ ] Stub WiFi init to prevent esp_restart (blocks boot before SPI task runs)
+- [x] Added peripheral stubs: APLL registers (0x3FF66000) for RTC clock init, WiFi BB registers
+  (0x3FF71000) for WiFi baseband. These absorb hardware accesses without crashing.
+- [x] Added watchdog skips: esp_task_wdt_init (return ESP_OK), esp_task_wdt_add (return ESP_OK),
+  esp_int_wdt_init (return immediately). Without real timer hardware, watchdog timeouts cause
+  esp_restart. Note: `esp_task_wdt_init` must return 0 in A2 or ESP_ERROR_CHECK aborts.
+- [x] Fixed j instruction encoding: correct formula is `byte0 = ((offset & 0x3) << 6) | 0x06`,
+  `byte1 = (offset >> 2) & 0xFF`, `byte2 = (offset >> 10) & 0xFF`. Previous formula had
+  offset bits in wrong positions causing ILLEGAL_INSTRUCTION at patched addresses.
+- [ ] Debug SPI ctor abort — trace which callx8 inside the ctor body triggers abort()
 - [ ] Stub `spi_slave_queue_trans` / `spi_slave_get_trans_result` to feed frames from SpiBridge
 - [ ] Wire SpiBridge into STM32 platform (replace EspcpStub on SPI2)
 - [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns via SpiBridge
@@ -332,17 +342,27 @@
 **Goal:** Stub hardware that ESP-IDF requires but Renode can't emulate.
 
 ### 3.1 — WiFi Hardware Stub
-- [ ] Identify WiFi hardware registers accessed during `esp_wifi_init`/`esp_wifi_start`
+- [x] Added WiFi BB register stub (0x3FF71000, 4KB MappedMemory) — absorbs baseband accesses
+- [x] Added APLL register stub (0x3FF66000, 4KB MappedMemory) — absorbs RTC clock PLL accesses
+- [ ] Identify remaining WiFi hardware registers accessed during `esp_wifi_init`/`esp_wifi_start`
 - [ ] Create pydev or C# stub that returns success for WiFi hardware init
+- [ ] OR: skip WiFiRequestHandler::Setup() (0x400de268) to bypass esp_wifi_restore entirely
 - [ ] OR: build ESP32 firmware variant with compile-time WiFi mock
 
 ### 3.2 — BLE Hardware Stub
 - [ ] Same approach as WiFi — stub Bluetooth controller registers
+- [ ] OR: skip BluetoothRequestHandler::Setup() (0x400d9d2c) — note GetInstance() calls Setup
+      internally, so must skip the Setup call within GetInstance at 0x400d9df6
 - [ ] OR: disable BLE in ESP32 build for initial bring-up
 
 ### 3.3 — Flash/NVS Stub
 - [ ] Stub SPI flash controller for NVS reads/writes
 - [ ] Provide initial NVS partition data (device name, MAC, config)
+
+### 3.4 — Watchdog Stubs
+- [x] esp_task_wdt_init (0x400d5b30): return ESP_OK — movi a2,0 + retw.n at entry+3
+- [x] esp_task_wdt_add (0x400d5c38): return ESP_OK — movi a2,0 + retw.n at entry+3
+- [x] esp_int_wdt_init (0x400d5dac): return immediately — retw.n at entry+3
 
 ## Phase 4: Integration
 
@@ -453,6 +473,10 @@
 | 2026-03-13 | **RETW SOURCE FIX — TCG temp corruption** | `translate_retw()` in `translate.c` used `tcg_const_i32(1)` (non-local temp) for the return address, then read it after `gen_helper_retw()`. In Renode's older TCG, non-local temps are NOT preserved across helper calls. QEMU modernized their TCG to preserve all temps; Renode's fork didn't. Fix: `tcg_temp_local_new_i32()`. This one-line change eliminates 6845 retw hooks, ~40s startup, and unblocks the SPI ctor. |
 | 2026-03-13 | **SPI ctor no longer needs skip** | With the retw fix, all ROM function calls in the SpiTransportProvider constructor (gpio_set_pull_mode, gpio_config, spi_slave_initialize, heap_caps_calloc, memset, xTaskCreate) return properly. The SPI task and sync task are created. ProcessMessages state machine is live. |
 | 2026-03-13 | **Boot now reaches WiFi init** | With retw fix + SPI ctor un-skipped, firmware boots through: ROM → heap → FreeRTOS → app_main → SPI ctor → MessageDispatcher → WiFiRequestHandler::Setup() → esp_wifi_init → hits unmapped WiFi regs at 0x3FF71xxx → esp_restart_noos. Next: stub WiFi init. |
+| 2026-03-13 | **j instruction encoding corrected** | The Xtensa `j` instruction encodes the 18-bit signed offset as: `byte0 = ((offset[1:0]) << 6) \| 0x06`, `byte1 = offset[9:2]`, `byte2 = offset[17:10]`. The previous formula incorrectly placed `offset[5:0]` in `byte0[7:2]`, which produced ILLEGAL_INSTRUCTION exceptions at patched addresses. Verified against existing working patches (brownout skip at 0x400d594b: offset=46, bytes=86 0B 00). |
+| 2026-03-13 | **Watchdog causes esp_restart without timer hardware** | EXCCAUSE=512 is the interrupt watchdog timeout panic code. Without real timer interrupts, the watchdog fires and calls esp_panic_handler → esp_restart_noos. Fix: skip esp_task_wdt_init (return ESP_OK), esp_task_wdt_add (return ESP_OK — required by ESP_ERROR_CHECK in main_task), esp_int_wdt_init (return immediately). |
+| 2026-03-13 | **SPI ctor abort (under investigation)** | With watchdog skips + retw fix, boot reaches SPI ctor entry (confirmed via hook). The ctor then aborts inside one of its callx8 targets. The singleton check passes correctly (first-time init path at beq a10,a8). The abort EXCCAUSE=0xFFFFFFFF indicates software abort(), not a hardware exception. Likely one of: gpio_set_pull_mode, gpio_config, spi_bus_config, or spi_slave_initialize hitting unmapped SPI3/GPIO registers or a driver-level assertion. |
+| 2026-03-13 | **`or a1,a1,a1` bug status unclear** | 683 instances of `or a1,a1,a1` in firmware (compiler-generated NOPs). Previously documented as corrupting A1 in Renode. The tlib translate_or code looks correct (`tcg_gen_or_i32(out, in, in)` with same TCG variable). May have been a retw-cascade symptom. Needs isolated testing to confirm. |
 
 ## Changes Log
 
