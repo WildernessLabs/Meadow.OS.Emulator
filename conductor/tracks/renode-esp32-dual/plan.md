@@ -236,7 +236,15 @@
 - [x] **Complete peripheral map — zero unmapped access warnings**: Added I2S0 (0x3FF4F000) and
   I2S1 (0x3FF68000) stub memory regions. All hardware accesses during boot are now covered.
   Previous: 1 warning for I2S0 access at 0x3FF4F0AC. Now: zero "non existing peripheral" warnings.
-- [ ] Consider Renode source patch for retw bug (eliminate 6845-hook overhead)
+- [ ] **Renode retw source fix** (deferred — low priority, hooks work):
+  Analysis of tlib source reveals retw implementation uses `env->regs[0]` (logical register)
+  which should be correct. The _fix_retw hook works by copying A0 (logical, `cpu->regs[0]`)
+  to AR0 (physical, `cpu->phys_regs[0]`), suggesting the issue may be in how physical
+  registers are synced during window rotation or underflow handling, not in retw itself.
+  Key files: `win_helper.c` (HELPER(retw)/test_ill_retw/test_underflow_retw),
+  `translate.c` (translate_retw), `cpu_registers.c` (A0→regs[0], AR0→phys_regs[0]).
+  The 6845-hook approach works but adds ~40s startup time. A tlib source fix would
+  eliminate this overhead entirely.
 
 ### Key FreeRTOS Addresses (ESP-IDF 4.2.4 dual-core)
 - xTickCount: 0x3FFC92F0
