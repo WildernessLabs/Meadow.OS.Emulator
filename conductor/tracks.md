@@ -11,4 +11,5 @@
 | renode-esp32-dual | Dual-Machine ESP32 Emulation (Full Fidelity) | `planned` (real ESP32 firmware on Xtensa + SPI bridge) |
 | renode-network    | Network Stack End-to-End Testing          | `planned` (bridge ESPCP socket ops to host; blocked on `renode-mono`) |
 | renode-ci         | CI Integration for Emulated Testing       | `planned` |
+| ux-improvements   | UX Improvements (setup.sh, README)        | `complete` (setup.sh checks/installs all prereqs, README updated with Quick Start) |
 | renode-upstream   | Upstream Contributions to Renode          | `planned` (U.1–U.6 identified; U.6 reclassified as incomplete peripheral, not bug) |

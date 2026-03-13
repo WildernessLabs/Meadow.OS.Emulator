@@ -1,7 +1,7 @@
 # Plan: UX Improvements
 
 ## Track ID: `ux-improvements`
-## Status: `planning`
+## Status: `complete`
 ## Repo: `Meadow.OS.Emulator`
 
 ---
