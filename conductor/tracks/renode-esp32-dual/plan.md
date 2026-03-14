@@ -1,7 +1,7 @@
 # Plan: Dual-Machine ESP32 Emulation
 
 ## Track ID: `renode-esp32-dual`
-## Status: `in-progress` (Phase 1 ✅, retw source fix ✅, SPI ctor works ✅, Phase 2.2 in-progress — WiFi stubs needed)
+## Status: `in-progress` (Phase 1 ✅, retw source fix ✅, ESP32 boots to idle ✅, Phase 2.2 in-progress — SPI stub wiring next)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -315,11 +315,11 @@
 
 ### 2.2 — Implement and Test Bridge
 - [x] Create `peripherals/SpiBridge.cs` with ISPIPeripheral + cross-machine frame queues
-- [x] ~~SpiTransportProvider ctor: confirmed must be fully skipped~~ **PARTIALLY RESOLVED by tlib
-  retw fix**. Retw no longer crashes ROM function returns. However, the SPI ctor still aborts
-  during execution — one of the `callx8` targets inside the ctor body (likely gpio_set_pull_mode,
-  gpio_config, or spi_slave_initialize) triggers abort(). The singleton check passes (first-time
-  init), entry works, but a ROM/driver call fails. Needs further tracing.
+- [x] ~~SpiTransportProvider ctor: confirmed must be fully skipped~~ **RESOLVED**. Retw source fix
+  lets ROM calls return. The remaining issue was `gpio_pad_select_gpio` ROM function reading
+  function pointers from IO_MUX MappedMemory (all zeros) → null call → INST_FETCH_ERROR.
+  Fixed by NOPping the 7 GPIO ROM callx8 instructions in the ctor. The SPI driver init
+  (`spi_slave_initialize`) and task creation work without patches.
 - [x] Cleaned up boot script: removed SPI driver stubs, xTaskNotifyWait patch, and Python
   frame inject/capture hooks (all were for firmware SPI task that no longer runs)
 - [x] Added peripheral stubs: APLL registers (0x3FF66000) for RTC clock init, WiFi BB registers
@@ -330,7 +330,16 @@
 - [x] Fixed j instruction encoding: correct formula is `byte0 = ((offset & 0x3) << 6) | 0x06`,
   `byte1 = (offset >> 2) & 0xFF`, `byte2 = (offset >> 10) & 0xFF`. Previous formula had
   offset bits in wrong positions causing ILLEGAL_INSTRUCTION at patched addresses.
-- [ ] Debug SPI ctor abort — trace which callx8 inside the ctor body triggers abort()
+- [x] Skip BluetoothRequestHandler::GetInstance (0x400d9dd0) — return NULL. BT constructor calls
+  ROM BT code (r_ld_reset) which hangs in BT hardware init loop. BT messages won't dispatch
+  but boot continues.
+- [x] Skip WiFiRequestHandler::Setup (0x400de268) — esp_wifi_restore hits unmapped WiFi regs.
+- [x] Skip FileSystem::Setup (0x400d6f20) — esp_vfs_littlefs_register accesses SPI flash
+  partition table (LOAD_PROHIBITED in esp_littlefs_init).
+- [x] **ESP32 boots to idle task with SPI ProcessMessages loop running and ticks injecting.**
+  Boot path: ROM → heap → FreeRTOS → scheduler → IPC demotion → SPI ctor (GPIO NOPs,
+  spi_slave_initialize, xTaskCreate) → MessageDispatcher → WiFi(skip) → BT(skip) → System →
+  FileSystem(skip) → idle task + ticks. No retw hooks. Instant startup.
 - [ ] Stub `spi_slave_queue_trans` / `spi_slave_get_trans_result` to feed frames from SpiBridge
 - [ ] Wire SpiBridge into STM32 platform (replace EspcpStub on SPI2)
 - [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns via SpiBridge
@@ -350,12 +359,16 @@
 - [ ] OR: build ESP32 firmware variant with compile-time WiFi mock
 
 ### 3.2 — BLE Hardware Stub
-- [ ] Same approach as WiFi — stub Bluetooth controller registers
-- [ ] OR: skip BluetoothRequestHandler::Setup() (0x400d9d2c) — note GetInstance() calls Setup
-      internally, so must skip the Setup call within GetInstance at 0x400d9df6
-- [ ] OR: disable BLE in ESP32 build for initial bring-up
+- [x] Skip BluetoothRequestHandler::GetInstance (returns NULL) — BT ROM code (r_ld_reset) hangs.
+  Skipping GetInstance rather than Setup because GetInstance creates the object and calls Setup
+  internally. Returning NULL means _bluetoothRequestHandler is NULL in MessageDispatcher;
+  BT messages won't dispatch but that's acceptable for now.
+- [ ] Proper BT stub: either stub BT controller registers or build firmware without BT
 
-### 3.3 — Flash/NVS Stub
+### 3.3 — Flash/NVS/FileSystem Stub
+- [x] NvsManager::Setup skipped (nvs_flash_init → ensure_partitions_loaded → abort)
+- [x] FileSystem::Setup skipped (esp_vfs_littlefs_register → esp_littlefs_init →
+  LOAD_PROHIBITED accessing SPI flash partition table)
 - [ ] Stub SPI flash controller for NVS reads/writes
 - [ ] Provide initial NVS partition data (device name, MAC, config)
 
@@ -475,7 +488,10 @@
 | 2026-03-13 | **Boot now reaches WiFi init** | With retw fix + SPI ctor un-skipped, firmware boots through: ROM → heap → FreeRTOS → app_main → SPI ctor → MessageDispatcher → WiFiRequestHandler::Setup() → esp_wifi_init → hits unmapped WiFi regs at 0x3FF71xxx → esp_restart_noos. Next: stub WiFi init. |
 | 2026-03-13 | **j instruction encoding corrected** | The Xtensa `j` instruction encodes the 18-bit signed offset as: `byte0 = ((offset[1:0]) << 6) \| 0x06`, `byte1 = offset[9:2]`, `byte2 = offset[17:10]`. The previous formula incorrectly placed `offset[5:0]` in `byte0[7:2]`, which produced ILLEGAL_INSTRUCTION exceptions at patched addresses. Verified against existing working patches (brownout skip at 0x400d594b: offset=46, bytes=86 0B 00). |
 | 2026-03-13 | **Watchdog causes esp_restart without timer hardware** | EXCCAUSE=512 is the interrupt watchdog timeout panic code. Without real timer interrupts, the watchdog fires and calls esp_panic_handler → esp_restart_noos. Fix: skip esp_task_wdt_init (return ESP_OK), esp_task_wdt_add (return ESP_OK — required by ESP_ERROR_CHECK in main_task), esp_int_wdt_init (return immediately). |
-| 2026-03-13 | **SPI ctor abort (under investigation)** | With watchdog skips + retw fix, boot reaches SPI ctor entry (confirmed via hook). The ctor then aborts inside one of its callx8 targets. The singleton check passes correctly (first-time init path at beq a10,a8). The abort EXCCAUSE=0xFFFFFFFF indicates software abort(), not a hardware exception. Likely one of: gpio_set_pull_mode, gpio_config, spi_bus_config, or spi_slave_initialize hitting unmapped SPI3/GPIO registers or a driver-level assertion. |
+| 2026-03-13 | **SPI ctor abort — RESOLVED** | Root cause: `gpio_pad_select_gpio` ROM function (0x40009fdc) reads function pointers from IO_MUX registers (MappedMemory = all zeros) and calls through NULL → INST_FETCH_ERROR at address 0 (EXCCAUSE=20). The `xt_unhandled_exception` handler catches this and calls `esp_panic_handler` with EXCCAUSE=0xFFFFFFFF. Fix: NOP the 7 `callx8` instructions in the SPI ctor that call GPIO ROM functions. The SPI driver init (spi_slave_initialize) and task creation work without GPIO pin configuration. |
+| 2026-03-13 | **BT GetInstance hangs in ROM** | `BluetoothRequestHandler::GetInstance()` creates a BT handler and calls its constructor which calls ESP-IDF BT init → ROM `r_ld_reset` → infinite loop waiting for BT hardware. Fix: skip entire GetInstance, return NULL. MessageDispatcher stores NULL for `_bluetoothRequestHandler`; BT messages won't dispatch but boot continues. |
+| 2026-03-13 | **FileSystem::Setup crashes in LittleFS** | `esp_vfs_littlefs_register` → `esp_littlefs_init` → LOAD_PROHIBITED (EXCCAUSE=6) accessing SPI flash partition table at EPC1=0x40130729. Fix: skip FileSystem::Setup (retw.n at entry+3). |
+| 2026-03-13 | **ESP32 firmware fully boots to idle with SPI task** | With retw fix + GPIO NOPs + WiFi/BT/FS skips + watchdog skips, the full boot path completes: ROM → heap → FreeRTOS → scheduler → IPC demotion → SPI ctor → MessageDispatcher → System handler → idle task + ticks. SPI ProcessMessages loop is running. 10 IPC tasks demoted (6 base + 4 from SPI/WiFi/System/FileSystem tasks). No retw hooks, instant startup. |
 | 2026-03-13 | **`or a1,a1,a1` bug status unclear** | 683 instances of `or a1,a1,a1` in firmware (compiler-generated NOPs). Previously documented as corrupting A1 in Renode. The tlib translate_or code looks correct (`tcg_gen_or_i32(out, in, in)` with same TCG variable). May have been a retw-cascade symptom. Needs isolated testing to confirm. |
 
 ## Changes Log
@@ -519,3 +535,5 @@
 | 2026-03-12 | `bryancostanich/renode` branch `fix/xtensa-esp32-patches` | Pushed 5 tlib patches to GitHub fork. Submodule chain: tlib commit → Infrastructure commit → renode commit. All patches preserved from recovered build. |
 | 2026-03-13 | tlib `arch/xtensa/translate.c` | **RETW source fix**: Changed `tcg_const_i32(1)` → `tcg_temp_local_new_i32()` + `tcg_gen_movi_i32(tmp, 1)` in `translate_retw()`. Non-local TCG temp was invalidated across `gen_helper_retw()` call, causing `gen_jump()` to use garbage return address. This is the 6th tlib patch (after arch_tlb_fill, WAITI, CCOUNT, clock_freq, win_helper). |
 | 2026-03-13 | `scripts/esp32-meadow-boot-no-retw-hooks.resc` | Test script: copy of esp32-meadow-boot.resc with retw hooks removed (`_fix_retw` function, `include @scripts/retw_hooks.resc`) and SPI ctor skip removed. Validates tlib source fix. |
+| 2026-03-13 | `platforms/meadow-esp32.repl` | Added APLL register stub (0x3FF66000, 4KB) for RTC clock PLL config, WiFi BB register stub (0x3FF71000, 4KB) for WiFi baseband accesses. |
+| 2026-03-13 | `scripts/esp32-meadow-boot-no-retw-hooks.resc` | Full boot achieved: (1) NOP 7 GPIO ROM callx8 in SPI ctor (gpio_pad_select_gpio reads NULL function pointers from IO_MUX). (2) Skip BT GetInstance (return NULL — ROM r_ld_reset hangs). (3) Skip WiFi Setup (esp_wifi_restore → unmapped WiFi regs). (4) Skip FileSystem::Setup (LittleFS → flash partition). (5) Skip watchdogs (task_wdt_init return ESP_OK, task_wdt_add return ESP_OK, int_wdt_init return). (6) Panic/abort trace hooks. Boot reaches idle with SPI ProcessMessages running and tick injection active. |
