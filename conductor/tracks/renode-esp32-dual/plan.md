@@ -1,7 +1,7 @@
 # Plan: Dual-Machine ESP32 Emulation
 
 ## Track ID: `renode-esp32-dual`
-## Status: `in-progress` (Phase 1 ✅, retw fix ✅, ESP32 boots to idle ✅, Phase 2.2 — dual-machine integration next)
+## Status: `in-progress` (Phase 1 ✅, retw fix ✅, ESP32 boots ✅, dual-machine running ✅, Phase 2.2 — SPI frame tracing next)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -344,14 +344,18 @@ machines together and tracing the interaction to find the minimal bridge point.
   Boot path: ROM → heap → FreeRTOS → scheduler → IPC demotion → SPI ctor (GPIO NOPs,
   spi_slave_initialize, xTaskCreate) → MessageDispatcher → WiFi(skip) → BT(skip) → System →
   FileSystem(skip) → idle task + ticks. No retw hooks. Instant startup.
-- [ ] Create `scripts/meadow-dual.resc` — dual-machine boot script:
-  - STM32 machine: `meadow-legacy.resc` content but with SpiBridge replacing EspcpStub on SPI2
-  - ESP32 machine: `esp32-meadow-boot-no-retw-hooks.resc` content
-  - Cross-machine wiring: SpiBridge GPIO signals, shared peripheral references
-- [ ] Boot both machines together — observe and trace:
-  - What frames does the STM32 NuttX ESPCP driver send?
-  - Where does the ESP32 SPI task block? What does `spi_slave_queue_trans` need from hardware?
-  - What's the minimal integration point to connect SpiBridge to the ESP32 SPI driver?
+- [x] Create `scripts/meadow-dual.resc` — dual-machine boot script:
+  - STM32 machine: uses `meadow-f7-dual.repl` (SpiBridge on SPI2 instead of EspcpStub)
+  - ESP32 machine: full ESP32 boot with all patches inline
+  - Python hooks use `_emu.TryGetMachineByName('esp32')` for cross-machine access
+  - Created `platforms/meadow-f7-dual.repl` with SpiBridge wiring
+  - Build artifacts symlinked from main worktree (`build/` → `Meadow.OS.Emulator/build/`)
+- [x] **Both machines boot and run simultaneously:**
+  - STM32 NuttX boots: RNG init, flash partitioning, LittleFS mount, ESPCP driver starts
+  - ESP32 Meadow firmware boots: heap, FreeRTOS, SPI ctor, idle task with ticks
+  - STM32 reaches ESPCP init ~25s into boot (SPI2 register writes observed)
+  - No crashes on either machine
+- [ ] Trace ESPCP frames through SpiBridge — what does the STM32 send first?
 - [ ] Implement the SPI connection (approach TBD based on observation):
   - Option A: Implement ESP32 SPI3 peripheral (C#) that presents frames from SpiBridge as
     hardware SPI transactions — full fidelity, ESP-IDF driver works natively
@@ -503,6 +507,7 @@ covers the deeper validation once the basic connection works.
 | 2026-03-15 | **Integration-first approach** | Rather than pre-emptively stubbing `spi_slave_queue_trans`/`spi_slave_get_trans_result`, start both machines together and observe what happens. The ESP32 SPI task is blocked on `xTaskNotifyWait` waiting for hardware. The STM32 ESPCP driver sends frames via SpiBridge. Trace the interaction to discover the minimal bridge point — could be a SPI3 peripheral implementation, a hook at the ESP-IDF driver level, or a hook at the FreeRTOS notification level. Merged Phase 4 (integration) into Phase 2.2 since they're now the same work. |
 | 2026-03-15 | **ESP32 firmware source at Meadow-ESP32** | The custom ESP32 firmware lives at `/Users/bryancostanich/Git_Repos/Wilderness_Labs/Meadow-ESP32/` (github.com/WildernessLabs/Meadow-ESP32). Key source: `components/F7Services/Messaging/` (SpiTransportProvider, MessageDispatcher, Encoders, SharedEnums), `components/F7Services/System/` (SystemRequestHandler), `components/F7Services/WiFi/`, `components/F7Services/Bluetooth/`. ESPCP wire format: 27-byte header (protocol, CRC32, PacketOffset/Length, MessageType, Interface, Function, StatusCode, MessageID, PayloadLength) + payload, max 4092 bytes per SPI frame. |
 | 2026-03-13 | **`or a1,a1,a1` bug status unclear** | 683 instances of `or a1,a1,a1` in firmware (compiler-generated NOPs). Previously documented as corrupting A1 in Renode. The tlib translate_or code looks correct (`tcg_gen_or_i32(out, in, in)` with same TCG variable). May have been a retw-cascade symptom. Needs isolated testing to confirm. |
+| 2026-03-15 | **Dual-machine boot works** | Both STM32 (NuttX) and ESP32 (Meadow firmware) boot and run simultaneously in the same Renode emulation. STM32 reaches ESPCP driver init at ~25s (SPI2 register config writes observed). ESP32 reaches idle with SPI task running and ticks. Multi-machine Python hooks use `TryGetMachineByName()` API. Build artifacts symlinked from main worktree since NuttX hasn't been built in the -esp32-dual worktree. |
 
 ## Changes Log
 
@@ -547,3 +552,5 @@ covers the deeper validation once the basic connection works.
 | 2026-03-13 | `scripts/esp32-meadow-boot-no-retw-hooks.resc` | Test script: copy of esp32-meadow-boot.resc with retw hooks removed (`_fix_retw` function, `include @scripts/retw_hooks.resc`) and SPI ctor skip removed. Validates tlib source fix. |
 | 2026-03-13 | `platforms/meadow-esp32.repl` | Added APLL register stub (0x3FF66000, 4KB) for RTC clock PLL config, WiFi BB register stub (0x3FF71000, 4KB) for WiFi baseband accesses. |
 | 2026-03-13 | `scripts/esp32-meadow-boot-no-retw-hooks.resc` | Full boot achieved: (1) NOP 7 GPIO ROM callx8 in SPI ctor (gpio_pad_select_gpio reads NULL function pointers from IO_MUX). (2) Skip BT GetInstance (return NULL — ROM r_ld_reset hangs). (3) Skip WiFi Setup (esp_wifi_restore → unmapped WiFi regs). (4) Skip FileSystem::Setup (LittleFS → flash partition). (5) Skip watchdogs (task_wdt_init return ESP_OK, task_wdt_add return ESP_OK, int_wdt_init return). (6) Panic/abort trace hooks. Boot reaches idle with SPI ProcessMessages running and tick injection active. |
+| 2026-03-15 | `scripts/meadow-dual.resc` | Dual-machine boot script: creates STM32 "stm32" machine (NuttX + SpiBridge on SPI2) and ESP32 "esp32" machine (Meadow firmware). Both boot and run simultaneously. STM32 reaches ESPCP init ~25s in (SPI2 register writes). ESP32 reaches idle with ticks. Python uses `TryGetMachineByName('esp32')` for cross-machine peripheral access. |
+| 2026-03-15 | `platforms/meadow-f7-dual.repl` | STM32 board definition for dual-machine: identical to meadow-f7.repl but with `spiBridge: SPI.SpiBridge @ spi2` replacing `espcpStub: SPI.EspcpStub @ spi2`. Same GPIO wiring (Ready→gpioPortI@10, MessageWaiting→gpioPortI@0). |
