@@ -57,6 +57,20 @@ namespace Antmicro.Renode.Peripherals.SPI
             rxIndex = 0;
             txIndex = 0;
 
+            // Log frame details for debugging
+            if(frameLength >= HeaderSize && rxBuffer[0] != 0x00)
+            {
+                // Decode ESPCP header: proto(1) + crc(4) + pktOff(2) + pktLen(2) + type(1) + iface(1) + func(4) + status(4) + msgId(4) + payloadLen(4)
+                int msgType = rxBuffer[9];
+                int iface = rxBuffer[10];
+                uint func = (uint)(rxBuffer[11] | (rxBuffer[12] << 8) | (rxBuffer[13] << 16) | (rxBuffer[14] << 24));
+                uint msgId = (uint)(rxBuffer[19] | (rxBuffer[20] << 8) | (rxBuffer[21] << 16) | (rxBuffer[22] << 24));
+                uint payloadLen = (uint)(rxBuffer[23] | (rxBuffer[24] << 8) | (rxBuffer[25] << 16) | (rxBuffer[26] << 24));
+                this.Log(LogLevel.Warning,
+                    "SpiBridge: STM32 TX frame ({0}B) type=0x{1:X2} iface={2} func={3} msgId=0x{4:X8} payloadLen={5}",
+                    frameLength, msgType, iface, func, msgId, payloadLen);
+            }
+
             if(hasResponse)
             {
                 // Previous response was consumed

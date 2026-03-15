@@ -355,7 +355,20 @@ machines together and tracing the interaction to find the minimal bridge point.
   - ESP32 Meadow firmware boots: heap, FreeRTOS, SPI ctor, idle task with ticks
   - STM32 reaches ESPCP init ~25s into boot (SPI2 register writes observed)
   - No crashes on either machine
-- [ ] Trace ESPCP frames through SpiBridge — what does the STM32 send first?
+- [x] **ESPCP frames flowing through SpiBridge:**
+  - STM32 sends `Transport::SendResponse` polls every ~3s (type=0x20, iface=5, func=1)
+  - Frames are 32 bytes (27-byte header + overhead), payloadLen=0 (polling, no data)
+  - msgId increments: 0x80000001, 0x80000002, ... (MSB set = ESP32-originated IDs)
+  - The `espcp_spi_bypass` hook in hooks.resc bypasses STM32 SPI DMA by calling
+    SpiBridge.Transmit() byte-by-byte + FinishTransmission() directly from Python.
+    Had to override via `cpu RemoveHooksAt` + re-register targeting SpiBridge instead
+    of EspcpStub. Variable pre-set didn't work because hooks.resc redefines it.
+  - ESPCP polling enabled by writing 1 to poll flag at 0x2007FFF0.
+- [ ] Bridge the gap: get SpiBridge frames into the ESP32 SPI task's receive path.
+  The SPI task is blocked on `spi_slave_queue_trans` → `xTaskNotifyWait`. Options:
+  - Hook `spi_slave_queue_trans` to dequeue from SpiBridge and fill DMA buffers
+  - Hook `xTaskNotifyWait` in the SPI task context to inject frames
+  - Implement minimal ESP32 SPI3 peripheral
 - [ ] Implement the SPI connection (approach TBD based on observation):
   - Option A: Implement ESP32 SPI3 peripheral (C#) that presents frames from SpiBridge as
     hardware SPI transactions — full fidelity, ESP-IDF driver works natively

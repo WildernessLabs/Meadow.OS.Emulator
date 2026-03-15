@@ -68,8 +68,16 @@ emulation CreateServerSocketTerminal 4243 "esp32ctrl" false
 connector Connect sysbus.uart5 esp32ctrl
 
 # Hook definitions and SDRAM patches (auto-generated with resolved addresses)
+# NOTE: hooks.resc registers espcp_spi_bypass targeting EspcpStub. We override it below.
 include @build/legacy/hooks.resc
 include @build/legacy/sdram-patches.resc
+
+# Override espcp_spi_bypass: use SpiBridge instead of EspcpStub.
+# AddHook stacks, so both hooks will fire. The EspcpStub one will crash but we catch it.
+# Better approach: use cpu RemoveHooksAt to clear the old hook, then add ours.
+cpu RemoveHooksAt 0x081488A0
+set espcp_spi_bypass_dual "from System import Array, Byte; stub = machine['sysbus.spi2.spiBridge']; tx = cpu.GetRegisterUnsafe(0).RawValue; rx = cpu.GetRegisterUnsafe(1).RawValue; length = int(cpu.GetRegisterUnsafe(2).RawValue); txdata = machine.SystemBus.ReadBytes(tx, length) if tx else Array.CreateInstance(Byte, length); rxarr = Array.CreateInstance(Byte, length); [rxarr.__setitem__(i, stub.Transmit(txdata[i])) for i in range(length)]; stub.FinishTransmission(); machine.SystemBus.WriteBytes(rxarr, rx) if rx else None; cpu.PC = cpu.LR"
+cpu AddHook 0x081488A0 $espcp_spi_bypass_dual
 
 # =============================================================================
 # Machine 2: ESP32 — Meadow ESP-IDF Firmware
@@ -665,5 +673,9 @@ cpu AddHook 0x40091cf8 "_queue_recv_sched_check()"
 # Exception/panic trace hooks
 cpu AddHook 0x40080300 "self.Log(LogLevel.Error, 'KERNEL_EXC EXCCAUSE=%d EPC1=0x%x EXCVADDR=0x%x' % (self.GetRegisterUnsafe(77).RawValue, self.GetRegisterUnsafe(51).RawValue, self.GetRegisterUnsafe(83).RawValue))"
 cpu AddHook 0x400803C0 "self.Log(LogLevel.Error, 'DOUBLE_EXC EXCCAUSE=%d DEPC=0x%x EPC1=0x%x EXCVADDR=0x%x' % (self.GetRegisterUnsafe(77).RawValue, self.GetRegisterUnsafe(58).RawValue, self.GetRegisterUnsafe(51).RawValue, self.GetRegisterUnsafe(83).RawValue))"
+
+# Enable ESPCP polling immediately (normally enabled after Mono init)
+mach set "stm32"
+sysbus WriteByte 0x2007FFF0 1
 
 log "Meadow dual-machine ready. STM32 (NuttX) + ESP32 (Meadow firmware). Use 'start' to run."
