@@ -1,7 +1,7 @@
 # Plan: Dual-Machine ESP32 Emulation
 
 ## Track ID: `renode-esp32-dual`
-## Status: `in-progress` (Phase 1 ✅, retw source fix ✅, ESP32 boots to idle ✅, Phase 2.2 in-progress — SPI stub wiring next)
+## Status: `in-progress` (Phase 1 ✅, retw fix ✅, ESP32 boots to idle ✅, Phase 2.2 — dual-machine integration next)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -285,26 +285,30 @@
 │  NuttX ESPCP driver     │                    │  ESP-IDF firmware       │
 │     │                   │                    │  SpiTransportProvider   │
 │  espcp_send_data_over_  │                    │     │ (real ctor runs)  │
-│  spi (bypassed via hook)│                    │  ProcessMessages loop   │
+│  spi                    │                    │  ProcessMessages loop   │
 │     │                   │                    │     │                   │
-│  SpiBridge (ISPIPeripheral)  ──── frames ────►  spi_slave_queue_trans  │
-│  on SPI2                │◄── frames ─────────  spi_slave_get_trans_   │
-│     │                   │                    │  result (stubbed)       │
+│  SpiBridge (ISPIPeripheral)  ──── SPI ──────►  ESP32 SPI3 peripheral  │
+│  on SPI2                │◄── SPI ────────────  (needs implementation   │
+│     │                   │                    │   or hook-level bridge) │
 │  Ready ── ── ── ── ── ──│── ── ── ── ── ── ──  GPIO0 (Ready)         │
 │  MsgWaiting ── ── ── ── │── ── ── ── ── ── ──  GPIO3 (MsgWaiting)    │
 └─────────────────────────┘                    └─────────────────────────┘
 ```
 
+**Approach: integration-first.** Start both machines, observe what happens, and fix issues as
+they arise. The ESP32 SPI task is running and blocked on `spi_slave_queue_trans` →
+`xTaskNotifyWait`. The STM32 NuttX ESPCP driver sends frames via SPI2. The gap is connecting
+these — either by implementing enough of the ESP32 SPI3 peripheral to satisfy the ESP-IDF
+SPI slave driver, or by hooking at the right level to inject frames. Start by running both
+machines together and tracing the interaction to find the minimal bridge point.
+
 **Design decisions:**
 - SpiBridge is a C# peripheral on STM32 SPI2, replacing EspcpStub
-- ~~ESP32 firmware's SPI ctor is fully skipped~~ **SPI ctor now runs successfully** after the
-  tlib retw source fix. The SPI task and sync task are created by FreeRTOS. The firmware's
-  ProcessMessages state machine is live and ready to process frames.
-- Frame-level forwarding (not byte-level) — the bridge captures complete ESPCP frames and passes them as byte arrays
-- SpiBridge exposes public methods (`DequeueFrameFromStm32`, `EnqueueFrameToStm32`) for the ESP32 side
-- GPIO signals (Ready, MessageWaiting) managed by SpiBridge directly
-- ESP32-side: the firmware's SPI task calls `spi_slave_queue_trans` / `spi_slave_get_trans_result`
-  which need to be stubbed to feed frames from SpiBridge instead of real SPI hardware
+- SPI ctor runs successfully after tlib retw fix. The SPI task and sync task are created by
+  FreeRTOS. The firmware's ProcessMessages state machine is live and blocked waiting for frames.
+- ESP32-side connection TBD — discover the right integration point by running both machines
+  and tracing what the STM32 sends and what the ESP32 SPI driver needs from hardware
+- GPIO signals (Ready, MessageWaiting) need cross-machine wiring
 
 ### 2.1 — Design SPI Bridge
 - [x] Architecture: SpiBridge (C#) on STM32 SPI2 + Python hooks on ESP32 SPI slave driver
@@ -340,58 +344,62 @@
   Boot path: ROM → heap → FreeRTOS → scheduler → IPC demotion → SPI ctor (GPIO NOPs,
   spi_slave_initialize, xTaskCreate) → MessageDispatcher → WiFi(skip) → BT(skip) → System →
   FileSystem(skip) → idle task + ticks. No retw hooks. Instant startup.
-- [ ] Stub `spi_slave_queue_trans` / `spi_slave_get_trans_result` to feed frames from SpiBridge
-- [ ] Wire SpiBridge into STM32 platform (replace EspcpStub on SPI2)
-- [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns via SpiBridge
-- [ ] Test: ESP32 queues event → STM32 polls via SendResponse → event delivered
+- [ ] Create `scripts/meadow-dual.resc` — dual-machine boot script:
+  - STM32 machine: `meadow-legacy.resc` content but with SpiBridge replacing EspcpStub on SPI2
+  - ESP32 machine: `esp32-meadow-boot-no-retw-hooks.resc` content
+  - Cross-machine wiring: SpiBridge GPIO signals, shared peripheral references
+- [ ] Boot both machines together — observe and trace:
+  - What frames does the STM32 NuttX ESPCP driver send?
+  - Where does the ESP32 SPI task block? What does `spi_slave_queue_trans` need from hardware?
+  - What's the minimal integration point to connect SpiBridge to the ESP32 SPI driver?
+- [ ] Implement the SPI connection (approach TBD based on observation):
+  - Option A: Implement ESP32 SPI3 peripheral (C#) that presents frames from SpiBridge as
+    hardware SPI transactions — full fidelity, ESP-IDF driver works natively
+  - Option B: Hook at `spi_slave_queue_trans` / `spi_slave_get_trans_result` level to inject
+    frames from SpiBridge — lighter weight, may be sufficient
+  - Option C: Hook at `xTaskNotifyWait` in the SPI task to inject frames and wake the task
+- [ ] Test: ESPCP boot handshake (STM32 ↔ real ESP32 firmware)
+- [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns
 - [ ] Verify frame integrity (CRC checks pass on both sides)
 
 ## Phase 3: ESP32 Peripheral Stubs
 
-**Goal:** Stub hardware that ESP-IDF requires but Renode can't emulate.
+**Goal:** Stub hardware that ESP-IDF requires but Renode can't emulate. These are added
+incrementally as integration testing reveals what's needed — not pre-emptively.
 
-### 3.1 — WiFi Hardware Stub
-- [x] Added WiFi BB register stub (0x3FF71000, 4KB MappedMemory) — absorbs baseband accesses
-- [x] Added APLL register stub (0x3FF66000, 4KB MappedMemory) — absorbs RTC clock PLL accesses
-- [ ] Identify remaining WiFi hardware registers accessed during `esp_wifi_init`/`esp_wifi_start`
-- [ ] Create pydev or C# stub that returns success for WiFi hardware init
-- [ ] OR: skip WiFiRequestHandler::Setup() (0x400de268) to bypass esp_wifi_restore entirely
-- [ ] OR: build ESP32 firmware variant with compile-time WiFi mock
+### Current Stubs (done)
+- [x] WiFi BB registers (0x3FF71000, 4KB MappedMemory) — absorbs baseband accesses
+- [x] APLL registers (0x3FF66000, 4KB MappedMemory) — absorbs RTC clock PLL accesses
+- [x] WiFiRequestHandler::Setup skipped — esp_wifi_restore hits unmapped WiFi regs
+- [x] BluetoothRequestHandler::GetInstance returns NULL — ROM r_ld_reset hangs in BT hw init
+- [x] NvsManager::Setup skipped — nvs_flash_init → ensure_partitions_loaded → abort
+- [x] FileSystem::Setup skipped — esp_vfs_littlefs_register → SPI flash partition table
+- [x] esp_task_wdt_init returns ESP_OK, esp_task_wdt_add returns ESP_OK, esp_int_wdt_init returns
+- [x] GPIO ROM callx8 NOPs in SPI ctor — gpio_pad_select_gpio reads NULL from IO_MUX
 
-### 3.2 — BLE Hardware Stub
-- [x] Skip BluetoothRequestHandler::GetInstance (returns NULL) — BT ROM code (r_ld_reset) hangs.
-  Skipping GetInstance rather than Setup because GetInstance creates the object and calls Setup
-  internally. Returning NULL means _bluetoothRequestHandler is NULL in MessageDispatcher;
-  BT messages won't dispatch but that's acceptable for now.
-- [ ] Proper BT stub: either stub BT controller registers or build firmware without BT
+### Future Stubs (as needed during integration)
+- [ ] WiFi hardware: either proper register stubs or build firmware variant without WiFi
+- [ ] BLE hardware: either proper register stubs or build firmware variant without BLE
+- [ ] SPI flash controller for NVS reads/writes + initial partition data
+- [ ] ESP32 SPI3 peripheral (if integration requires native SPI slave driver support)
 
-### 3.3 — Flash/NVS/FileSystem Stub
-- [x] NvsManager::Setup skipped (nvs_flash_init → ensure_partitions_loaded → abort)
-- [x] FileSystem::Setup skipped (esp_vfs_littlefs_register → esp_littlefs_init →
-  LOAD_PROHIBITED accessing SPI flash partition table)
-- [ ] Stub SPI flash controller for NVS reads/writes
-- [ ] Provide initial NVS partition data (device name, MAC, config)
+## Phase 4: Full Integration Validation
 
-### 3.4 — Watchdog Stubs
-- [x] esp_task_wdt_init (0x400d5b30): return ESP_OK — movi a2,0 + retw.n at entry+3
-- [x] esp_task_wdt_add (0x400d5c38): return ESP_OK — movi a2,0 + retw.n at entry+3
-- [x] esp_int_wdt_init (0x400d5dac): return immediately — retw.n at entry+3
+**Goal:** Both machines running real firmware end-to-end, full ESPCP protocol working.
 
-## Phase 4: Integration
+**Note:** Phase 4 is now a continuation of Phase 2.2 — the dual-machine script and initial
+SPI connection are being done as part of Phase 2.2's integration-first approach. Phase 4
+covers the deeper validation once the basic connection works.
 
-**Goal:** Both machines running real firmware, communicating via ESPCP.
+### 4.1 — ESPCP Protocol Validation
+- [ ] System config exchange works (GetConfiguration → SystemRequestHandler → response)
+- [ ] Compare SPI traces with EspcpStub approach to verify protocol fidelity
+- [ ] Multi-packet messages work (PayloadLength > MAXIMUM_PACKET_SIZE)
 
-### 4.1 — Two-Machine Script
-- [ ] Create `scripts/meadow-dual.resc` (both machines + bridge + GPIO wiring)
-- [ ] STM32 side: same as current `meadow-legacy.resc` but without EspcpStub
-- [ ] ESP32 side: new machine with ESP32 firmware + peripheral stubs
-
-### 4.2 — Validation
-- [ ] ESPCP boot handshake completes (STM32 ↔ real ESP32 firmware)
-- [ ] System config exchange works
+### 4.2 — Full System Validation
 - [ ] WiFi start/connect works (with stubbed radio)
-- [ ] Compare SPI traces with stub approach to verify protocol fidelity
 - [ ] HCOM commands work alongside dual-machine ESPCP
+- [ ] System runs stably for extended periods (minutes, not seconds)
 
 ---
 
@@ -492,6 +500,8 @@
 | 2026-03-13 | **BT GetInstance hangs in ROM** | `BluetoothRequestHandler::GetInstance()` creates a BT handler and calls its constructor which calls ESP-IDF BT init → ROM `r_ld_reset` → infinite loop waiting for BT hardware. Fix: skip entire GetInstance, return NULL. MessageDispatcher stores NULL for `_bluetoothRequestHandler`; BT messages won't dispatch but boot continues. |
 | 2026-03-13 | **FileSystem::Setup crashes in LittleFS** | `esp_vfs_littlefs_register` → `esp_littlefs_init` → LOAD_PROHIBITED (EXCCAUSE=6) accessing SPI flash partition table at EPC1=0x40130729. Fix: skip FileSystem::Setup (retw.n at entry+3). |
 | 2026-03-13 | **ESP32 firmware fully boots to idle with SPI task** | With retw fix + GPIO NOPs + WiFi/BT/FS skips + watchdog skips, the full boot path completes: ROM → heap → FreeRTOS → scheduler → IPC demotion → SPI ctor → MessageDispatcher → System handler → idle task + ticks. SPI ProcessMessages loop is running. 10 IPC tasks demoted (6 base + 4 from SPI/WiFi/System/FileSystem tasks). No retw hooks, instant startup. |
+| 2026-03-15 | **Integration-first approach** | Rather than pre-emptively stubbing `spi_slave_queue_trans`/`spi_slave_get_trans_result`, start both machines together and observe what happens. The ESP32 SPI task is blocked on `xTaskNotifyWait` waiting for hardware. The STM32 ESPCP driver sends frames via SpiBridge. Trace the interaction to discover the minimal bridge point — could be a SPI3 peripheral implementation, a hook at the ESP-IDF driver level, or a hook at the FreeRTOS notification level. Merged Phase 4 (integration) into Phase 2.2 since they're now the same work. |
+| 2026-03-15 | **ESP32 firmware source at Meadow-ESP32** | The custom ESP32 firmware lives at `/Users/bryancostanich/Git_Repos/Wilderness_Labs/Meadow-ESP32/` (github.com/WildernessLabs/Meadow-ESP32). Key source: `components/F7Services/Messaging/` (SpiTransportProvider, MessageDispatcher, Encoders, SharedEnums), `components/F7Services/System/` (SystemRequestHandler), `components/F7Services/WiFi/`, `components/F7Services/Bluetooth/`. ESPCP wire format: 27-byte header (protocol, CRC32, PacketOffset/Length, MessageType, Interface, Function, StatusCode, MessageID, PayloadLength) + payload, max 4092 bytes per SPI frame. |
 | 2026-03-13 | **`or a1,a1,a1` bug status unclear** | 683 instances of `or a1,a1,a1` in firmware (compiler-generated NOPs). Previously documented as corrupting A1 in Renode. The tlib translate_or code looks correct (`tcg_gen_or_i32(out, in, in)` with same TCG variable). May have been a retw-cascade symptom. Needs isolated testing to confirm. |
 
 ## Changes Log
