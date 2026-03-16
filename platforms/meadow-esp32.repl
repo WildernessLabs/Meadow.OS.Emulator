@@ -142,9 +142,10 @@ spi1: Memory.MappedMemory @ sysbus 0x3FF42000
 spi2: Memory.MappedMemory @ sysbus 0x3FF64000
     size: 0x1000
 
-// SPI3 (VSPI) — this is the SPI bus used by Meadow ESPCP slave
-spi3: Memory.MappedMemory @ sysbus 0x3FF65000
-    size: 0x1000
+// SPI3 (VSPI) — Meadow ESPCP SPI peripheral
+// Custom C# peripheral: handles register interface for ESP-IDF spi_slave driver,
+// DMA descriptor chain reads/writes, and cross-machine SpiBridge connection.
+spi3: SPI.ESP32_SPI @ sysbus 0x3FF65000
 
 // I2C0
 i2c0: Memory.MappedMemory @ sysbus 0x3FF53000

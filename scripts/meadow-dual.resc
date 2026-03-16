@@ -21,6 +21,7 @@ include @peripherals/MqReceiveIntercept.cs
 include @peripherals/ESP32_RTC_CNTL.cs
 include @peripherals/ESP32_TimerGroup.cs
 include @peripherals/ESP32_DPORT.cs
+include @peripherals/ESP32_SPI.cs
 
 # =============================================================================
 # Machine 1: STM32 F7 — NuttX Meadow Legacy OS
@@ -673,6 +674,19 @@ cpu AddHook 0x40091cf8 "_queue_recv_sched_check()"
 # Exception/panic trace hooks
 cpu AddHook 0x40080300 "self.Log(LogLevel.Error, 'KERNEL_EXC EXCCAUSE=%d EPC1=0x%x EXCVADDR=0x%x' % (self.GetRegisterUnsafe(77).RawValue, self.GetRegisterUnsafe(51).RawValue, self.GetRegisterUnsafe(83).RawValue))"
 cpu AddHook 0x400803C0 "self.Log(LogLevel.Error, 'DOUBLE_EXC EXCCAUSE=%d DEPC=0x%x EPC1=0x%x EXCVADDR=0x%x' % (self.GetRegisterUnsafe(77).RawValue, self.GetRegisterUnsafe(58).RawValue, self.GetRegisterUnsafe(51).RawValue, self.GetRegisterUnsafe(83).RawValue))"
+
+# =============================================================================
+# Cross-machine wiring: connect SpiBridge (STM32) → ESP32_SPI (ESP32)
+# =============================================================================
+python """
+_emu = Antmicro.Renode.Core.EmulationManager.Instance.CurrentEmulation
+_ok_stm32, _stm32_machine = _emu.TryGetMachineByName('stm32')
+_ok_esp32, _esp32_machine = _emu.TryGetMachineByName('esp32')
+if _ok_stm32 and _ok_esp32:
+    _bridge = [p.Peripheral for p in _stm32_machine.GetRegisteredPeripherals() if type(p.Peripheral).__name__ == 'SpiBridge'][0]
+    _esp32_spi = [p.Peripheral for p in _esp32_machine.GetRegisteredPeripherals() if type(p.Peripheral).__name__ == 'ESP32_SPI'][0]
+    _esp32_spi.SetBridge(_bridge)
+"""
 
 # Enable ESPCP polling immediately (normally enabled after Mono init)
 mach set "stm32"
