@@ -562,11 +562,28 @@ machines together and tracing the interaction to find the minimal bridge point.
   stale register values to incorrect DRAM addresses, or the stack pointer in the
   spilled window frame is invalid.
 
+  **Detailed analysis of the crash:**
+  - All `s32e` instructions in overflow handlers (WOVF4 and WOVF8) complete successfully
+  - All `rfwo` instructions fire with valid EPC1 addresses
+  - The saved register values on the stack are correct (verified via DRAM reads)
+  - The underflow handler loads values from the CORRECT stack addresses
+  - The crash is a DOUBLE EXCEPTION: an exception with PS.EXCM=1 (already in exception mode)
+  - Neither KERNEL_EXC (VECBASE+0x300) nor DOUBLE_EXC (VECBASE+0x3C0) vector hooks fire —
+    the exception goes directly to `xt_unhandled_exception` (0x40090fc0)
+  - Final state: EXCCAUSE=20 (INST_FETCH_ERROR), EPC1=0, PS.EXCM=1, WB=3
+
+  **Hypothesis:** After the overflow cascade completes successfully and the `entry` instruction
+  re-executes, something in the subsequent code path causes a jump to PC=0. This might be:
+  1. A register value corrupted by the phys_regs wrap-around (physical regs 0-7 used by both
+     WB=0 and WB=14 depending on context)
+  2. The `sync_windowbase` after `entry` loading stale phys_regs values
+  3. A TCG code generation issue in the entry TB re-execution after overflow
+
   **Next steps:**
-  - Investigate the window overflow handler's `s32e` writes during the WB=14 overflow
-  - Check if the stack pointer in the spilled window is valid
-  - May need a tlib fix for window overflow register spill accuracy
-  - Alternative: reduce call depth to avoid wrapping the 16-window register file
+  - Add debug logging in tlib's `do_interrupt` for the EXC_IRQ path with pending_level=0
+  - Trace the exact PC progression after the last rfwo returns
+  - Check if `xtensa_sync_window_from_phys` loads correct values after the cascade
+  - Consider adding a tlib fix that validates register values after window rotation
 
 - [ ] Test: ESPCP boot handshake (STM32 ↔ real ESP32 firmware)
 - [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns
