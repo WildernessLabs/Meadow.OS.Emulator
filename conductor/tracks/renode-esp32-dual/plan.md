@@ -364,296 +364,47 @@ machines together and tracing the interaction to find the minimal bridge point.
     Had to override via `cpu RemoveHooksAt` + re-register targeting SpiBridge instead
     of EspcpStub. Variable pre-set didn't work because hooks.resc redefines it.
   - ESPCP polling enabled by writing 1 to poll flag at 0x2007FFF0.
-- [ ] **Implement ESP32 SPI3 peripheral** (`peripherals/ESP32_SPI.cs`).
-  Replace the MappedMemory stub at 0x3FF65000 with a real C# peripheral that implements
-  enough of the ESP32 SPI register interface for the ESP-IDF `spi_slave` driver to
-  work natively. SpiBridge feeds frames in from the STM32 side; the peripheral presents
-  them to the firmware as hardware SPI transactions.
+- [x] **ESP32 SPI3 peripheral** (`peripherals/ESP32_SPI.cs`) — DONE.
+  C# peripheral with register map, DMA descriptor support, SpiBridge cross-machine
+  reference. Replaced MappedMemory at 0x3FF65000. Wired to DPORT interrupt matrix.
 
-  **Register interface** (from ESP32 TRM + `spi_struct.h` + `spi_ll.h`):
-  - `cmd` (0x00): `usr` bit (bit 18) — triggers transaction start
-  - `slave` (0x38): `trans_done` (bit 4) — ISR checks this; set when transaction completes.
-    `trans_inten` (bit 9) — interrupt enable. `sync_reset` (bit 31) — soft reset.
-    `slave_mode` (bit 26). `wr_rd_sta_en` (bit 30), `wr_rd_buf_en` (bit 29).
-  - `user` (0x1C): `doutdin` (bit 0) — full-duplex mode. `usr_mosi` (bit 27), `usr_miso` (bit 28).
-  - `mosi_dlen` (0x28): bit length of MOSI data
-  - `miso_dlen` (0x2C): bit length of MISO data
-  - `data_buf[16]` (0x80–0xBC): 64-byte data buffer (W0–W15). Non-DMA mode: firmware
-    reads/writes directly. DMA mode: not used (DMA reads/writes memory directly).
-  - `dma_conf` (0x100): DMA config bits
-  - `dma_out_link` (0x104): TX DMA descriptor address (bits 19:0) + `start` (bit 28)
-  - `dma_in_link` (0x108): RX DMA descriptor address (bits 19:0) + `start` (bit 28)
-  - `slv_rdbuf_dlen` (0x48): slave read buffer bit length
-  - `slv_wrbuf_dlen` (0x44): slave write buffer bit length
-  - `slv_rd_bit` (0x64): received data bit length (read by HAL after transaction)
+- [x] **DPORT interrupt matrix** (`peripherals/ESP32_DPORT.cs`) — DONE.
+  69-source mapping table, GPIO inputs from peripherals, level-OR routing.
+  `esp_intr_alloc` writes source 31 → CPU interrupt 6. DPORT fires interrupts
+  via direct OnGPIO calls (GPIO outputs not wired due to interrupt 6 contention
+  with hardwired CCOMPARE0 timer).
 
-  **DMA descriptor format** (`lldesc_t` from `soc/lldesc.h`):
-  ```
-  struct lldesc_t {
-      uint32_t size:12;    // buffer size
-      uint32_t length:12;  // actual data length
-      uint32_t offset:5;   // unused
-      uint32_t sosf:1;     // start of sub-frame
-      uint32_t eof:1;      // end of frame
-      uint32_t owner:1;    // 0=CPU, 1=DMA
-      uint32_t buf;        // pointer to data buffer
-      uint32_t qe;         // pointer to next descriptor (0 = end of list)
-  };
-  ```
+- [x] Fixed IPC demotion, init IRQ timing, SPI task priority.
 
-  **Transaction flow** (what the ESP-IDF driver does):
-  1. `spi_slave_queue_trans()`: queues transaction descriptor to FreeRTOS queue, enables interrupt
-  2. `spi_intr()` ISR fires (initially forced via `spi_ll_set_int_stat`):
-     - Checks `trans_done` → if set, current transaction complete → dequeue result
-     - Pulls next transaction from queue
-     - Calls `spi_slave_hal_prepare_data()`:
-       - Resets slave (`sync_reset`)
-       - For DMA: sets up linked-list descriptors, starts RX/TX DMA
-       - For non-DMA: writes TX data to `data_buf[]`
-       - Sets RX/TX bit lengths
-     - Calls `spi_slave_hal_user_start()`: clears `trans_done`, sets `cmd.usr = 1`
-     - Calls `post_setup_cb` (which notifies the SPI task)
-  3. On real hardware: SPI controller clocks data → peripheral receives → `trans_done` set → interrupt fires
-  4. ISR runs again: reads received data, posts to ret_queue, notifies task
+- [x] **Xtensa interrupt delivery** — RESOLVED (two tlib bugs fixed).
+  `xtensa_cpu_set_irq_pending_bit` now calls `check_interrupts()`. Xtensa `OnGPIO`
+  no longer calls `base.OnGPIO` (which cleared CPU_INTERRUPT_HARD). xTickCount advances,
+  CCOMPARE0 timer works, SPI ISR fires via DPORT matrix.
 
-  **What the C# peripheral needs to do:**
-  - Track register writes (peripheral config, DMA addresses, cmd.usr)
-  - When `cmd.usr` is set (peripheral ready for transaction):
-    - Check if SpiBridge has a pending frame
-    - If yes: write frame data to DMA rx buffer (follow DMA descriptor chain) or to `data_buf[]`
-    - Set `trans_done = 1`
-    - Assert its interrupt source line (connected to DPORT interrupt matrix)
-    - Read the DMA tx buffer to get the peripheral's response, send it back to SpiBridge
-  - If no frame pending: wait (the transaction stays pending until controller clocks data)
+- [x] **Window overflow crash during SPI init** — RESOLVED (2026-03-16).
+  The crash at PC=0 during SPI init was a race condition: `Thread::Task(void*)` at
+  0x400e1538 calls `GetMethod()` which returns NULL because the SPI task (priority 24)
+  preempts the constructor before the method pointer is set. Secondary crash in
+  vListInsertEnd from pxIndex corruption (window spill writes IRAM addresses into list
+  fields). Both fixed with Python hooks. Four tlib robustness fixes also applied
+  (translate_rfw local temp, window_check n>w early exit, test_ill_retw a0 fixup,
+  diagnostic logging). See detailed investigation notes below.
 
-  **Cross-machine connection:**
-  - SpiBridge (on STM32) captures frames from NuttX and queues them
-  - ESP32_SPI needs a reference to SpiBridge to dequeue frames and enqueue responses
-  - Use Renode's `EmulationManager.Instance.CurrentEmulation.TryGetMachineByName()` to find
-    the STM32 machine and its SpiBridge peripheral from the ESP32 machine context
+  **Investigation and resolution (2026-03-16) — see Decision Log for full details:**
 
-  **Implementation status:**
-  - [x] `peripherals/ESP32_SPI.cs` created with register map and DMA descriptor support
-  - [x] SpiBridge cross-machine reference via `SetBridge(object)` + frame-available callback
-  - [x] Replaced `spi3: Memory.MappedMemory` with `spi3: SPI.ESP32_SPI` in `meadow-esp32.repl`
-  - [x] Wired SpiBridge → ESP32_SPI in `meadow-dual.resc`
-  - [x] Un-NOP'd `esp_intr_alloc` — retw fix makes interrupt registration work natively
-  - [x] Fixed slave register bit layout: slave_mode is bit 30 (not 26), matching spi_struct.h
-  - [ ] Connect ESP32_SPI interrupt to DPORT interrupt matrix (see below)
-  - [ ] Test: STM32 sends Transport::SendResponse → ESP32 firmware's ProcessMessages receives it
+  tlib fixes (committed to `bryancostanich/renode` branch `meadow-emulator-fixes`, `ca374e31`):
+  - translate_rfw: `tcg_const_i32` → `tcg_temp_local_new_i32` (same pattern as retw fix)
+  - window_check: n>w early exit via `cpu_loop_exit` (was: clamp + spurious overflow)
+  - test_ill_retw: a0 fixup when n=0 but WINDOWSTART shows caller at distance m
+  - Diagnostic logging: PC=0 detection, window rotation tracing at high WB
 
-- [ ] **Implement DPORT interrupt matrix** (upgrade `peripherals/ESP32_DPORT.cs`).
-  Currently, ESP32_SPI and the CCOMPARE0 timer both fire on CPU interrupt 6 because
-  the DPORT interrupt matrix isn't implemented — `esp_intr_alloc` writes the source→CPU
-  mapping to DPORT registers but the matrix doesn't actually route interrupts.
-
-  On real hardware, the interrupt matrix works as follows:
-  - 72 peripheral interrupt sources (SPI3 = source 31, UART0 = source 17, etc.)
-  - Each source has a mapping register at `PRO_*_MAP_REG` (0x3FF00114 + source*4)
-  - The register value is the CPU interrupt number (0-31) to route this source to
-  - `esp_intr_alloc` picks a free CPU interrupt and writes the mapping
-  - When a peripheral asserts its source, the matrix asserts the mapped CPU interrupt line
-  - Multiple sources can map to the same CPU interrupt (level-OR'd)
-  - CCOMPARE0 timer is hardwired to CPU interrupt 6 (not routable through the matrix)
-
-  **What ESP32_DPORT needs to do:**
-  - Maintain a mapping table: source[0..71] → CPU interrupt number
-  - Accept writes to `PRO_*_MAP_REG` registers (0x114-0x234) updating the mapping
-  - Accept GPIO inputs from peripheral interrupt sources (ESP32_SPI, ESP32_UART, etc.)
-  - When a source asserts: look up its mapped CPU interrupt number, assert that line on CPU
-  - When a source deasserts: check if any other active source maps to the same CPU interrupt;
-    only deassert the CPU line if no sources are still active (level-OR behavior)
-  - GPIO output to CPU for each of the 32 CPU interrupt lines
-
-  **Wiring in .repl:**
-  ```
-  spi3: SPI.ESP32_SPI @ sysbus 0x3FF65000
-      IRQ -> dport@31      // SPI3 = interrupt source 31
-
-  dport: Miscellaneous.ESP32_DPORT @ sysbus 0x3FF00000
-      [0-31] -> cpu@[0-31]  // CPU interrupt lines
-  ```
-
-  **Implementation status:**
-  - [x] Upgraded `peripherals/ESP32_DPORT.cs`: 69-source mapping table, GPIO inputs from
-    peripherals, GPIO outputs per CPU interrupt line, level-OR routing logic
-  - [x] Wired ESP32_SPI.IRQ → dport@31 in meadow-esp32.repl
-  - [x] `esp_intr_alloc` correctly writes mappings: source 31 → CPU interrupt 6 confirmed
-  - [x] DPORT routing works: source assertion → mapping lookup → CPU line set
-  - [ ] **DPORT GPIO outputs NOT wired to CPU** — see blocker below
-
-- [x] Fixed IPC demotion: limited to first 6 tasks (IPC/crosscore only). SPI task and sync
-  task at priority 24 now run — SPI_TASK entry confirmed.
-- [x] Fixed init IRQ: ESP32_SPI only fires interrupt when injecting a frame, not during init.
-
-- [ ] **Blocker: Xtensa interrupt delivery from OnGPIO.**
-  `cpu.OnGPIO(6, True/False)` does NOT reliably deliver interrupts to the Xtensa CPU.
-  Evidence: tick injection fires `OnGPIO(6, True); OnGPIO(6, False)` from the idle task
-  Python hook, and TICK_INJECT logs confirm the hook runs, but xTickCount stays 0 —
-  xPortSysTickHandler never executes.
-
-  This is NOT a Python performance issue — the hook fires. The old boot script's ticks
-  appeared to work because `_dispatch_fixup` at `_frxt_dispatch` manually managed
-  xTickCount and delayed task lists in Python. The hardware ISR may never have fired.
-
-  **Possible causes:**
-  - `INTENABLE` bit 6 not set (our `_xtos_set_intlevel` NOPs may prevent proper setup)
-  - `OnGPIO(n, false)` clears the interrupt before the CPU latches it (Xtensa level-
-    triggered interrupts should latch in the INTERRUPT register, but Renode may not)
-  - tlib's `tlib_set_irq` implementation may not properly handle edge pulses
-
-  **This blocks everything downstream:**
-  - SPI task stuck in `vTaskDelay(10)` loop — needs ticks to wake
-  - SPI ISR can't fire — needs INTENABLE and interrupt delivery working
-  - SpiBridge frames can't be injected — needs SPI ISR → `spi_slave_queue_trans` → `cmd.usr`
-
-  **Additional issue: CPU interrupt 6 contention.**
-  CCOMPARE0 timer (hardwired) and SPI3 (`esp_intr_alloc` maps to 6) share the same line.
-  Renode doesn't support multi-driver GPIO OR — last `Set()` wins. Current workaround:
-  DPORT outputs not wired to line 6; both tick injection and ESP32_SPI fire directly on CPU.
-
-  **Root causes found and fixed (two tlib bugs):**
-
-  1. **`xtensa_cpu_set_irq_pending_bit` didn't call `check_interrupts()`** after modifying
-     INTSET. External interrupt sources could set pending bits but CPU_INTERRUPT_HARD
-     was never asserted, so the CPU never checked for pending interrupts.
-     Fix: added `check_interrupts(env)` at end of function.
-
-  2. **Xtensa `OnGPIO` called `base.OnGPIO` which independently cleared CPU_INTERRUPT_HARD.**
-     `base.OnGPIO` uses `TlibSetIrqWrapped` which tracks active GPIO numbers. `OnGPIO(n, false)`
-     removes n from the set, and if empty, calls `TlibSetIrq(Hard, 0)` → `cpu_reset_interrupt` —
-     clearing CPU_INTERRUPT_HARD even when INTSET still has latched timer interrupts.
-     Fix: removed `base.OnGPIO` call — Xtensa uses INTSET/INTENABLE/check_interrupts only.
-
-  **Results after fixes:**
-  - xTickCount advances: 64+ ticks confirmed via xPortSysTickHandler ISR
-  - CCOMPARE0 timer cycle works: `wsr.ccompare0` in ISR correctly clears INTSET bit 6
-    via `HELPER(update_ccompare)`, allowing re-triggering on next tick
-  - SPI ISR fires: deferred until `esp_intr_enable` in `spi_slave_queue_trans` enables
-    interrupt, then `wsr.intenable` triggers `check_interrupts` which finds pending INTSET
-  - DPORT matrix routes SPI3 source 31 → CPU interrupt via direct OnGPIO calls
-
-  **Current state: ISR fires and dequeues transaction, crashes in prepare_data.**
-  The SPI ISR fires after `spi_slave_queue_trans`, dequeues the transaction from the
-  FreeRTOS queue, and calls `spi_slave_hal_prepare_data`. The HAL context has correct
-  `hw = 0x3FF65000` and valid `dmadesc_rx/tx` addresses. But the transaction's buffer
-  pointers are corrupt: `rx_buf = 0x00007fe0, tx_buf = 0x00000003, bitlen = 1`.
-
-  The crash is in `spi_slave_hal_prepare_data` when it calls `spi_ll_slave_reset` which
-  writes to `hw->slave.sync_reset`. Also, `freeze_cs`/`restore_cs` functions call
-  `gpio_iomux_in` which dereferences GPIO register values (MappedMemory returns 0) as
-  pointers → INST_FETCH_ERROR at PC=0. NOPped both branches in the ISR.
-
-  The buffer corruption (`rx_buf`, `tx_buf` having small/invalid values) is likely from
-  Renode's window overflow handler writing stale register values to incorrect DRAM
-  addresses — the same class of bug that corrupts FreeRTOS lists and TCB fields.
-  This is a fundamental tlib issue with the Xtensa window spill mechanism.
-
-  **Deeper analysis — not buffer corruption, it's a window overflow crash:**
-  Transaction buffers are CORRECT in both the queue and the HAL context at ISR time
-  (verified via Python hooks reading DRAM). The crash is inside `spi_slave_hal_prepare_data`
-  between the `entry a1, 48` instruction (which fires) and the first register read
-  (which never fires). The `entry` triggers a window overflow at WB=14 (wrapping the
-  16-window register file). The overflow handler either crashes or corrupts the return
-  state, preventing the function from continuing.
-
-  This is the same class of Xtensa window overflow/spill bug documented elsewhere in
-  the plan. The `s32e`/`l32e` instructions in the overflow handler may be writing
-  stale register values to incorrect DRAM addresses, or the stack pointer in the
-  spilled window frame is invalid.
-
-  **Detailed analysis of the crash:**
-  - All `s32e` instructions in overflow handlers (WOVF4 and WOVF8) complete successfully
-  - All `rfwo` instructions fire with valid EPC1 addresses
-  - The saved register values on the stack are correct (verified via DRAM reads)
-  - The underflow handler loads values from the CORRECT stack addresses
-  - The crash is a DOUBLE EXCEPTION: an exception with PS.EXCM=1 (already in exception mode)
-  - Neither KERNEL_EXC (VECBASE+0x300) nor DOUBLE_EXC (VECBASE+0x3C0) vector hooks fire —
-    the exception goes directly to `xt_unhandled_exception` (0x40090fc0)
-  - Final state: EXCCAUSE=20 (INST_FETCH_ERROR), EPC1=0, PS.EXCM=1, WB=3
-
-  **Investigation results (2026-03-16):**
-
-  Three tlib fixes applied to branch `meadow-emulator-fixes`:
-
-  1. **translate_rfw: tcg_const_i32 → tcg_temp_local_new_i32** — Same pattern as the
-     retw fix. `translate_rfw` (rfwo/rfwu) used `tcg_const_i32(1)` to create a non-local
-     TCG temp. Changed to `tcg_temp_local_new_i32()` + `tcg_gen_movi_i32(tmp, 1)` to
-     match the retw fix and QEMU upstream. Prevents potential register allocator corruption
-     across helper calls.
-
-  2. **window_check: n > w early exit instead of clamp** — The defensive `n > w` check
-     previously CLAMPED n to w and proceeded with a SPURIOUS overflow exception. This is
-     destructive: it rotates to a window that doesn't need spilling, and rfwo clears a
-     WINDOWSTART bit for a potentially in-use window. Changed to log a warning, set
-     env->pc = entry_PC, and cpu_loop_exit to restart the CPU loop with a fresh TB lookup.
-
-  3. **Diagnostic logging** — Added to exception_cause (PC=0 detection), sync_windowbase
-     (a0=0 after wrap-around rotation), window_check (pre/post rotate state at WB≥13),
-     and restore_owb (rfwo state at high WB values).
-
-  **Key diagnostic findings from single-machine ESP32 boot:**
-
-  - The call chain uses call8 exclusively (WS=0x5555, all even bits). Window overflow at
-    WB=14 correctly dispatches WOVF8 (type=1). regs[4] shows 0 before rotation because
-    call8 puts the return address in regs[8], not regs[4].
-
-  - The a0=0 warnings in sync_windowbase are mostly false alarms — a0 being 0 after
-    rotation is normal when physical registers weren't set by the current call chain.
-
-  - **Root cause identified: WOVF8 handler corrupts a0 via uninitialized stack base save area.**
-    The WindowOverflow8 handler's `l32e a0, a1, -12` loads the caller's SP from the base
-    save area on the spilled window's stack. FreeRTOS `pxPortInitialiseStack` clears the
-    entire stack to 0, so the base save area at [SP-12] is 0. When the call chain wraps
-    around the 16-window register file (8 call8 levels), WOVF8 loads 0 into a0, which is
-    then used as a base address for s32e instructions (writing to ~0xFFFFFFE0 = memory
-    corruption) and propagated through phys_regs via sync.
-
-  - The crash manifests as INST_FETCH_ERROR at PC=0 (cause=20). The function at 0x400e1538
-    (`entry a1, 32`) has a `callx8 a0` at offset +19 (0x400e154b). After WOVF8 corrupts
-    a0, this callx8 jumps through a0 which contains a corrupted value (0 or a stack
-    address). NOP'ing this callx8 produces a different crash (unrecognized opcode at
-    0x400d21e7), confirming the code path is disrupted.
-
-  - **Fourth tlib fix applied: test_ill_retw a0 fixup.** When retw encounters a0 with
-    n=0 (bits 30-31 = 0) but WINDOWSTART shows a caller at distance m, the fix sets bits
-    30-31 of a0 to m, allowing the underflow handler to restore correct registers. This
-    handles the case where WOVF8 corruption propagates through to retw.
-
-  **PC=0 crash RESOLVED (2026-03-16):**
-
-  Root cause was NOT window overflow corruption. Disassembly revealed the function at
-  0x400e1538 is `Thread::Task(void*)` — a FreeRTOS task loop that calls `GetMethod()`
-  to get a function pointer, then `callx8 a3` to invoke it. The SPI constructor creates
-  the SPI task at priority 24 via xTaskCreate. The high-priority task preempts the
-  constructor IMMEDIATELY, before the Thread object's method pointer is set. GetMethod()
-  returns 0 → `callx8 a3` jumps to 0 → INST_FETCH_ERROR.
-
-  Fix: Python hook at `callx8 a3` (0x400e154c) checks if a3 is null/invalid and redirects
-  to the loop start (0x400e153b) to retry. The task spins until the constructor finishes
-  setting the method pointer, then the real method executes.
-
-  After this fix, the system progresses past the SPI constructor to the known vListInsertEnd
-  crash (STORE_PROHIBITED at 0x400941c7, EXCVADDR=0x043d3004) — the pre-existing pxIndex
-  DRAM corruption from window overflow register spills. This is a separate issue.
-
-  **vListInsertEnd crash RESOLVED (2026-03-16):**
-
-  After the Thread::Task fix, the system hit a STORE_PROHIBITED crash in vListInsertEnd
-  (0x400941c7, EXCVADDR=0x043d3004). This is the known pxIndex DRAM corruption from window
-  overflow register spills. The existing _dispatch_fixup only validates the 25 ready lists.
-  Fix: Python hook at vListInsertEnd entry (0x400941bb) validates pxIndex and pxIndex->pxNext
-  before dereferencing. Resets corrupt values to &xListEnd (list+8).
+  Boot script fixes (both `esp32-meadow-boot-no-retw-hooks.resc` and `meadow-dual.resc`):
+  - Thread::Task null method guard at `callx8 a3` (0x400e154c) — race condition where
+    priority-24 SPI task preempts constructor before method pointer is set
+  - vListInsertEnd guard at entry (0x400941bb) — validates pxIndex and pxNext, resets
+    corrupt pointers from window overflow register spills
 
   **Both single-machine and dual-machine boot stably for 90+ seconds with zero crashes.**
-
-  **Summary of all fixes applied (2026-03-16):**
-  - tlib: translate_rfw local temp (tcg_const_i32 → tcg_temp_local_new_i32)
-  - tlib: window_check n>w early exit (cpu_loop_exit instead of spurious overflow)
-  - tlib: test_ill_retw a0 fixup (n=0 → use m from WINDOWSTART)
-  - tlib: diagnostic logging (PC=0 detection, window rotation tracing)
-  - Boot script: Thread::Task null method guard (race condition with SPI ctor)
-  - Boot script: vListInsertEnd pxIndex/pxNext validation (window spill corruption)
 
 - [ ] Test: ESPCP boot handshake (STM32 ↔ real ESP32 firmware)
 - [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns
