@@ -474,14 +474,52 @@ machines together and tracing the interaction to find the minimal bridge point.
       [0-31] -> cpu@[0-31]  // CPU interrupt lines
   ```
 
-  **Implementation plan:**
-  1. Upgrade `peripherals/ESP32_DPORT.cs` to track interrupt source→CPU mappings
-  2. Add GPIO inputs (one per peripheral source) and outputs (one per CPU interrupt line)
-  3. Implement level-OR routing logic
-  4. Wire ESP32_SPI.IRQ → dport@31, dport → cpu in meadow-esp32.repl
-  5. Remove direct cpu.OnGPIO calls from ESP32_SPI — it just asserts its IRQ GPIO
-  6. Update tick injection to also go through the interrupt matrix (or keep it direct
-     since CCOMPARE0 is hardwired, not matrix-routed)
+  **Implementation status:**
+  - [x] Upgraded `peripherals/ESP32_DPORT.cs`: 69-source mapping table, GPIO inputs from
+    peripherals, GPIO outputs per CPU interrupt line, level-OR routing logic
+  - [x] Wired ESP32_SPI.IRQ → dport@31 in meadow-esp32.repl
+  - [x] `esp_intr_alloc` correctly writes mappings: source 31 → CPU interrupt 6 confirmed
+  - [x] DPORT routing works: source assertion → mapping lookup → CPU line set
+  - [ ] **DPORT GPIO outputs NOT wired to CPU** — see blocker below
+
+- [x] Fixed IPC demotion: limited to first 6 tasks (IPC/crosscore only). SPI task and sync
+  task at priority 24 now run — SPI_TASK entry confirmed.
+- [x] Fixed init IRQ: ESP32_SPI only fires interrupt when injecting a frame, not during init.
+
+- [ ] **Blocker: Xtensa interrupt delivery from OnGPIO.**
+  `cpu.OnGPIO(6, True/False)` does NOT reliably deliver interrupts to the Xtensa CPU.
+  Evidence: tick injection fires `OnGPIO(6, True); OnGPIO(6, False)` from the idle task
+  Python hook, and TICK_INJECT logs confirm the hook runs, but xTickCount stays 0 —
+  xPortSysTickHandler never executes.
+
+  This is NOT a Python performance issue — the hook fires. The old boot script's ticks
+  appeared to work because `_dispatch_fixup` at `_frxt_dispatch` manually managed
+  xTickCount and delayed task lists in Python. The hardware ISR may never have fired.
+
+  **Possible causes:**
+  - `INTENABLE` bit 6 not set (our `_xtos_set_intlevel` NOPs may prevent proper setup)
+  - `OnGPIO(n, false)` clears the interrupt before the CPU latches it (Xtensa level-
+    triggered interrupts should latch in the INTERRUPT register, but Renode may not)
+  - tlib's `tlib_set_irq` implementation may not properly handle edge pulses
+
+  **This blocks everything downstream:**
+  - SPI task stuck in `vTaskDelay(10)` loop — needs ticks to wake
+  - SPI ISR can't fire — needs INTENABLE and interrupt delivery working
+  - SpiBridge frames can't be injected — needs SPI ISR → `spi_slave_queue_trans` → `cmd.usr`
+
+  **Additional issue: CPU interrupt 6 contention.**
+  CCOMPARE0 timer (hardwired) and SPI3 (`esp_intr_alloc` maps to 6) share the same line.
+  Renode doesn't support multi-driver GPIO OR — last `Set()` wins. Current workaround:
+  DPORT outputs not wired to line 6; both tick injection and ESP32_SPI fire directly on CPU.
+
+  **Next steps:**
+  - Investigate INTENABLE state at runtime
+  - Try `OnGPIO(6, true)` without false — see if keeping it asserted fires the ISR
+  - Check tlib Xtensa interrupt handling: `tlib_set_irq`, `check_interrupts` helper
+  - If OnGPIO doesn't work: may need a tlib-level fix for interrupt latching
+  - Once interrupt delivery is fixed: SPI task wakes → `spi_slave_queue_trans` →
+    ESP32_SPI arms → SpiBridge frames flow → ESPCP handshake completes
+
 - [ ] Test: ESPCP boot handshake (STM32 ↔ real ESP32 firmware)
 - [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns
 - [ ] Verify frame integrity (CRC checks pass on both sides)
@@ -503,9 +541,12 @@ incrementally as integration testing reveals what's needed — not pre-emptively
 
 ### In Progress
 - [x] ESP32 SPI3 peripheral (`peripherals/ESP32_SPI.cs`) — register map, DMA descriptors,
-  SpiBridge connection all working. Blocked on interrupt delivery (needs DPORT matrix).
-- [ ] DPORT interrupt matrix upgrade (`peripherals/ESP32_DPORT.cs`) — see Phase 2.2 plan
-  for detailed design. Required for proper interrupt routing from peripherals to CPU.
+  SpiBridge connection all working. Blocked on interrupt delivery to CPU.
+- [x] DPORT interrupt matrix (`peripherals/ESP32_DPORT.cs`) — upgraded with 69-source
+  mapping table, GPIO inputs/outputs, level-OR routing. Works correctly but GPIO outputs
+  not wired to CPU due to interrupt 6 contention with hardwired CCOMPARE0 timer.
+- [ ] Xtensa interrupt delivery investigation — `cpu.OnGPIO(6)` doesn't fire the ISR.
+  Need to check INTENABLE state, tlib interrupt latching, and possibly fix in tlib.
 
 ### Future Stubs (as needed during integration)
 - [ ] WiFi hardware: either proper register stubs or build firmware variant without WiFi

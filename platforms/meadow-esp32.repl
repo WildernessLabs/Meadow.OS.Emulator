@@ -108,7 +108,14 @@ uart0Mirror: UART.ESP32_UART @ sysbus 0x60000000
 // ============================================================================
 
 // DPORT registers (system/clock/reset control + interrupt matrix)
-// Custom peripheral: auto-sets cache flush done bits
+// Custom peripheral: cache flush done bits + peripheral→CPU interrupt routing.
+// GPIO inputs [0-68] = peripheral interrupt sources
+// GPIO outputs [0-31] = CPU interrupt lines
+// DPORT registers (system/clock/reset control + interrupt matrix)
+// Interrupt matrix routing is implemented but GPIO outputs are NOT wired to CPU
+// because Renode doesn't support multi-driver OR on GPIO lines. The hardwired
+// CCOMPARE0 timer (interrupt 6) and matrix-routed peripherals would conflict.
+// Instead, peripherals that need interrupts fire them directly on the CPU.
 dport: Miscellaneous.ESP32_DPORT @ sysbus 0x3FF00000
 
 // GPIO registers
@@ -145,9 +152,9 @@ spi2: Memory.MappedMemory @ sysbus 0x3FF64000
 // SPI3 (VSPI) — Meadow ESPCP SPI peripheral
 // Custom C# peripheral: handles register interface for ESP-IDF spi_slave driver,
 // DMA descriptor chain reads/writes, and cross-machine SpiBridge connection.
-// IRQ wired to CPU interrupt 6 (mapped by esp_intr_alloc at runtime via DPORT).
+// IRQ routed through DPORT interrupt matrix (source 31 → CPU interrupt via mapping).
 spi3: SPI.ESP32_SPI @ sysbus 0x3FF65000
-    IRQ -> cpu@6
+    IRQ -> dport@31
 
 // I2C0
 i2c0: Memory.MappedMemory @ sysbus 0x3FF53000

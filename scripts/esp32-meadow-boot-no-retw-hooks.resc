@@ -523,6 +523,10 @@ _bus = _machine['sysbus']
 
 _cpu = _machine['sysbus.cpu']
 
+# Get DPORT reference for routing timer interrupts through the interrupt matrix
+_dport_ref = _machine['sysbus.dport']
+__builtin__._dport_ref = _dport_ref
+
 # Capture UART debug output
 # ESP-IDF uses ets_printf (ROM @ 0x40007d54) for boot messages.
 # After entry a1, 0x80: A2=fmt, A3-A7=first 5 variadic args.
@@ -610,28 +614,30 @@ __builtin__._ets_printf_hook = _ets_printf_hook
 __builtin__._read_cstr = _read_cstr
 
 _ipc_demoted = [False]  # one-shot flag for IPC task demotion
+_total_demoted = [0]    # track total demotions to stop after IPC tasks
 
 def _demote_ipc_tasks(R, W):
-    # Demote IPC tasks from pri 24 to 0 (not needed in single-core emulation)
-    # Walk ready list at priority 24 (offset = 24*20 = 480)
+    # Demote IPC tasks from pri 24 to 0 (not needed in single-core emulation).
+    # Only demote the first 6 tasks — these are the IPC/crosscore tasks created
+    # during scheduler init. Later pri-24 tasks (SPI, Sync) must keep running.
+    if _total_demoted[0] >= 6:
+        return
     rl24 = 0x3FFC9384 + 24 * 20
     cnt24 = R(rl24)
     if cnt24 == 0:
         return
-    # Remove all items from ready list 24
     sentinel24 = rl24 + 8
     item = R(rl24 + 12)  # xListEnd.pxNext
-    moved = 0
     for _ in range(cnt24 + 1):
         if item == sentinel24 or item == 0:
+            break
+        if _total_demoted[0] >= 6:
             break
         next_item = R(item + 4)
         tcb = R(item + 12)
         pri = R(tcb + 48)
         if pri == 24:
-            # Change priority to 0
             W(tcb + 48, 0)
-            # Remove from pri24 list
             nx = R(item + 4)
             pv = R(item + 8)
             W(nx + 8, pv)
@@ -641,7 +647,6 @@ def _demote_ipc_tasks(R, W):
                 W(rl24 + 4, pv)
             W(item + 16, 0)
             W(rl24, R(rl24) - 1)
-            # Add to pri0 list
             rl0 = 0x3FFC9384
             ri = R(rl0 + 4)
             rp = R(ri + 8)
@@ -651,12 +656,10 @@ def _demote_ipc_tasks(R, W):
             W(ri + 8, item)
             W(item + 16, rl0)
             W(rl0, R(rl0) + 1)
-            moved += 1
-            _cpu.Log(LogLevel.Error, 'DEMOTED IPC task TCB=0x%x from pri24 to pri0' % tcb)
+            _total_demoted[0] += 1
+            _cpu.Log(LogLevel.Error, 'DEMOTED IPC task #%d TCB=0x%x from pri24 to pri0' % (_total_demoted[0], tcb))
         item = next_item
-    # Update uxTopReadyPriority if we removed all pri24 tasks
     if R(rl24) == 0:
-        # Find new top priority
         for p in range(24, -1, -1):
             if R(0x3FFC9384 + p * 20) > 0:
                 W(0x3FFC92EC, p)
@@ -914,6 +917,8 @@ def _idle_tick_direct():
         ps = _cpu.GetRegister(38).RawValue
         new_ps = (ps & ~0x1F) | 0x20  # clear INTLEVEL, clear EXCM, set UM
         _cpu.SetRegister(38, _RV.Create(int(new_ps), 32))
+        # Fire timer interrupt directly on CPU (CCOMPARE0 is hardwired to interrupt 6,
+        # not routed through the DPORT interrupt matrix).
         _cpu.OnGPIO(6, True)
         _cpu.OnGPIO(6, False)
         if c <= 1000 or c % 10000 == 0:

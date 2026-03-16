@@ -95,15 +95,6 @@ namespace Antmicro.Renode.Peripherals.SPI
         // ── Cross-machine bridge connection ────────────────────────────────
 
         /// <summary>
-        /// Set the CPU interrupt number for SPI3. Read from DPORT mapping after boot.
-        /// </summary>
-        public void SetInterruptNumber(int number)
-        {
-            spiInterruptNumber = number;
-            this.Log(LogLevel.Info, "SPI: Interrupt number set to {0}", number);
-        }
-
-        /// <summary>
         /// Set the SpiBridge reference. Called from .resc script or monitor.
         /// Accepts object type to avoid compile-time dependency on SpiBridge.cs load order.
         /// Also registers a callback so we're notified when frames arrive.
@@ -182,10 +173,6 @@ namespace Antmicro.Renode.Peripherals.SPI
                     writeCallback: (oldVal, newVal) =>
                     {
                         transDone = newVal;
-                        if(!newVal && oldVal)
-                        {
-                            this.Log(LogLevel.Debug, "SPI: trans_done cleared by driver");
-                        }
                         UpdateIrq();
                     },
                     valueProviderCallback: _ => transDone,
@@ -352,31 +339,25 @@ namespace Antmicro.Renode.Peripherals.SPI
         private void UpdateIrq()
         {
             bool shouldAssert = transDone && transInten;
-            var cpuEnum = machine.SystemBus.GetCPUs().GetEnumerator();
-            cpuEnum.MoveNext();
-            var xtensaCpu = cpuEnum.Current;
-            var gpioReceiver = xtensaCpu as IGPIOReceiver;
-            if(gpioReceiver != null)
+            // Also set the GPIO for DPORT routing (works for non-hardwired interrupt lines)
+            IRQ.Set(shouldAssert);
+
+            if(shouldAssert)
             {
-                // Level-triggered: keep GPIO asserted while trans_done && trans_inten.
-                // The ISR will clear trans_done, which calls UpdateIrq again to deassert.
-                gpioReceiver.OnGPIO(spiInterruptNumber, shouldAssert);
-                if(shouldAssert)
+                this.Log(LogLevel.Warning, "SPI: Firing interrupt on CPU (trans_done && trans_inten)");
+                // Fire directly on CPU because interrupt 6 is shared with the hardwired
+                // CCOMPARE0 timer and can't be driven through DPORT without conflicting.
+                // Use edge pulse like tick injection does.
+                var cpuEnum = machine.SystemBus.GetCPUs().GetEnumerator();
+                cpuEnum.MoveNext();
+                var gpioReceiver = cpuEnum.Current as IGPIOReceiver;
+                if(gpioReceiver != null)
                 {
-                    this.Log(LogLevel.Debug, "SPI: Interrupt 6 level HIGH");
-                }
-                else
-                {
-                    this.Log(LogLevel.Debug, "SPI: Interrupt 6 level LOW");
+                    gpioReceiver.OnGPIO(6, true);
+                    gpioReceiver.OnGPIO(6, false);
                 }
             }
         }
-
-        // CPU interrupt number for SPI3 — configurable via SetInterruptNumber().
-        // On real hardware, esp_intr_alloc dynamically maps peripheral sources to
-        // CPU interrupt lines via the DPORT interrupt matrix. In emulation, we
-        // read the mapping after boot and set it here.
-        private int spiInterruptNumber = 6; // default, overridden by script
 
         // ── DMA descriptor chain operations ────────────────────────────────
 

@@ -532,7 +532,10 @@ __builtin__._ets_printf_hook = _ets_printf_hook
 __builtin__._read_cstr = _read_cstr
 
 _ipc_demoted = [False]
+_total_demoted = [0]
 def _demote_ipc_tasks(R, W):
+    if _total_demoted[0] >= 6:
+        return
     rl24 = 0x3FFC9384 + 24 * 20
     cnt24 = R(rl24)
     if cnt24 == 0:
@@ -541,6 +544,8 @@ def _demote_ipc_tasks(R, W):
     item = R(rl24 + 12)
     for _ in range(cnt24 + 1):
         if item == sentinel24 or item == 0:
+            break
+        if _total_demoted[0] >= 6:
             break
         next_item = R(item + 4)
         tcb = R(item + 12)
@@ -565,7 +570,8 @@ def _demote_ipc_tasks(R, W):
             W(ri + 8, item)
             W(item + 16, rl0)
             W(rl0, R(rl0) + 1)
-            _cpu.Log(LogLevel.Error, 'DEMOTED IPC task TCB=0x%x from pri24 to pri0' % tcb)
+            _total_demoted[0] += 1
+            _cpu.Log(LogLevel.Error, 'DEMOTED IPC task #%d TCB=0x%x from pri24 to pri0' % (_total_demoted[0], tcb))
         item = next_item
     if R(rl24) == 0:
         for p in range(24, -1, -1):
