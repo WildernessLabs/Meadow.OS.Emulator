@@ -345,7 +345,7 @@ namespace Antmicro.Renode.Peripherals.SPI
             IRQ.Set(shouldAssert);
             if(shouldAssert)
             {
-                this.Log(LogLevel.Debug, "SPI: IRQ asserted (trans_done && trans_inten)");
+                this.Log(LogLevel.Warning, "SPI: IRQ asserted (trans_done={0} trans_inten={1})", transDone, transInten);
             }
         }
 

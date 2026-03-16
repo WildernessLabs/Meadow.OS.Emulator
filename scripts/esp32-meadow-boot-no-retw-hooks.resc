@@ -707,6 +707,9 @@ __builtin__._dispatch_fixup = _dispatch_fixup
 cpu AddHook 0x40091360 "_dispatch_fixup()"
 # Validate vListInsertEnd list/pxIndex before dereferencing — prevents STORE_PROHIBITED
 cpu AddHook 0x400941bb "_vListInsertEnd_guard()"
+# Demote high-priority tasks at creation to prevent preempting constructors
+# Hook AFTER entry (0x4009244f) so we see callee's registers
+cpu AddHook 0x4009244f "_demote_task_at_creation()"
 
 # Fix: xQueueGenericReceive — initialize uninitialized Queue_t structs
 cpu AddHook 0x40091cb8 "_xqr_diag()"
@@ -775,8 +778,15 @@ def _thread_task_callx8_guard():
         _thread_null_count[0] += 1
         if _thread_null_count[0] <= 5:
             _cpu.Log(LogLevel.Warning, 'Thread::Task: null method a3=0x%08x, skipping to loop start (#%d)' % (a3, _thread_null_count[0]))
-        _cpu.PC = _RV.Create(0x400e153b, 32)  # jump to loop start (TakeExecutionSemaphore)
+        _cpu.PC = _RV.Create(0x400e154f, 32)  # skip callx8, go to TaskCompleted
 __builtin__._thread_task_callx8_guard = _thread_task_callx8_guard
+
+def _demote_task_at_creation():
+    pri = _cpu.GetRegister(95).RawValue
+    if pri >= 24:
+        _cpu.SetRegister(95, _RV.Create(0, 32))
+        _cpu.Log(LogLevel.Warning, 'xTaskCreate: demoted priority %d to 0' % pri)
+__builtin__._demote_task_at_creation = _demote_task_at_creation
 
 _xqr_count = [0]
 def _xqr_diag():

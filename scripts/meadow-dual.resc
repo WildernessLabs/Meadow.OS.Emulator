@@ -392,6 +392,18 @@ sysbus WriteByte 0x40135F52 0xF0
 # app_cpu_started hook
 cpu AddHook 0x40081D50 "self.Bus.WriteByte(0x3FFC91A8, 1)"
 
+# NOP freeze_cs/restore_cs in SPI ISR — reads gpio_iomux_in which dereferences
+# NULL function pointers from IO_MUX MappedMemory (returns 0).
+# freeze_cs callx8 at 0x4008bc32 → NOP
+sysbus WriteByte 0x4008bc32 0xF0
+sysbus WriteByte 0x4008bc33 0x20
+sysbus WriteByte 0x4008bc34 0x00
+# restore_cs branch at 0x4008bd48 (bnez to 0x4008bc96) → NOP
+# Without this NOP, the ISR skips spi_slave_hal_user_start and cmd.usr is never set.
+sysbus WriteByte 0x4008bd48 0xF0
+sysbus WriteByte 0x4008bd49 0x20
+sysbus WriteByte 0x4008bd4a 0x00
+
 # NOP GPIO ROM calls in SPI ctor
 sysbus WriteByte 0x400d9455 0xF0
 sysbus WriteByte 0x400d9456 0x20
@@ -600,8 +612,17 @@ def _thread_task_callx8_guard():
         _thread_null_count[0] += 1
         if _thread_null_count[0] <= 5:
             _cpu.Log(LogLevel.Warning, 'Thread::Task: null method a3=0x%08x, skip (#%d)' % (a3, _thread_null_count[0]))
-        _cpu.PC = _RV.Create(0x400e153b, 32)
+        _cpu.PC = _RV.Create(0x400e154f, 32)  # skip callx8, go to TaskCompleted
 __builtin__._thread_task_callx8_guard = _thread_task_callx8_guard
+
+def _demote_task_at_creation():
+    # xTaskCreatePinnedToCore entry+3: a6 (register 95) = uxPriority.
+    # Log but do NOT demote — the _dispatch_fixup handles demotion at runtime.
+    # Demoting at creation prevents the task from ever being scheduled.
+    pri = _cpu.GetRegister(95).RawValue
+    if pri >= 24:
+        _cpu.Log(LogLevel.Debug, 'xTaskCreate: pri=%d (not demoting)' % pri)
+__builtin__._demote_task_at_creation = _demote_task_at_creation
 
 _vlie_fix_count = [0]
 def _vListInsertEnd_guard():
@@ -703,6 +724,29 @@ __builtin__._queue_recv_sched_check = _queue_recv_sched_check
 # ESP32 hooks
 cpu AddHook 0x40091360 "_dispatch_fixup()"
 cpu AddHook 0x400e154c "_thread_task_callx8_guard()"
+# Hook AFTER entry (0x4009244f) so we see callee's registers, not caller's
+cpu AddHook 0x4009244f "_demote_task_at_creation()"
+# Trace SPI task and ProcessMessages
+cpu AddHook 0x400d9abc "self.Log(LogLevel.Error, 'SPI_TASK_ENTER')"
+cpu AddHook 0x400d9ad6 "self.Log(LogLevel.Error, 'SPI_TASK_FLAG_SET')"
+cpu AddHook 0x400d9ae1 "self.Log(LogLevel.Error, 'SPI_PROCESS_MESSAGES')"
+cpu AddHook 0x400d99e8 "self.Log(LogLevel.Error, 'ProcessMessages_ENTER')"
+cpu AddHook 0x4008bbe4 "self.Log(LogLevel.Error, 'SPI_ISR_ENTER')"
+cpu AddHook 0x4009f000 "self.Log(LogLevel.Error, 'spi_slave_hal_user_start')"
+cpu AddHook 0x4009f028 "self.Log(LogLevel.Error, 'spi_slave_hal_prepare_data')"
+# ISR path tracing
+cpu AddHook 0x4008bcb3 "self.Log(LogLevel.Error, 'ISR_PATH_B3 (→user_start)')"
+cpu AddHook 0x4008bccd "self.Log(LogLevel.Error, 'ISR_PATH_CD (user_start call)')"
+cpu AddHook 0x4008bce2 "self.Log(LogLevel.Error, 'ISR_PATH_E2 (esp_intr_enable)')"
+cpu AddHook 0x4008bcfd "self.Log(LogLevel.Error, 'ISR_prepare_data_A (first path)')"
+cpu AddHook 0x4008bd3d "self.Log(LogLevel.Error, 'ISR_prepare_data_B (second path)')"
+cpu AddHook 0x4008bd48 "self.Log(LogLevel.Error, 'ISR_bnez_patched (should be NOP)')"
+cpu AddHook 0x4008bd4b "self.Log(LogLevel.Error, 'ISR_j_BCB3 (jump to user_start path)')"
+cpu AddHook 0x4008bc89 "self.Log(LogLevel.Error, 'ISR_EXIT (retw path)')"
+cpu AddHook 0x4008bc96 "self.Log(LogLevel.Error, 'ISR_RESTORE_CS')"
+cpu AddHook 0x400d99fe "self.Log(LogLevel.Error, 'PM: spi_slave_queue_trans returned a10=0x%x' % self.GetRegisterUnsafe(99).RawValue)"
+cpu AddHook 0x400d9a15 "self.Log(LogLevel.Error, 'PM: calling xTaskNotifyWait')"
+cpu AddHook 0x400d9a18 "self.Log(LogLevel.Error, 'PM: xTaskNotifyWait returned')"
 cpu AddHook 0x400941bb "_vListInsertEnd_guard()"
 cpu AddHook 0x40091cb8 "_xqr_diag()"
 cpu AddHook 0x40082c14 "_lock_validate()"
