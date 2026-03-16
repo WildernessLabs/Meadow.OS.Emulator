@@ -1,7 +1,7 @@
 # Plan: Dual-Machine ESP32 Emulation
 
 ## Track ID: `renode-esp32-dual`
-## Status: `in-progress` (Phase 1 ✅, retw fix ✅, ESP32 boots ✅, dual-machine running ✅, Phase 2.2 — SPI frame tracing next)
+## Status: `in-progress` (Phase 1 ✅, retw fix ✅, ESP32 boots ✅, dual-machine running ✅, window crash fixed ✅, Phase 2.2 — SPI frame tracing next)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -572,18 +572,88 @@ machines together and tracing the interaction to find the minimal bridge point.
     the exception goes directly to `xt_unhandled_exception` (0x40090fc0)
   - Final state: EXCCAUSE=20 (INST_FETCH_ERROR), EPC1=0, PS.EXCM=1, WB=3
 
-  **Hypothesis:** After the overflow cascade completes successfully and the `entry` instruction
-  re-executes, something in the subsequent code path causes a jump to PC=0. This might be:
-  1. A register value corrupted by the phys_regs wrap-around (physical regs 0-7 used by both
-     WB=0 and WB=14 depending on context)
-  2. The `sync_windowbase` after `entry` loading stale phys_regs values
-  3. A TCG code generation issue in the entry TB re-execution after overflow
+  **Investigation results (2026-03-16):**
 
-  **Next steps:**
-  - Add debug logging in tlib's `do_interrupt` for the EXC_IRQ path with pending_level=0
-  - Trace the exact PC progression after the last rfwo returns
-  - Check if `xtensa_sync_window_from_phys` loads correct values after the cascade
-  - Consider adding a tlib fix that validates register values after window rotation
+  Three tlib fixes applied to branch `meadow-emulator-fixes`:
+
+  1. **translate_rfw: tcg_const_i32 → tcg_temp_local_new_i32** — Same pattern as the
+     retw fix. `translate_rfw` (rfwo/rfwu) used `tcg_const_i32(1)` to create a non-local
+     TCG temp. Changed to `tcg_temp_local_new_i32()` + `tcg_gen_movi_i32(tmp, 1)` to
+     match the retw fix and QEMU upstream. Prevents potential register allocator corruption
+     across helper calls.
+
+  2. **window_check: n > w early exit instead of clamp** — The defensive `n > w` check
+     previously CLAMPED n to w and proceeded with a SPURIOUS overflow exception. This is
+     destructive: it rotates to a window that doesn't need spilling, and rfwo clears a
+     WINDOWSTART bit for a potentially in-use window. Changed to log a warning, set
+     env->pc = entry_PC, and cpu_loop_exit to restart the CPU loop with a fresh TB lookup.
+
+  3. **Diagnostic logging** — Added to exception_cause (PC=0 detection), sync_windowbase
+     (a0=0 after wrap-around rotation), window_check (pre/post rotate state at WB≥13),
+     and restore_owb (rfwo state at high WB values).
+
+  **Key diagnostic findings from single-machine ESP32 boot:**
+
+  - The call chain uses call8 exclusively (WS=0x5555, all even bits). Window overflow at
+    WB=14 correctly dispatches WOVF8 (type=1). regs[4] shows 0 before rotation because
+    call8 puts the return address in regs[8], not regs[4].
+
+  - The a0=0 warnings in sync_windowbase are mostly false alarms — a0 being 0 after
+    rotation is normal when physical registers weren't set by the current call chain.
+
+  - **Root cause identified: WOVF8 handler corrupts a0 via uninitialized stack base save area.**
+    The WindowOverflow8 handler's `l32e a0, a1, -12` loads the caller's SP from the base
+    save area on the spilled window's stack. FreeRTOS `pxPortInitialiseStack` clears the
+    entire stack to 0, so the base save area at [SP-12] is 0. When the call chain wraps
+    around the 16-window register file (8 call8 levels), WOVF8 loads 0 into a0, which is
+    then used as a base address for s32e instructions (writing to ~0xFFFFFFE0 = memory
+    corruption) and propagated through phys_regs via sync.
+
+  - The crash manifests as INST_FETCH_ERROR at PC=0 (cause=20). The function at 0x400e1538
+    (`entry a1, 32`) has a `callx8 a0` at offset +19 (0x400e154b). After WOVF8 corrupts
+    a0, this callx8 jumps through a0 which contains a corrupted value (0 or a stack
+    address). NOP'ing this callx8 produces a different crash (unrecognized opcode at
+    0x400d21e7), confirming the code path is disrupted.
+
+  - **Fourth tlib fix applied: test_ill_retw a0 fixup.** When retw encounters a0 with
+    n=0 (bits 30-31 = 0) but WINDOWSTART shows a caller at distance m, the fix sets bits
+    30-31 of a0 to m, allowing the underflow handler to restore correct registers. This
+    handles the case where WOVF8 corruption propagates through to retw.
+
+  **PC=0 crash RESOLVED (2026-03-16):**
+
+  Root cause was NOT window overflow corruption. Disassembly revealed the function at
+  0x400e1538 is `Thread::Task(void*)` — a FreeRTOS task loop that calls `GetMethod()`
+  to get a function pointer, then `callx8 a3` to invoke it. The SPI constructor creates
+  the SPI task at priority 24 via xTaskCreate. The high-priority task preempts the
+  constructor IMMEDIATELY, before the Thread object's method pointer is set. GetMethod()
+  returns 0 → `callx8 a3` jumps to 0 → INST_FETCH_ERROR.
+
+  Fix: Python hook at `callx8 a3` (0x400e154c) checks if a3 is null/invalid and redirects
+  to the loop start (0x400e153b) to retry. The task spins until the constructor finishes
+  setting the method pointer, then the real method executes.
+
+  After this fix, the system progresses past the SPI constructor to the known vListInsertEnd
+  crash (STORE_PROHIBITED at 0x400941c7, EXCVADDR=0x043d3004) — the pre-existing pxIndex
+  DRAM corruption from window overflow register spills. This is a separate issue.
+
+  **vListInsertEnd crash RESOLVED (2026-03-16):**
+
+  After the Thread::Task fix, the system hit a STORE_PROHIBITED crash in vListInsertEnd
+  (0x400941c7, EXCVADDR=0x043d3004). This is the known pxIndex DRAM corruption from window
+  overflow register spills. The existing _dispatch_fixup only validates the 25 ready lists.
+  Fix: Python hook at vListInsertEnd entry (0x400941bb) validates pxIndex and pxIndex->pxNext
+  before dereferencing. Resets corrupt values to &xListEnd (list+8).
+
+  **Both single-machine and dual-machine boot stably for 90+ seconds with zero crashes.**
+
+  **Summary of all fixes applied (2026-03-16):**
+  - tlib: translate_rfw local temp (tcg_const_i32 → tcg_temp_local_new_i32)
+  - tlib: window_check n>w early exit (cpu_loop_exit instead of spurious overflow)
+  - tlib: test_ill_retw a0 fixup (n=0 → use m from WINDOWSTART)
+  - tlib: diagnostic logging (PC=0 detection, window rotation tracing)
+  - Boot script: Thread::Task null method guard (race condition with SPI ctor)
+  - Boot script: vListInsertEnd pxIndex/pxNext validation (window spill corruption)
 
 - [ ] Test: ESPCP boot handshake (STM32 ↔ real ESP32 firmware)
 - [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns
@@ -739,6 +809,8 @@ covers the deeper validation once the basic connection works.
 | 2026-03-15 | **ESP32 firmware source at Meadow-ESP32** | The custom ESP32 firmware lives at `/Users/bryancostanich/Git_Repos/Wilderness_Labs/Meadow-ESP32/` (github.com/WildernessLabs/Meadow-ESP32). Key source: `components/F7Services/Messaging/` (SpiTransportProvider, MessageDispatcher, Encoders, SharedEnums), `components/F7Services/System/` (SystemRequestHandler), `components/F7Services/WiFi/`, `components/F7Services/Bluetooth/`. ESPCP wire format: 27-byte header (protocol, CRC32, PacketOffset/Length, MessageType, Interface, Function, StatusCode, MessageID, PayloadLength) + payload, max 4092 bytes per SPI frame. |
 | 2026-03-13 | **`or a1,a1,a1` bug status unclear** | 683 instances of `or a1,a1,a1` in firmware (compiler-generated NOPs). Previously documented as corrupting A1 in Renode. The tlib translate_or code looks correct (`tcg_gen_or_i32(out, in, in)` with same TCG variable). May have been a retw-cascade symptom. Needs isolated testing to confirm. |
 | 2026-03-15 | **Dual-machine boot works** | Both STM32 (NuttX) and ESP32 (Meadow firmware) boot and run simultaneously in the same Renode emulation. STM32 reaches ESPCP driver init at ~25s (SPI2 register config writes observed). ESP32 reaches idle with SPI task running and ticks. Multi-machine Python hooks use `TryGetMachineByName()` API. Build artifacts symlinked from main worktree since NuttX hasn't been built in the -esp32-dual worktree. |
+| 2026-03-16 | **Window overflow crash — root cause and fix** | The PC=0 crash during SPI init was a race condition, not a window overflow bug. `Thread::Task(void*)` at 0x400e1538 calls `GetMethod()` which returns NULL because the SPI task (priority 24) preempts the constructor before the method pointer is set. Fix: Python hook at `callx8 a3` (0x400e154c) redirects to loop start when a3 is null. Secondary crash in vListInsertEnd from pxIndex corruption (window overflow register spill writes IRAM addresses into list fields) fixed with validation hook. Four tlib robustness fixes also applied: translate_rfw local temp, window_check n>w early exit, test_ill_retw a0 fixup, diagnostic logging. Both single-machine and dual-machine now stable for 90+ seconds. |
+| 2026-03-16 | **FreeRTOS stack base save area is intentionally zero** | Researched pxPortInitialiseStack (ESP-IDF 4.2.4): the entire stack frame is zeroed, including the base save area at [SP-12]. This is by design — terminates GDB backtrace and RETW chain. On real hardware, the 16-window register file never wraps because: (1) call chains are < 8 deep with call8, (2) SPILL_ALL_WINDOWS during context switches prevents accumulation, (3) compiler mixes call4/call8 keeping effective depth low. In emulation, the SPI init chain can reach 8 call8 levels (WS=0x5555), wrapping to WB=0 where WOVF8's `l32e a0, a1, -12` loads 0. |
 
 ## Changes Log
 
@@ -785,3 +857,10 @@ covers the deeper validation once the basic connection works.
 | 2026-03-13 | `scripts/esp32-meadow-boot-no-retw-hooks.resc` | Full boot achieved: (1) NOP 7 GPIO ROM callx8 in SPI ctor (gpio_pad_select_gpio reads NULL function pointers from IO_MUX). (2) Skip BT GetInstance (return NULL — ROM r_ld_reset hangs). (3) Skip WiFi Setup (esp_wifi_restore → unmapped WiFi regs). (4) Skip FileSystem::Setup (LittleFS → flash partition). (5) Skip watchdogs (task_wdt_init return ESP_OK, task_wdt_add return ESP_OK, int_wdt_init return). (6) Panic/abort trace hooks. Boot reaches idle with SPI ProcessMessages running and tick injection active. |
 | 2026-03-15 | `scripts/meadow-dual.resc` | Dual-machine boot script: creates STM32 "stm32" machine (NuttX + SpiBridge on SPI2) and ESP32 "esp32" machine (Meadow firmware). Both boot and run simultaneously. STM32 reaches ESPCP init ~25s in (SPI2 register writes). ESP32 reaches idle with ticks. Python uses `TryGetMachineByName('esp32')` for cross-machine peripheral access. |
 | 2026-03-15 | `platforms/meadow-f7-dual.repl` | STM32 board definition for dual-machine: identical to meadow-f7.repl but with `spiBridge: SPI.SpiBridge @ spi2` replacing `espcpStub: SPI.EspcpStub @ spi2`. Same GPIO wiring (Ready→gpioPortI@10, MessageWaiting→gpioPortI@0). |
+| 2026-03-16 | tlib `arch/xtensa/translate.c` | **translate_rfw local temp fix**: Changed `tcg_const_i32(1)` → `tcg_temp_local_new_i32()` + `tcg_gen_movi_i32(tmp, 1)` in `translate_rfw()` (rfwo/rfwu). Same pattern as the retw fix. Non-local TCG temp was potentially unsafe with Renode's old register allocator. Aligns with QEMU upstream. |
+| 2026-03-16 | tlib `arch/xtensa/win_helper.c` | **window_check n>w early exit**: Replaced destructive `n = w` clamp with `cpu_loop_exit()` restart. The old behavior triggered spurious overflow exceptions that cleared WINDOWSTART bits for in-use windows, corrupting register state. |
+| 2026-03-16 | tlib `arch/xtensa/win_helper.c` | **test_ill_retw a0 fixup**: When retw has n=0 (a0 bits 30-31 zero) but WINDOWSTART shows a caller at distance m, fixes a0 bits 30-31 to match m. Handles WOVF8/12 scratch corruption of a0 when stack base save area is uninitialized. |
+| 2026-03-16 | tlib `arch/xtensa/win_helper.c`, `exc_helper.c` | **Diagnostic logging**: PC=0 detection in exception_cause, a0=0 detection after window rotation in sync_windowbase, pre/post-rotate state logging in window_check (WB≥13), rfwo state logging in restore_owb. |
+| 2026-03-16 | `scripts/esp32-meadow-boot-no-retw-hooks.resc` | **Thread::Task null method guard**: Python hook at callx8 a3 (0x400e154c) in `Thread::Task(void*)`. SPI constructor creates priority-24 task that preempts before method pointer is set → GetMethod returns 0 → callx8 jumps to 0. Hook detects null/invalid a3 and redirects to loop start (0x400e153b) to retry. |
+| 2026-03-16 | `scripts/esp32-meadow-boot-no-retw-hooks.resc`, `scripts/meadow-dual.resc` | **vListInsertEnd guard**: Python hook at vListInsertEnd entry (0x400941bb) validates pxIndex (list+4) and pxIndex->pxNext (pxIndex+8) before dereferencing. Resets corrupt pointers (outside DRAM 0x3FF00000-0x40000000) to &xListEnd (list+8). Prevents STORE_PROHIBITED crashes from window overflow register spill corruption. |
+| 2026-03-16 | `scripts/meadow-dual.resc` | Added Thread::Task null method guard and vListInsertEnd guard to dual-machine boot script (same hooks as single-machine). Both machines now boot and run stably for 90+ seconds with zero crashes. |

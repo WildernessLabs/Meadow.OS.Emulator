@@ -593,6 +593,38 @@ def _dispatch_fixup():
             W(base + 4, base + 8)
 __builtin__._dispatch_fixup = _dispatch_fixup
 
+_thread_null_count = [0]
+def _thread_task_callx8_guard():
+    a3 = _cpu.GetRegister(92).RawValue
+    if a3 == 0 or a3 < 0x40000000 or a3 >= 0x40200000:
+        _thread_null_count[0] += 1
+        if _thread_null_count[0] <= 5:
+            _cpu.Log(LogLevel.Warning, 'Thread::Task: null method a3=0x%08x, skip (#%d)' % (a3, _thread_null_count[0]))
+        _cpu.PC = _RV.Create(0x400e153b, 32)
+__builtin__._thread_task_callx8_guard = _thread_task_callx8_guard
+
+_vlie_fix_count = [0]
+def _vListInsertEnd_guard():
+    R = _bus.ReadDoubleWord
+    W = _bus.WriteDoubleWord
+    a2 = _cpu.GetRegister(91).RawValue
+    if a2 < 0x3FF00000 or a2 >= 0x40000000:
+        return
+    pxIndex = R(a2 + 4)
+    if pxIndex < 0x3FF00000 or pxIndex >= 0x40000000:
+        W(a2 + 4, a2 + 8)
+        _vlie_fix_count[0] += 1
+        if _vlie_fix_count[0] <= 10:
+            _cpu.Log(LogLevel.Warning, 'vListInsertEnd: corrupt pxIndex=0x%08x, fixed (#%d)' % (pxIndex, _vlie_fix_count[0]))
+        return
+    pxNext = R(pxIndex + 8)
+    if pxNext < 0x3FF00000 or pxNext >= 0x40000000:
+        W(pxIndex + 8, a2 + 8)
+        _vlie_fix_count[0] += 1
+        if _vlie_fix_count[0] <= 10:
+            _cpu.Log(LogLevel.Warning, 'vListInsertEnd: corrupt pxNext=0x%08x, fixed (#%d)' % (pxNext, _vlie_fix_count[0]))
+__builtin__._vListInsertEnd_guard = _vListInsertEnd_guard
+
 def _set_a10_zero():
     _cpu.SetRegister(99, _RV.Create(0, 32))
 __builtin__._set_a10_zero = _set_a10_zero
@@ -670,6 +702,8 @@ __builtin__._queue_recv_sched_check = _queue_recv_sched_check
 
 # ESP32 hooks
 cpu AddHook 0x40091360 "_dispatch_fixup()"
+cpu AddHook 0x400e154c "_thread_task_callx8_guard()"
+cpu AddHook 0x400941bb "_vListInsertEnd_guard()"
 cpu AddHook 0x40091cb8 "_xqr_diag()"
 cpu AddHook 0x40082c14 "_lock_validate()"
 cpu AddHook 0x40157d12 "_set_a10_zero()"

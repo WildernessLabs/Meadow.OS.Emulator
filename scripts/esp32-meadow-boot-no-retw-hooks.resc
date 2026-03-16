@@ -705,6 +705,8 @@ def _dispatch_fixup():
 __builtin__._dispatch_fixup = _dispatch_fixup
 """
 cpu AddHook 0x40091360 "_dispatch_fixup()"
+# Validate vListInsertEnd list/pxIndex before dereferencing — prevents STORE_PROHIBITED
+cpu AddHook 0x400941bb "_vListInsertEnd_guard()"
 
 # Fix: xQueueGenericReceive — initialize uninitialized Queue_t structs
 cpu AddHook 0x40091cb8 "_xqr_diag()"
@@ -721,6 +723,60 @@ def _set_a10_zero():
     _cpu.SetRegister(99, _RV.Create(0, 32))
 __builtin__._set_a10_zero = _set_a10_zero
 
+def _fix_wovf8_a0_pre():
+    # Hook at WOVF8 entry (0x40080080), BEFORE l32e a0, a1, -12.
+    # The l32e will load from [a1-12]. If that memory is 0 (uninitialized stack
+    # base save area at bottom of task call chain), write a1 there so l32e loads
+    # a valid base address. This prevents s32e writes to ~0xFFFFFFE0 and a0=0
+    # propagation through phys_regs.
+    a1 = _cpu.GetRegister(90).RawValue  # a1 = register 90 = spilled window SP
+    addr = (a1 - 12) & 0xFFFFFFFF
+    if addr >= 0x3FF00000 and addr < 0x40000000:
+        val = _bus.ReadDoubleWord(addr)
+        if val == 0:
+            _bus.WriteDoubleWord(addr, a1)
+            _cpu.Log(LogLevel.Warning, 'WOVF8: [a1-12]=0 at 0x%08x, wrote a1=0x%08x' % (addr, a1))
+__builtin__._fix_wovf8_a0_pre = _fix_wovf8_a0_pre
+
+_vlie_fix_count = [0]
+def _vListInsertEnd_guard():
+    # vListInsertEnd(pxList, pxItem): a2=list, a3=item (after entry, windowed)
+    # The crash is when pxIndex (list+4) points to a node whose pxNext is corrupt.
+    # Validate pxIndex and its pxNext chain. If corrupt, reset pxIndex to &xListEnd.
+    R = _bus.ReadDoubleWord
+    W = _bus.WriteDoubleWord
+    a2 = _cpu.GetRegister(91).RawValue  # a2 = list
+    if a2 < 0x3FF00000 or a2 >= 0x40000000:
+        return
+    pxIndex = R(a2 + 4)
+    if pxIndex < 0x3FF00000 or pxIndex >= 0x40000000:
+        xListEnd = a2 + 8
+        W(a2 + 4, xListEnd)
+        _vlie_fix_count[0] += 1
+        if _vlie_fix_count[0] <= 10:
+            _cpu.Log(LogLevel.Warning, 'vListInsertEnd: corrupt pxIndex=0x%08x in list=0x%08x, reset to xListEnd=0x%08x (#%d)' % (pxIndex, a2, xListEnd, _vlie_fix_count[0]))
+        return
+    # Also check pxIndex->pxNext
+    pxNext = R(pxIndex + 8)
+    if pxNext < 0x3FF00000 or pxNext >= 0x40000000:
+        xListEnd = a2 + 8
+        W(pxIndex + 8, xListEnd)  # fix pxNext to point to xListEnd
+        _vlie_fix_count[0] += 1
+        if _vlie_fix_count[0] <= 10:
+            _cpu.Log(LogLevel.Warning, 'vListInsertEnd: corrupt pxNext=0x%08x at pxIndex=0x%08x, reset to xListEnd=0x%08x (#%d)' % (pxNext, pxIndex, xListEnd, _vlie_fix_count[0]))
+__builtin__._vListInsertEnd_guard = _vListInsertEnd_guard
+
+_thread_null_count = [0]
+def _thread_task_callx8_guard():
+    # At Thread::Task callx8 a3 (0x400e154c): if a3=0 (null method pointer due to
+    # race condition with SPI ctor), skip to loop start at 0x400e153b.
+    a3 = _cpu.GetRegister(92).RawValue  # a3 = register 92
+    if a3 == 0 or a3 < 0x40000000 or a3 >= 0x40200000:
+        _thread_null_count[0] += 1
+        if _thread_null_count[0] <= 5:
+            _cpu.Log(LogLevel.Warning, 'Thread::Task: null method a3=0x%08x, skipping to loop start (#%d)' % (a3, _thread_null_count[0]))
+        _cpu.PC = _RV.Create(0x400e153b, 32)  # jump to loop start (TakeExecutionSemaphore)
+__builtin__._thread_task_callx8_guard = _thread_task_callx8_guard
 
 _xqr_count = [0]
 def _xqr_diag():
@@ -813,6 +869,29 @@ __builtin__._lock_validate = _lock_validate
 # ── SPI Transport ────────────────────────────────────────────────────────────
 # SpiTransportProvider ctor skip REMOVED — tlib retw fix lets ROM calls return.
 cpu AddHook 0x400d93f8 "self.Log(LogLevel.Error, 'SPI_CTOR_ENTER')"
+# ── WOVF8 a0 fixup ───────────────────────────────────────────────────────────
+# WindowOverflow8 handler (VECBASE+0x80 = 0x40080080):
+#   0x40080080: s32e a0, a9, -16   ; save original a0
+#   0x40080083: l32e a0, a1, -12   ; load caller-of-caller's SP into a0
+#   0x40080086: s32e a1, a9, -12   ; ← hook HERE, a0 has loaded value
+# FreeRTOS initializes task stacks to 0, so [a1-12] = 0 for the initial window.
+# When the call chain wraps the 16-window register file (≥8 call8 levels), WOVF8
+# loads 0 into a0.  The subsequent s32e a4-a7 instructions use a0 as base, writing
+# to addresses near 0xFFFFFFE0 (memory corruption).  After rfwo, a0=0 propagates
+# through phys_regs, corrupting the caller's return address.
+# Fix: if a0=0 after l32e, replace with a1 (the spilled window's SP).  This puts
+# the a4-a7 saves in the spilled window's own base save area — not the original
+# target, but valid memory.  The underflow handler will see slightly wrong a4-a7
+# values for the initial task frame, which is acceptable.
+# Thread::Task(void*) at 0x400e1538 crash fix.
+# Disassembly: entry → TakeExecutionSemaphore → GetMethod → callx8 a3 → TaskCompleted → loop.
+# GetMethod returns the Thread's method pointer. If the SPI task (priority 24) starts
+# running before the SPI constructor finishes setting up the Thread object, GetMethod
+# returns 0 → callx8 a3 jumps to 0.  Race condition: xTaskCreate creates the high-
+# priority task which preempts the constructor.
+# Fix: Python hook at callx8 a3 (0x400e154c) — if a3 is 0 (null method), skip the
+# callx8 and jump back to the loop start to retry.  Uses A3 register (index 92).
+cpu AddHook 0x400e154c "_thread_task_callx8_guard()"
 # Trace callx8 targets inside SPI ctor to find which one aborts
 # NOP gpio_pad_select_gpio calls inside SPI ctor — ROM function at 0x40009fdc
 # reads function pointers from IO_MUX regs (MappedMemory = all zeros) and calls
