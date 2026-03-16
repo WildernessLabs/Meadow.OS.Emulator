@@ -364,14 +364,14 @@ machines together and tracing the interaction to find the minimal bridge point.
     Had to override via `cpu RemoveHooksAt` + re-register targeting SpiBridge instead
     of EspcpStub. Variable pre-set didn't work because hooks.resc redefines it.
   - ESPCP polling enabled by writing 1 to poll flag at 0x2007FFF0.
-- [ ] **Implement ESP32 SPI3 slave peripheral** (`peripherals/ESP32_SPI_Slave.cs`).
+- [ ] **Implement ESP32 SPI3 peripheral** (`peripherals/ESP32_SPI.cs`).
   Replace the MappedMemory stub at 0x3FF65000 with a real C# peripheral that implements
-  enough of the ESP32 SPI slave register interface for the ESP-IDF `spi_slave` driver to
+  enough of the ESP32 SPI register interface for the ESP-IDF `spi_slave` driver to
   work natively. SpiBridge feeds frames in from the STM32 side; the peripheral presents
   them to the firmware as hardware SPI transactions.
 
   **Register interface** (from ESP32 TRM + `spi_struct.h` + `spi_ll.h`):
-  - `cmd` (0x00): `usr` bit (bit 18) — triggers transaction start in slave mode
+  - `cmd` (0x00): `usr` bit (bit 18) — triggers transaction start
   - `slave` (0x38): `trans_done` (bit 4) — ISR checks this; set when transaction completes.
     `trans_inten` (bit 9) — interrupt enable. `sync_reset` (bit 31) — soft reset.
     `slave_mode` (bit 26). `wr_rd_sta_en` (bit 30), `wr_rd_buf_en` (bit 29).
@@ -381,8 +381,8 @@ machines together and tracing the interaction to find the minimal bridge point.
   - `data_buf[16]` (0x80–0xBC): 64-byte data buffer (W0–W15). Non-DMA mode: firmware
     reads/writes directly. DMA mode: not used (DMA reads/writes memory directly).
   - `dma_conf` (0x100): DMA config bits
-  - `dma_out_link` (0x104): TX DMA descriptor address (bits 19:0) + `start` (bit 30)
-  - `dma_in_link` (0x108): RX DMA descriptor address (bits 19:0) + `start` (bit 30)
+  - `dma_out_link` (0x104): TX DMA descriptor address (bits 19:0) + `start` (bit 28)
+  - `dma_in_link` (0x108): RX DMA descriptor address (bits 19:0) + `start` (bit 28)
   - `slv_rdbuf_dlen` (0x48): slave read buffer bit length
   - `slv_wrbuf_dlen` (0x44): slave write buffer bit length
   - `slv_rd_bit` (0x64): received data bit length (read by HAL after transaction)
@@ -417,8 +417,8 @@ machines together and tracing the interaction to find the minimal bridge point.
   4. ISR runs again: reads received data, posts to ret_queue, notifies task
 
   **What the C# peripheral needs to do:**
-  - Track register writes (slave config, DMA addresses, cmd.usr)
-  - When `cmd.usr` is set (slave ready for transaction):
+  - Track register writes (peripheral config, DMA addresses, cmd.usr)
+  - When `cmd.usr` is set (peripheral ready for transaction):
     - Check if SpiBridge has a pending frame
     - If yes: write frame data to DMA rx buffer (follow DMA descriptor chain) or to `data_buf[]`
     - Set `trans_done = 1`
@@ -428,15 +428,15 @@ machines together and tracing the interaction to find the minimal bridge point.
 
   **Cross-machine connection:**
   - SpiBridge (on STM32) captures frames from NuttX and queues them
-  - ESP32_SPI_Slave needs a reference to SpiBridge to dequeue frames and enqueue responses
+  - ESP32_SPI needs a reference to SpiBridge to dequeue frames and enqueue responses
   - Use Renode's `EmulationManager.Instance.CurrentEmulation.TryGetMachineByName()` to find
     the STM32 machine and its SpiBridge peripheral from the ESP32 machine context
 
   **Implementation plan:**
-  1. Create `peripherals/ESP32_SPI_Slave.cs` with register map and DMA descriptor support
+  1. Create `peripherals/ESP32_SPI.cs` with register map and DMA descriptor support
   2. Add SpiBridge cross-machine reference (set via .resc or constructor parameter)
-  3. Replace `spi3: Memory.MappedMemory` with `spi3: SPI.ESP32_SPI_Slave` in `meadow-esp32.repl`
-  4. Wire SpiBridge → ESP32_SPI_Slave in `meadow-dual.resc`
+  3. Replace `spi3: Memory.MappedMemory` with `spi3: SPI.ESP32_SPI` in `meadow-esp32.repl`
+  4. Wire SpiBridge → ESP32_SPI in `meadow-dual.resc`
   5. Test: STM32 sends Transport::SendResponse → ESP32 firmware's ProcessMessages receives it
 
 - [ ] Test: ESPCP boot handshake (STM32 ↔ real ESP32 firmware)
@@ -459,7 +459,7 @@ incrementally as integration testing reveals what's needed — not pre-emptively
 - [x] GPIO ROM callx8 NOPs in SPI ctor — gpio_pad_select_gpio reads NULL from IO_MUX
 
 ### In Progress
-- [ ] ESP32 SPI3 slave peripheral (`peripherals/ESP32_SPI_Slave.cs`) — see Phase 2.2 plan
+- [ ] ESP32 SPI3 peripheral (`peripherals/ESP32_SPI.cs`) — see Phase 2.2 plan
   for detailed register map, DMA descriptor format, and implementation plan
 
 ### Future Stubs (as needed during integration)
