@@ -425,18 +425,19 @@ incrementally as integration testing reveals what's needed — not pre-emptively
 - [x] esp_task_wdt_init returns ESP_OK, esp_task_wdt_add returns ESP_OK, esp_int_wdt_init returns
 - [x] GPIO ROM callx8 NOPs in SPI ctor — gpio_pad_select_gpio reads NULL from IO_MUX
 
-### In Progress
+### Also Done (moved from In Progress)
 - [x] ESP32 SPI3 peripheral (`peripherals/ESP32_SPI.cs`) — register map, DMA descriptors,
-  SpiBridge connection all working. Blocked on interrupt delivery to CPU.
-- [x] DPORT interrupt matrix (`peripherals/ESP32_DPORT.cs`) — upgraded with 69-source
-  mapping table, GPIO inputs/outputs, level-OR routing. Works correctly but GPIO outputs
-  not wired to CPU due to interrupt 6 contention with hardwired CCOMPARE0 timer.
-- [ ] Xtensa interrupt delivery investigation — `cpu.OnGPIO(6)` doesn't fire the ISR.
-  Need to check INTENABLE state, tlib interrupt latching, and possibly fix in tlib.
+  SpiBridge connection. Replaced MappedMemory at 0x3FF65000.
+- [x] DPORT interrupt matrix (`peripherals/ESP32_DPORT.cs`) — 69-source mapping table,
+  GPIO inputs, level-OR routing. Fires interrupts via direct OnGPIO calls.
+- [x] Xtensa interrupt delivery — fixed in tlib (`check_interrupts` after INTSET change,
+  removed `base.OnGPIO` call). xTickCount advances, SPI ISR fires.
+- [x] Thread::Task race condition — Python guard at `callx8 a3` (0x400e154c)
+- [x] vListInsertEnd pxIndex corruption — Python guard at entry (0x400941bb)
 
-### Future Stubs (as needed during integration)
-- [ ] WiFi hardware: either proper register stubs or build firmware variant without WiFi
-- [ ] BLE hardware: either proper register stubs or build firmware variant without BLE
+### Future Stubs (as needed during integration testing)
+- [ ] WiFi hardware stubs (if needed beyond current skip of WiFiRequestHandler::Setup)
+- [ ] BLE hardware stubs (if needed beyond current skip of BluetoothRequestHandler)
 - [ ] SPI flash controller for NVS reads/writes + initial partition data
 
 ## Phase 4: Full Integration Validation
