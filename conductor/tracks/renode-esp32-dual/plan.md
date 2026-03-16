@@ -413,7 +413,7 @@ machines together and tracing the interaction to find the minimal bridge point.
        - Sets RX/TX bit lengths
      - Calls `spi_slave_hal_user_start()`: clears `trans_done`, sets `cmd.usr = 1`
      - Calls `post_setup_cb` (which notifies the SPI task)
-  3. On real hardware: master clocks data → slave receives → `trans_done` set → interrupt fires
+  3. On real hardware: SPI controller clocks data → peripheral receives → `trans_done` set → interrupt fires
   4. ISR runs again: reads received data, posts to ret_queue, notifies task
 
   **What the C# peripheral needs to do:**
@@ -423,8 +423,8 @@ machines together and tracing the interaction to find the minimal bridge point.
     - If yes: write frame data to DMA rx buffer (follow DMA descriptor chain) or to `data_buf[]`
     - Set `trans_done = 1`
     - Fire the SPI interrupt
-    - Read the DMA tx buffer to get the slave's response, send it back to SpiBridge
-  - If no frame pending: wait (the transaction stays pending until master clocks data)
+    - Read the DMA tx buffer to get the peripheral's response, send it back to SpiBridge
+  - If no frame pending: wait (the transaction stays pending until controller clocks data)
 
   **Cross-machine connection:**
   - SpiBridge (on STM32) captures frames from NuttX and queues them
@@ -502,7 +502,7 @@ covers the deeper validation once the basic connection works.
 
 ### Meadow ESP32 Firmware
 - Standard ESP32, ESP-IDF 4.2.4
-- SPI slave on VSPI_HOST (SPI3), Mode 3
+- SPI peripheral on VSPI_HOST (SPI3), Mode 3
 - Pins: CS=GPIO5, CLK=GPIO18, MOSI=GPIO23, MISO=GPIO19
 - Handshake: GPIO0 (SPI Ready), GPIO3 (Message Waiting)
 - Components: SpiTransportProvider, MessageDispatcher, WiFi/BLE/System handlers
