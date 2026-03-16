@@ -226,7 +226,8 @@ sysbus WriteByte 0x400910E7 0x1D
 sysbus WriteByte 0x400910E8 0xF0
 
 # esp_intr_alloc NOP REMOVED — retw bug is fixed, interrupt registration should work.
-# Previously: uart_isr_register → esp_intr_alloc was NOP'd due to retw corruption.
+# Note: SPI3 gets mapped to CPU interrupt 6 by esp_intr_alloc, which conflicts with
+# CCOMPARE0 timer. ESP32_SPI reads the mapping after boot via SetInterruptNumber().
 
 # Skip esp_brownout_init body — brownout detection is irrelevant in emulation.
 # Keep entry (which rotates WINDOWBASE — call8 does NOT rotate it!) then jump

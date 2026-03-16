@@ -95,6 +95,15 @@ namespace Antmicro.Renode.Peripherals.SPI
         // ── Cross-machine bridge connection ────────────────────────────────
 
         /// <summary>
+        /// Set the CPU interrupt number for SPI3. Read from DPORT mapping after boot.
+        /// </summary>
+        public void SetInterruptNumber(int number)
+        {
+            spiInterruptNumber = number;
+            this.Log(LogLevel.Info, "SPI: Interrupt number set to {0}", number);
+        }
+
+        /// <summary>
         /// Set the SpiBridge reference. Called from .resc script or monitor.
         /// Accepts object type to avoid compile-time dependency on SpiBridge.cs load order.
         /// Also registers a callback so we're notified when frames arrive.
@@ -345,18 +354,29 @@ namespace Antmicro.Renode.Peripherals.SPI
             bool shouldAssert = transDone && transInten;
             var cpuEnum = machine.SystemBus.GetCPUs().GetEnumerator();
             cpuEnum.MoveNext();
-            var gpioReceiver = cpuEnum.Current as IGPIOReceiver;
+            var xtensaCpu = cpuEnum.Current;
+            var gpioReceiver = xtensaCpu as IGPIOReceiver;
             if(gpioReceiver != null)
             {
-                gpioReceiver.OnGPIO(SpiInterruptNumber, shouldAssert);
+                // Level-triggered: keep GPIO asserted while trans_done && trans_inten.
+                // The ISR will clear trans_done, which calls UpdateIrq again to deassert.
+                gpioReceiver.OnGPIO(spiInterruptNumber, shouldAssert);
                 if(shouldAssert)
                 {
-                    this.Log(LogLevel.Debug, "SPI: Interrupt 6 asserted (level-triggered)");
+                    this.Log(LogLevel.Debug, "SPI: Interrupt 6 level HIGH");
+                }
+                else
+                {
+                    this.Log(LogLevel.Debug, "SPI: Interrupt 6 level LOW");
                 }
             }
         }
 
-        private const int SpiInterruptNumber = 6;
+        // CPU interrupt number for SPI3 — configurable via SetInterruptNumber().
+        // On real hardware, esp_intr_alloc dynamically maps peripheral sources to
+        // CPU interrupt lines via the DPORT interrupt matrix. In emulation, we
+        // read the mapping after boot and set it here.
+        private int spiInterruptNumber = 6; // default, overridden by script
 
         // ── DMA descriptor chain operations ────────────────────────────────
 
