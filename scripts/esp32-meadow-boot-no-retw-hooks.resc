@@ -226,8 +226,19 @@ sysbus WriteByte 0x400910E7 0x1D
 sysbus WriteByte 0x400910E8 0xF0
 
 # esp_intr_alloc NOP REMOVED — retw bug is fixed, interrupt registration should work.
-# Note: SPI3 gets mapped to CPU interrupt 6 by esp_intr_alloc, which conflicts with
-# CCOMPARE0 timer. ESP32_SPI reads the mapping after boot via SetInterruptNumber().
+
+# Skip freeze_cs/restore_cs in SPI ISR — these call gpio_iomux_in which reads GPIO
+# func_in_sel_cfg registers (MappedMemory returns 0) and dereferences as a pointer → crash.
+# freeze_cs/restore_cs are DMA CS workarounds for real hardware glitches, not needed in emulation.
+# In spi_intr at 0x4008bc16: beqz.n a5, 0x4008bc35 → skip DMA freeze_cs path (OK, falls through)
+# In spi_intr at 0x4008bc32: callx8 a8 → gpio_iomux_in (freeze_cs) → NOP
+sysbus WriteByte 0x4008bc32 0xF0
+sysbus WriteByte 0x4008bc33 0x20
+sysbus WriteByte 0x4008bc34 0x00
+# In spi_intr at 0x4008bd48: bnez a12, 0x4008bc96 → jump to restore_cs → NOP the branch
+sysbus WriteByte 0x4008bd48 0xF0
+sysbus WriteByte 0x4008bd49 0x20
+sysbus WriteByte 0x4008bd4a 0x00
 
 # Skip esp_brownout_init body — brownout detection is irrelevant in emulation.
 # Keep entry (which rotates WINDOWBASE — call8 does NOT rotate it!) then jump

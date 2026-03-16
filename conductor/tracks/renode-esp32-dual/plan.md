@@ -533,10 +533,27 @@ machines together and tracing the interaction to find the minimal bridge point.
     interrupt, then `wsr.intenable` triggers `check_interrupts` which finds pending INTSET
   - DPORT matrix routes SPI3 source 31 → CPU interrupt via direct OnGPIO calls
 
-  **Current state:**
-  SPI ISR fires once after `spi_slave_queue_trans`. Next: trace why the ISR doesn't
-  dequeue the transaction from the FreeRTOS queue and write `cmd.usr`. May be a queue
-  state issue or a crash inside `spi_slave_hal_prepare_data`.
+  **Current state: ISR fires and dequeues transaction, crashes in prepare_data.**
+  The SPI ISR fires after `spi_slave_queue_trans`, dequeues the transaction from the
+  FreeRTOS queue, and calls `spi_slave_hal_prepare_data`. The HAL context has correct
+  `hw = 0x3FF65000` and valid `dmadesc_rx/tx` addresses. But the transaction's buffer
+  pointers are corrupt: `rx_buf = 0x00007fe0, tx_buf = 0x00000003, bitlen = 1`.
+
+  The crash is in `spi_slave_hal_prepare_data` when it calls `spi_ll_slave_reset` which
+  writes to `hw->slave.sync_reset`. Also, `freeze_cs`/`restore_cs` functions call
+  `gpio_iomux_in` which dereferences GPIO register values (MappedMemory returns 0) as
+  pointers → INST_FETCH_ERROR at PC=0. NOPped both branches in the ISR.
+
+  The buffer corruption (`rx_buf`, `tx_buf` having small/invalid values) is likely from
+  Renode's window overflow handler writing stale register values to incorrect DRAM
+  addresses — the same class of bug that corrupts FreeRTOS lists and TCB fields.
+  This is a fundamental tlib issue with the Xtensa window spill mechanism.
+
+  **Next steps:**
+  - Investigate the transaction buffer pointers: who allocates them, when do they get
+    corrupted (between `CreateSpiTransaction` → `xQueueSend` → `xQueueReceiveFromISR`)
+  - May need another tlib fix for window overflow register spill accuracy
+  - Alternative: verify with Python hooks that the queued transaction has valid buffers
 
 - [ ] Test: ESPCP boot handshake (STM32 ↔ real ESP32 firmware)
 - [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns
