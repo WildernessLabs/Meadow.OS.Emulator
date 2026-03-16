@@ -112,10 +112,9 @@ uart0Mirror: UART.ESP32_UART @ sysbus 0x60000000
 // GPIO inputs [0-68] = peripheral interrupt sources
 // GPIO outputs [0-31] = CPU interrupt lines
 // DPORT registers (system/clock/reset control + interrupt matrix)
-// Interrupt matrix routing is implemented but GPIO outputs are NOT wired to CPU
-// because Renode doesn't support multi-driver OR on GPIO lines. The hardwired
-// CCOMPARE0 timer (interrupt 6) and matrix-routed peripherals would conflict.
-// Instead, peripherals that need interrupts fire them directly on the CPU.
+// Interrupt matrix routes peripheral sources to CPU interrupt lines via
+// direct OnGPIO calls (not GPIO wiring) to properly OR with hardwired
+// sources like the CCOMPARE0 timer on interrupt 6.
 dport: Miscellaneous.ESP32_DPORT @ sysbus 0x3FF00000
 
 // GPIO registers

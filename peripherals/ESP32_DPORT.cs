@@ -18,21 +18,14 @@ using Antmicro.Renode.Peripherals.Bus;
 namespace Antmicro.Renode.Peripherals.Miscellaneous
 {
     [AllowedTranslations(AllowedTranslation.ByteToDoubleWord | AllowedTranslation.WordToDoubleWord)]
-    public class ESP32_DPORT : IDoubleWordPeripheral, IKnownSize, IGPIOReceiver, INumberedGPIOOutput
+    public class ESP32_DPORT : IDoubleWordPeripheral, IKnownSize, IGPIOReceiver
     {
-        public ESP32_DPORT()
+        public ESP32_DPORT(IMachine machine)
         {
+            this.machine = machine;
             backingStore = new Dictionary<long, uint>();
             interruptMap = new int[NumSources];
             sourceActive = new bool[NumSources];
-
-            // CPU interrupt output lines (0-31)
-            var connections = new Dictionary<int, IGPIO>();
-            for(int i = 0; i < NumCpuInterrupts; i++)
-            {
-                connections[i] = new GPIO();
-            }
-            Connections = connections;
 
             Reset();
         }
@@ -122,10 +115,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             }
         }
 
-        // ── INumberedGPIOOutput — CPU interrupt lines ───────────────────────
-
-        public IReadOnlyDictionary<int, IGPIO> Connections { get; }
-
         // ── Reset ───────────────────────────────────────────────────────────
 
         public void Reset()
@@ -146,6 +135,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         /// <summary>
         /// Recalculate the state of a CPU interrupt line based on all sources
         /// currently mapped to it. Level-OR: asserted if ANY active source maps to it.
+        /// Uses TlibSetIrqPendingBit on the CPU instead of GPIO.Set to avoid
+        /// multi-driver conflicts (timer CCOMPARE0 also drives interrupt 6 directly).
         /// </summary>
         private void UpdateCpuInterrupt(int cpuInt)
         {
@@ -163,8 +154,23 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 }
             }
 
-            Connections[cpuInt].Set(shouldAssert);
+            // Use OnGPIO on the CPU to set/clear the interrupt pending bit.
+            // This goes through TlibSetIrqPendingBit which correctly handles
+            // INTSET (level-OR with timer sources that latch).
+            if(cpu == null)
+            {
+                // Find the CPU on first use
+                foreach(var c in machine.SystemBus.GetCPUs())
+                {
+                    cpu = c as IGPIOReceiver;
+                    break;
+                }
+            }
+            cpu?.OnGPIO(cpuInt, shouldAssert);
         }
+
+        private IMachine machine;
+        private IGPIOReceiver cpu;
 
         // ── Constants ───────────────────────────────────────────────────────
 

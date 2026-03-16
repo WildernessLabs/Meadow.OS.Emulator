@@ -339,23 +339,13 @@ namespace Antmicro.Renode.Peripherals.SPI
         private void UpdateIrq()
         {
             bool shouldAssert = transDone && transInten;
-            // Also set the GPIO for DPORT routing (works for non-hardwired interrupt lines)
+            // Assert/deassert the IRQ GPIO which is wired to DPORT@31.
+            // DPORT routes this to the CPU interrupt line via OnGPIO,
+            // properly OR'd with other sources on the same line.
             IRQ.Set(shouldAssert);
-
             if(shouldAssert)
             {
-                this.Log(LogLevel.Warning, "SPI: Firing interrupt on CPU (trans_done && trans_inten)");
-                // Fire directly on CPU because interrupt 6 is shared with the hardwired
-                // CCOMPARE0 timer and can't be driven through DPORT without conflicting.
-                // Use edge pulse like tick injection does.
-                var cpuEnum = machine.SystemBus.GetCPUs().GetEnumerator();
-                cpuEnum.MoveNext();
-                var gpioReceiver = cpuEnum.Current as IGPIOReceiver;
-                if(gpioReceiver != null)
-                {
-                    gpioReceiver.OnGPIO(6, true);
-                    gpioReceiver.OnGPIO(6, false);
-                }
+                this.Log(LogLevel.Debug, "SPI: IRQ asserted (trans_done && trans_inten)");
             }
         }
 
