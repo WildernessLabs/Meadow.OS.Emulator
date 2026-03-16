@@ -512,13 +512,31 @@ machines together and tracing the interaction to find the minimal bridge point.
   Renode doesn't support multi-driver GPIO OR — last `Set()` wins. Current workaround:
   DPORT outputs not wired to line 6; both tick injection and ESP32_SPI fire directly on CPU.
 
-  **Next steps:**
-  - Investigate INTENABLE state at runtime
-  - Try `OnGPIO(6, true)` without false — see if keeping it asserted fires the ISR
-  - Check tlib Xtensa interrupt handling: `tlib_set_irq`, `check_interrupts` helper
-  - If OnGPIO doesn't work: may need a tlib-level fix for interrupt latching
-  - Once interrupt delivery is fixed: SPI task wakes → `spi_slave_queue_trans` →
-    ESP32_SPI arms → SpiBridge frames flow → ESPCP handshake completes
+  **Root causes found and fixed (two tlib bugs):**
+
+  1. **`xtensa_cpu_set_irq_pending_bit` didn't call `check_interrupts()`** after modifying
+     INTSET. External interrupt sources could set pending bits but CPU_INTERRUPT_HARD
+     was never asserted, so the CPU never checked for pending interrupts.
+     Fix: added `check_interrupts(env)` at end of function.
+
+  2. **Xtensa `OnGPIO` called `base.OnGPIO` which independently cleared CPU_INTERRUPT_HARD.**
+     `base.OnGPIO` uses `TlibSetIrqWrapped` which tracks active GPIO numbers. `OnGPIO(n, false)`
+     removes n from the set, and if empty, calls `TlibSetIrq(Hard, 0)` → `cpu_reset_interrupt` —
+     clearing CPU_INTERRUPT_HARD even when INTSET still has latched timer interrupts.
+     Fix: removed `base.OnGPIO` call — Xtensa uses INTSET/INTENABLE/check_interrupts only.
+
+  **Results after fixes:**
+  - xTickCount advances: 64+ ticks confirmed via xPortSysTickHandler ISR
+  - CCOMPARE0 timer cycle works: `wsr.ccompare0` in ISR correctly clears INTSET bit 6
+    via `HELPER(update_ccompare)`, allowing re-triggering on next tick
+  - SPI ISR fires: deferred until `esp_intr_enable` in `spi_slave_queue_trans` enables
+    interrupt, then `wsr.intenable` triggers `check_interrupts` which finds pending INTSET
+  - DPORT matrix routes SPI3 source 31 → CPU interrupt via direct OnGPIO calls
+
+  **Current state:**
+  SPI ISR fires once after `spi_slave_queue_trans`. Next: trace why the ISR doesn't
+  dequeue the transaction from the FreeRTOS queue and write `cmd.usr`. May be a queue
+  state issue or a crash inside `spi_slave_hal_prepare_data`.
 
 - [ ] Test: ESPCP boot handshake (STM32 ↔ real ESP32 firmware)
 - [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns
