@@ -111,6 +111,9 @@ namespace Antmicro.Renode.Peripherals.SPI
                 "SpiBridge: STM32→ESP32 frame queued ({0} bytes, proto=0x{1:X2})",
                 frameLength, frame[0]);
 
+            // Notify ESP32 SPI peripheral that a frame is available
+            frameAvailableCallback?.Invoke();
+
             // Check if ESP32 already has a response ready
             CheckForEsp32Response();
         }
@@ -217,6 +220,14 @@ namespace Antmicro.Renode.Peripherals.SPI
         }
 
         /// <summary>
+        /// Register a callback that fires when a frame is enqueued for the ESP32.
+        /// </summary>
+        public void SetFrameAvailableCallback(Action callback)
+        {
+            frameAvailableCallback = callback;
+        }
+
+        /// <summary>
         /// Returns the number of frames pending for ESP32 to process.
         /// </summary>
         public int FramesPendingForEsp32
@@ -299,5 +310,6 @@ namespace Antmicro.Renode.Peripherals.SPI
         // Cross-machine frame queues
         private readonly Queue<byte[]> toEsp32Queue;
         private readonly Queue<byte[]> toStm32Queue;
+        private Action frameAvailableCallback;
     }
 }

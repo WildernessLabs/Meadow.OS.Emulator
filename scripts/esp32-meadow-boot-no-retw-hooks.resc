@@ -225,19 +225,8 @@ sysbus WriteByte 0x400911a4 0xF0
 sysbus WriteByte 0x400910E7 0x1D
 sysbus WriteByte 0x400910E8 0xF0
 
-# NOP out esp_intr_alloc call in uart_isr_register.
-# The call chain uart_isr_register → esp_intr_alloc → esp_intr_alloc_intrstatus
-# triggers the Renode retw bug at EVERY return point in the chain: each retw reads
-# AR[0] instead of AR[WINDOWBASE*4], getting a corrupted return address.
-# Additionally, xt_ints_on inside esp_intr_alloc_intrstatus receives corrupted
-# interrupt masks (DRAM addresses like 0x3ffb79ec instead of valid bitmasks)
-# due to window-spill register corruption.
-# Fix: NOP the callx8 in uart_isr_register that calls esp_intr_alloc, replacing
-# it with movi a8, 0 (harmless NOP). A Python hook sets A10=0 (ESP_OK return).
-# callx8 a8 at 0x40157d0f (3 bytes: e0 08 00) → movi a8, 0 (82 c0 00)
-sysbus WriteByte 0x40157d0f 0x82
-sysbus WriteByte 0x40157d10 0xC0
-sysbus WriteByte 0x40157d11 0x00
+# esp_intr_alloc NOP REMOVED — retw bug is fixed, interrupt registration should work.
+# Previously: uart_isr_register → esp_intr_alloc was NOP'd due to retw corruption.
 
 # Skip esp_brownout_init body — brownout detection is irrelevant in emulation.
 # Keep entry (which rotates WINDOWBASE — call8 does NOT rotate it!) then jump
@@ -797,7 +786,7 @@ def _lock_validate():
         W(a2, 0)
 __builtin__._lock_validate = _lock_validate
 """
-cpu AddHook 0x40157d12 "_set_a10_zero()"
+# _set_a10_zero hook REMOVED — esp_intr_alloc no longer NOP'd
 # RETW HOOKS REMOVED — testing tlib source fix (tcg_temp_local_new_i32 in translate_retw)
 # ── SPI Transport ────────────────────────────────────────────────────────────
 # SpiTransportProvider ctor skip REMOVED — tlib retw fix lets ROM calls return.

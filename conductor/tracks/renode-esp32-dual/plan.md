@@ -439,6 +439,25 @@ machines together and tracing the interaction to find the minimal bridge point.
   4. Wire SpiBridge → ESP32_SPI in `meadow-dual.resc`
   5. Test: STM32 sends Transport::SendResponse → ESP32 firmware's ProcessMessages receives it
 
+- [x] Un-NOP'd `esp_intr_alloc` — retw fix makes interrupt registration work natively.
+  Removed the uart_isr_register NOP and the _set_a10_zero Python hook. Boot still works.
+- [x] ESP32_SPI interrupt wiring: IRQ → cpu@6. SPI3 mapped to CPU interrupt 6
+  (confirmed by reading DPORT register PRO_SPI_INTR_MAP at 0x3FF00190 after boot).
+  Note: interrupt 6 is shared with tick injection — acceptable for now.
+- [x] Fixed slave register bit layout: slave_mode is bit 30 (not 26), matching spi_struct.h.
+  Full layout now correct: trans_done(4), trans_inten(9), wr_rd_buf_en(29), slave_mode(30),
+  sync_reset(31).
+- [x] Added SpiBridge→ESP32_SPI callback: `SetFrameAvailableCallback` notifies the peripheral
+  when a frame arrives, so it can inject immediately if armed.
+- [ ] **Current blocker: interrupt delivery timing.** The ESP32_SPI peripheral correctly sets
+  `trans_done = 1` and fires `cpu.OnGPIO(6, true)` from inside a register write callback.
+  The interrupt IS queued (log confirms "Interrupt 6 asserted") but the SPI ISR never runs.
+  Likely cause: the OnGPIO call happens synchronously during a TB execution, and the CPU
+  doesn't check for pending interrupts until the current TB finishes. Tick injection works
+  because it runs from a Python hook BETWEEN TBs. Fix options:
+  - Schedule the interrupt asynchronously (machine.ScheduleAction or similar)
+  - Fire the interrupt from a Python hook at a safe execution point
+  - Add a periodic check in the idle loop that triggers pending SPI transactions
 - [ ] Test: ESPCP boot handshake (STM32 ↔ real ESP32 firmware)
 - [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns
 - [ ] Verify frame integrity (CRC checks pass on both sides)

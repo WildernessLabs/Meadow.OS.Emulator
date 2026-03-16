@@ -59,6 +59,11 @@ namespace Antmicro.Renode.Peripherals.SPI
                 return;
             }
 
+            if(offset == 0x38)
+            {
+                this.Log(LogLevel.Warning, "SPI: SLAVE REG WRITE 0x38 = 0x{0:X8}", value);
+            }
+
             if(registers.TryWrite(offset, value))
             {
                 return;
@@ -79,6 +84,7 @@ namespace Antmicro.Renode.Peripherals.SPI
             transInten = false;
             transDone = false;
             slaveMode = false;
+            peripheralArmed = false;
             IRQ.Unset();
         }
 
@@ -91,11 +97,27 @@ namespace Antmicro.Renode.Peripherals.SPI
         /// <summary>
         /// Set the SpiBridge reference. Called from .resc script or monitor.
         /// Accepts object type to avoid compile-time dependency on SpiBridge.cs load order.
+        /// Also registers a callback so we're notified when frames arrive.
         /// </summary>
         public void SetBridge(object bridgeObj)
         {
             this.bridge = bridgeObj;
+            // Register callback for frame arrival notification
+            bridge.SetFrameAvailableCallback((Action)OnFrameAvailable);
             this.Log(LogLevel.Info, "SPI: SpiBridge connected");
+        }
+
+        /// <summary>
+        /// Called by SpiBridge when a new frame arrives from the STM32.
+        /// If the peripheral is armed (cmd.usr was set), process the frame immediately.
+        /// </summary>
+        private void OnFrameAvailable()
+        {
+            if(peripheralArmed && bridge != null)
+            {
+                this.Log(LogLevel.Warning, "SPI: Frame arrived while peripheral armed — injecting");
+                InjectFrame();
+            }
         }
 
         // ── Register definitions ───────────────────────────────────────────
@@ -135,42 +157,55 @@ namespace Antmicro.Renode.Peripherals.SPI
                 .WithValueField(0, 24, name: "USR_MISO_DBITLEN")
                 .WithReservedBits(24, 8);
 
-            // SLAVE register (0x38)
+            // SLAVE register (0x38) — bit layout from spi_struct.h:
+            // [0] rd_buf_done, [1] wr_buf_done, [2] rd_sta_done, [3] wr_sta_done,
+            // [4] trans_done, [5] rd_buf_inten, [6] wr_buf_inten, [7] rd_sta_inten,
+            // [8] wr_sta_inten, [9] trans_inten, [10:11] cs_i_mode, [12:16] reserved,
+            // [17:19] last_command, [20:22] last_state, [23:26] trans_cnt,
+            // [27] cmd_define, [28] wr_rd_sta_en, [29] wr_rd_buf_en,
+            // [30] slave_mode, [31] sync_reset
             Registers.Slave.Define(registers, 0)
-                .WithReservedBits(0, 4)
+                .WithTag("RD_BUF_DONE", 0, 1)
+                .WithTag("WR_BUF_DONE", 1, 1)
+                .WithTag("RD_STA_DONE", 2, 1)
+                .WithTag("WR_STA_DONE", 3, 1)
                 .WithFlag(4, FieldMode.Read | FieldMode.Write,
                     writeCallback: (oldVal, newVal) =>
                     {
                         transDone = newVal;
                         if(!newVal && oldVal)
                         {
-                            // Driver cleared trans_done — acknowledge interrupt
                             this.Log(LogLevel.Debug, "SPI: trans_done cleared by driver");
-                            UpdateIrq();
                         }
+                        UpdateIrq();
                     },
                     valueProviderCallback: _ => transDone,
                     name: "TRANS_DONE")
-                .WithReservedBits(5, 4)
+                .WithTag("RD_BUF_INTEN", 5, 1)
+                .WithTag("WR_BUF_INTEN", 6, 1)
+                .WithTag("RD_STA_INTEN", 7, 1)
+                .WithTag("WR_STA_INTEN", 8, 1)
                 .WithFlag(9, FieldMode.Read | FieldMode.Write,
-                    writeCallback: (_, value) => { transInten = value; },
+                    writeCallback: (_, value) => { transInten = value; UpdateIrq(); },
                     valueProviderCallback: _ => transInten,
                     name: "TRANS_INTEN")
-                .WithReservedBits(10, 16)
-                .WithFlag(26, FieldMode.Read | FieldMode.Write,
+                .WithTag("CS_I_MODE", 10, 2)
+                .WithReservedBits(12, 5)
+                .WithTag("LAST_COMMAND", 17, 3)
+                .WithTag("LAST_STATE", 20, 3)
+                .WithTag("TRANS_CNT", 23, 4)
+                .WithTag("CMD_DEFINE", 27, 1)
+                .WithTag("WR_RD_STA_EN", 28, 1)
+                .WithFlag(29, name: "WR_RD_BUF_EN")
+                .WithFlag(30, FieldMode.Read | FieldMode.Write,
                     writeCallback: (_, value) => { slaveMode = value; },
                     valueProviderCallback: _ => slaveMode,
                     name: "SLAVE_MODE")
-                .WithReservedBits(27, 2)
-                .WithFlag(29, name: "WR_RD_BUF_EN")
-                .WithReservedBits(30, 1)
                 .WithFlag(31, FieldMode.Write,
                     writeCallback: (_, value) =>
                     {
                         if(value)
-                        {
                             this.Log(LogLevel.Debug, "SPI: Sync reset");
-                        }
                     },
                     name: "SYNC_RESET");
 
@@ -255,6 +290,8 @@ namespace Antmicro.Renode.Peripherals.SPI
 
         private void OnTransactionArmed()
         {
+            peripheralArmed = true;
+
             if(bridge == null)
             {
                 this.Log(LogLevel.Warning, "SPI: Transaction armed but no SpiBridge connected");
@@ -265,9 +302,20 @@ namespace Antmicro.Renode.Peripherals.SPI
             byte[] frame = (byte[])bridge.DequeueFrameFromStm32();
             if(frame == null)
             {
-                this.Log(LogLevel.Debug, "SPI: Transaction armed but no frame pending");
+                this.Log(LogLevel.Debug, "SPI: Transaction armed, waiting for frame from STM32");
                 return;
             }
+
+            InjectFrame();
+        }
+
+        private void InjectFrame()
+        {
+            byte[] frame = (byte[])bridge.DequeueFrameFromStm32();
+            if(frame == null)
+                return;
+
+            peripheralArmed = false;
 
             this.Log(LogLevel.Warning, "SPI: Injecting frame from STM32 ({0} bytes)", frame.Length);
 
@@ -289,24 +337,26 @@ namespace Antmicro.Renode.Peripherals.SPI
             transDone = true;
             UpdateIrq();
 
-            // Clear the usr bit — hardware auto-clears it after transaction
-            // (The register field handles this via read, but we log it)
             this.Log(LogLevel.Debug, "SPI: Transaction complete, trans_done set");
         }
 
         private void UpdateIrq()
         {
-            bool irqActive = transDone && transInten;
-            if(irqActive)
+            bool shouldAssert = transDone && transInten;
+            var cpuEnum = machine.SystemBus.GetCPUs().GetEnumerator();
+            cpuEnum.MoveNext();
+            var gpioReceiver = cpuEnum.Current as IGPIOReceiver;
+            if(gpioReceiver != null)
             {
-                this.Log(LogLevel.Debug, "SPI: IRQ asserted");
-                IRQ.Set(true);
-            }
-            else
-            {
-                IRQ.Set(false);
+                gpioReceiver.OnGPIO(SpiInterruptNumber, shouldAssert);
+                if(shouldAssert)
+                {
+                    this.Log(LogLevel.Debug, "SPI: Interrupt 6 asserted (level-triggered)");
+                }
             }
         }
+
+        private const int SpiInterruptNumber = 6;
 
         // ── DMA descriptor chain operations ────────────────────────────────
 
@@ -435,6 +485,7 @@ namespace Antmicro.Renode.Peripherals.SPI
         private bool transInten;
         private bool transDone;
         private bool slaveMode;
+        private bool peripheralArmed;
         private uint slvRdBit;
 
         // ── Register map ───────────────────────────────────────────────────

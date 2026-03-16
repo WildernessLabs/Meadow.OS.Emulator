@@ -145,7 +145,9 @@ spi2: Memory.MappedMemory @ sysbus 0x3FF64000
 // SPI3 (VSPI) — Meadow ESPCP SPI peripheral
 // Custom C# peripheral: handles register interface for ESP-IDF spi_slave driver,
 // DMA descriptor chain reads/writes, and cross-machine SpiBridge connection.
+// IRQ wired to CPU interrupt 6 (mapped by esp_intr_alloc at runtime via DPORT).
 spi3: SPI.ESP32_SPI @ sysbus 0x3FF65000
+    IRQ -> cpu@6
 
 // I2C0
 i2c0: Memory.MappedMemory @ sysbus 0x3FF53000
