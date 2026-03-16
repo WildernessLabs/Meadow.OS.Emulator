@@ -422,7 +422,7 @@ machines together and tracing the interaction to find the minimal bridge point.
     - Check if SpiBridge has a pending frame
     - If yes: write frame data to DMA rx buffer (follow DMA descriptor chain) or to `data_buf[]`
     - Set `trans_done = 1`
-    - Fire the SPI interrupt
+    - Assert its interrupt source line (connected to DPORT interrupt matrix)
     - Read the DMA tx buffer to get the peripheral's response, send it back to SpiBridge
   - If no frame pending: wait (the transaction stays pending until controller clocks data)
 
@@ -432,32 +432,56 @@ machines together and tracing the interaction to find the minimal bridge point.
   - Use Renode's `EmulationManager.Instance.CurrentEmulation.TryGetMachineByName()` to find
     the STM32 machine and its SpiBridge peripheral from the ESP32 machine context
 
-  **Implementation plan:**
-  1. Create `peripherals/ESP32_SPI.cs` with register map and DMA descriptor support
-  2. Add SpiBridge cross-machine reference (set via .resc or constructor parameter)
-  3. Replace `spi3: Memory.MappedMemory` with `spi3: SPI.ESP32_SPI` in `meadow-esp32.repl`
-  4. Wire SpiBridge → ESP32_SPI in `meadow-dual.resc`
-  5. Test: STM32 sends Transport::SendResponse → ESP32 firmware's ProcessMessages receives it
+  **Implementation status:**
+  - [x] `peripherals/ESP32_SPI.cs` created with register map and DMA descriptor support
+  - [x] SpiBridge cross-machine reference via `SetBridge(object)` + frame-available callback
+  - [x] Replaced `spi3: Memory.MappedMemory` with `spi3: SPI.ESP32_SPI` in `meadow-esp32.repl`
+  - [x] Wired SpiBridge → ESP32_SPI in `meadow-dual.resc`
+  - [x] Un-NOP'd `esp_intr_alloc` — retw fix makes interrupt registration work natively
+  - [x] Fixed slave register bit layout: slave_mode is bit 30 (not 26), matching spi_struct.h
+  - [ ] Connect ESP32_SPI interrupt to DPORT interrupt matrix (see below)
+  - [ ] Test: STM32 sends Transport::SendResponse → ESP32 firmware's ProcessMessages receives it
 
-- [x] Un-NOP'd `esp_intr_alloc` — retw fix makes interrupt registration work natively.
-  Removed the uart_isr_register NOP and the _set_a10_zero Python hook. Boot still works.
-- [x] ESP32_SPI interrupt wiring: IRQ → cpu@6. SPI3 mapped to CPU interrupt 6
-  (confirmed by reading DPORT register PRO_SPI_INTR_MAP at 0x3FF00190 after boot).
-  Note: interrupt 6 is shared with tick injection — acceptable for now.
-- [x] Fixed slave register bit layout: slave_mode is bit 30 (not 26), matching spi_struct.h.
-  Full layout now correct: trans_done(4), trans_inten(9), wr_rd_buf_en(29), slave_mode(30),
-  sync_reset(31).
-- [x] Added SpiBridge→ESP32_SPI callback: `SetFrameAvailableCallback` notifies the peripheral
-  when a frame arrives, so it can inject immediately if armed.
-- [ ] **Current blocker: interrupt delivery timing.** The ESP32_SPI peripheral correctly sets
-  `trans_done = 1` and fires `cpu.OnGPIO(6, true)` from inside a register write callback.
-  The interrupt IS queued (log confirms "Interrupt 6 asserted") but the SPI ISR never runs.
-  Likely cause: the OnGPIO call happens synchronously during a TB execution, and the CPU
-  doesn't check for pending interrupts until the current TB finishes. Tick injection works
-  because it runs from a Python hook BETWEEN TBs. Fix options:
-  - Schedule the interrupt asynchronously (machine.ScheduleAction or similar)
-  - Fire the interrupt from a Python hook at a safe execution point
-  - Add a periodic check in the idle loop that triggers pending SPI transactions
+- [ ] **Implement DPORT interrupt matrix** (upgrade `peripherals/ESP32_DPORT.cs`).
+  Currently, ESP32_SPI and the CCOMPARE0 timer both fire on CPU interrupt 6 because
+  the DPORT interrupt matrix isn't implemented — `esp_intr_alloc` writes the source→CPU
+  mapping to DPORT registers but the matrix doesn't actually route interrupts.
+
+  On real hardware, the interrupt matrix works as follows:
+  - 72 peripheral interrupt sources (SPI3 = source 31, UART0 = source 17, etc.)
+  - Each source has a mapping register at `PRO_*_MAP_REG` (0x3FF00114 + source*4)
+  - The register value is the CPU interrupt number (0-31) to route this source to
+  - `esp_intr_alloc` picks a free CPU interrupt and writes the mapping
+  - When a peripheral asserts its source, the matrix asserts the mapped CPU interrupt line
+  - Multiple sources can map to the same CPU interrupt (level-OR'd)
+  - CCOMPARE0 timer is hardwired to CPU interrupt 6 (not routable through the matrix)
+
+  **What ESP32_DPORT needs to do:**
+  - Maintain a mapping table: source[0..71] → CPU interrupt number
+  - Accept writes to `PRO_*_MAP_REG` registers (0x114-0x234) updating the mapping
+  - Accept GPIO inputs from peripheral interrupt sources (ESP32_SPI, ESP32_UART, etc.)
+  - When a source asserts: look up its mapped CPU interrupt number, assert that line on CPU
+  - When a source deasserts: check if any other active source maps to the same CPU interrupt;
+    only deassert the CPU line if no sources are still active (level-OR behavior)
+  - GPIO output to CPU for each of the 32 CPU interrupt lines
+
+  **Wiring in .repl:**
+  ```
+  spi3: SPI.ESP32_SPI @ sysbus 0x3FF65000
+      IRQ -> dport@31      // SPI3 = interrupt source 31
+
+  dport: Miscellaneous.ESP32_DPORT @ sysbus 0x3FF00000
+      [0-31] -> cpu@[0-31]  // CPU interrupt lines
+  ```
+
+  **Implementation plan:**
+  1. Upgrade `peripherals/ESP32_DPORT.cs` to track interrupt source→CPU mappings
+  2. Add GPIO inputs (one per peripheral source) and outputs (one per CPU interrupt line)
+  3. Implement level-OR routing logic
+  4. Wire ESP32_SPI.IRQ → dport@31, dport → cpu in meadow-esp32.repl
+  5. Remove direct cpu.OnGPIO calls from ESP32_SPI — it just asserts its IRQ GPIO
+  6. Update tick injection to also go through the interrupt matrix (or keep it direct
+     since CCOMPARE0 is hardwired, not matrix-routed)
 - [ ] Test: ESPCP boot handshake (STM32 ↔ real ESP32 firmware)
 - [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns
 - [ ] Verify frame integrity (CRC checks pass on both sides)
@@ -478,8 +502,10 @@ incrementally as integration testing reveals what's needed — not pre-emptively
 - [x] GPIO ROM callx8 NOPs in SPI ctor — gpio_pad_select_gpio reads NULL from IO_MUX
 
 ### In Progress
-- [ ] ESP32 SPI3 peripheral (`peripherals/ESP32_SPI.cs`) — see Phase 2.2 plan
-  for detailed register map, DMA descriptor format, and implementation plan
+- [x] ESP32 SPI3 peripheral (`peripherals/ESP32_SPI.cs`) — register map, DMA descriptors,
+  SpiBridge connection all working. Blocked on interrupt delivery (needs DPORT matrix).
+- [ ] DPORT interrupt matrix upgrade (`peripherals/ESP32_DPORT.cs`) — see Phase 2.2 plan
+  for detailed design. Required for proper interrupt routing from peripherals to CPU.
 
 ### Future Stubs (as needed during integration)
 - [ ] WiFi hardware: either proper register stubs or build firmware variant without WiFi
