@@ -364,17 +364,81 @@ machines together and tracing the interaction to find the minimal bridge point.
     Had to override via `cpu RemoveHooksAt` + re-register targeting SpiBridge instead
     of EspcpStub. Variable pre-set didn't work because hooks.resc redefines it.
   - ESPCP polling enabled by writing 1 to poll flag at 0x2007FFF0.
-- [ ] Bridge the gap: get SpiBridge frames into the ESP32 SPI task's receive path.
-  The SPI task is blocked on `spi_slave_queue_trans` → `xTaskNotifyWait`. Options:
-  - Hook `spi_slave_queue_trans` to dequeue from SpiBridge and fill DMA buffers
-  - Hook `xTaskNotifyWait` in the SPI task context to inject frames
-  - Implement minimal ESP32 SPI3 peripheral
-- [ ] Implement the SPI connection (approach TBD based on observation):
-  - Option A: Implement ESP32 SPI3 peripheral (C#) that presents frames from SpiBridge as
-    hardware SPI transactions — full fidelity, ESP-IDF driver works natively
-  - Option B: Hook at `spi_slave_queue_trans` / `spi_slave_get_trans_result` level to inject
-    frames from SpiBridge — lighter weight, may be sufficient
-  - Option C: Hook at `xTaskNotifyWait` in the SPI task to inject frames and wake the task
+- [ ] **Implement ESP32 SPI3 slave peripheral** (`peripherals/ESP32_SPI_Slave.cs`).
+  Replace the MappedMemory stub at 0x3FF65000 with a real C# peripheral that implements
+  enough of the ESP32 SPI slave register interface for the ESP-IDF `spi_slave` driver to
+  work natively. SpiBridge feeds frames in from the STM32 side; the peripheral presents
+  them to the firmware as hardware SPI transactions.
+
+  **Register interface** (from ESP32 TRM + `spi_struct.h` + `spi_ll.h`):
+  - `cmd` (0x00): `usr` bit (bit 18) — triggers transaction start in slave mode
+  - `slave` (0x38): `trans_done` (bit 4) — ISR checks this; set when transaction completes.
+    `trans_inten` (bit 9) — interrupt enable. `sync_reset` (bit 31) — soft reset.
+    `slave_mode` (bit 26). `wr_rd_sta_en` (bit 30), `wr_rd_buf_en` (bit 29).
+  - `user` (0x1C): `doutdin` (bit 0) — full-duplex mode. `usr_mosi` (bit 27), `usr_miso` (bit 28).
+  - `mosi_dlen` (0x28): bit length of MOSI data
+  - `miso_dlen` (0x2C): bit length of MISO data
+  - `data_buf[16]` (0x80–0xBC): 64-byte data buffer (W0–W15). Non-DMA mode: firmware
+    reads/writes directly. DMA mode: not used (DMA reads/writes memory directly).
+  - `dma_conf` (0x100): DMA config bits
+  - `dma_out_link` (0x104): TX DMA descriptor address (bits 19:0) + `start` (bit 30)
+  - `dma_in_link` (0x108): RX DMA descriptor address (bits 19:0) + `start` (bit 30)
+  - `slv_rdbuf_dlen` (0x48): slave read buffer bit length
+  - `slv_wrbuf_dlen` (0x44): slave write buffer bit length
+  - `slv_rd_bit` (0x64): received data bit length (read by HAL after transaction)
+
+  **DMA descriptor format** (`lldesc_t` from `soc/lldesc.h`):
+  ```
+  struct lldesc_t {
+      uint32_t size:12;    // buffer size
+      uint32_t length:12;  // actual data length
+      uint32_t offset:5;   // unused
+      uint32_t sosf:1;     // start of sub-frame
+      uint32_t eof:1;      // end of frame
+      uint32_t owner:1;    // 0=CPU, 1=DMA
+      uint32_t buf;        // pointer to data buffer
+      uint32_t qe;         // pointer to next descriptor (0 = end of list)
+  };
+  ```
+
+  **Transaction flow** (what the ESP-IDF driver does):
+  1. `spi_slave_queue_trans()`: queues transaction descriptor to FreeRTOS queue, enables interrupt
+  2. `spi_intr()` ISR fires (initially forced via `spi_ll_set_int_stat`):
+     - Checks `trans_done` → if set, current transaction complete → dequeue result
+     - Pulls next transaction from queue
+     - Calls `spi_slave_hal_prepare_data()`:
+       - Resets slave (`sync_reset`)
+       - For DMA: sets up linked-list descriptors, starts RX/TX DMA
+       - For non-DMA: writes TX data to `data_buf[]`
+       - Sets RX/TX bit lengths
+     - Calls `spi_slave_hal_user_start()`: clears `trans_done`, sets `cmd.usr = 1`
+     - Calls `post_setup_cb` (which notifies the SPI task)
+  3. On real hardware: master clocks data → slave receives → `trans_done` set → interrupt fires
+  4. ISR runs again: reads received data, posts to ret_queue, notifies task
+
+  **What the C# peripheral needs to do:**
+  - Track register writes (slave config, DMA addresses, cmd.usr)
+  - When `cmd.usr` is set (slave ready for transaction):
+    - Check if SpiBridge has a pending frame
+    - If yes: write frame data to DMA rx buffer (follow DMA descriptor chain) or to `data_buf[]`
+    - Set `trans_done = 1`
+    - Fire the SPI interrupt
+    - Read the DMA tx buffer to get the slave's response, send it back to SpiBridge
+  - If no frame pending: wait (the transaction stays pending until master clocks data)
+
+  **Cross-machine connection:**
+  - SpiBridge (on STM32) captures frames from NuttX and queues them
+  - ESP32_SPI_Slave needs a reference to SpiBridge to dequeue frames and enqueue responses
+  - Use Renode's `EmulationManager.Instance.CurrentEmulation.TryGetMachineByName()` to find
+    the STM32 machine and its SpiBridge peripheral from the ESP32 machine context
+
+  **Implementation plan:**
+  1. Create `peripherals/ESP32_SPI_Slave.cs` with register map and DMA descriptor support
+  2. Add SpiBridge cross-machine reference (set via .resc or constructor parameter)
+  3. Replace `spi3: Memory.MappedMemory` with `spi3: SPI.ESP32_SPI_Slave` in `meadow-esp32.repl`
+  4. Wire SpiBridge → ESP32_SPI_Slave in `meadow-dual.resc`
+  5. Test: STM32 sends Transport::SendResponse → ESP32 firmware's ProcessMessages receives it
+
 - [ ] Test: ESPCP boot handshake (STM32 ↔ real ESP32 firmware)
 - [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns
 - [ ] Verify frame integrity (CRC checks pass on both sides)
@@ -394,11 +458,14 @@ incrementally as integration testing reveals what's needed — not pre-emptively
 - [x] esp_task_wdt_init returns ESP_OK, esp_task_wdt_add returns ESP_OK, esp_int_wdt_init returns
 - [x] GPIO ROM callx8 NOPs in SPI ctor — gpio_pad_select_gpio reads NULL from IO_MUX
 
+### In Progress
+- [ ] ESP32 SPI3 slave peripheral (`peripherals/ESP32_SPI_Slave.cs`) — see Phase 2.2 plan
+  for detailed register map, DMA descriptor format, and implementation plan
+
 ### Future Stubs (as needed during integration)
 - [ ] WiFi hardware: either proper register stubs or build firmware variant without WiFi
 - [ ] BLE hardware: either proper register stubs or build firmware variant without BLE
 - [ ] SPI flash controller for NVS reads/writes + initial partition data
-- [ ] ESP32 SPI3 peripheral (if integration requires native SPI slave driver support)
 
 ## Phase 4: Full Integration Validation
 
