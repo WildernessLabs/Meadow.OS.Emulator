@@ -734,6 +734,8 @@ cpu AddHook 0x400d99e8 "self.Log(LogLevel.Error, 'ProcessMessages_ENTER')"
 cpu AddHook 0x4008bbe4 "self.Log(LogLevel.Error, 'SPI_ISR_ENTER')"
 cpu AddHook 0x4009f000 "self.Log(LogLevel.Error, 'spi_slave_hal_user_start')"
 cpu AddHook 0x4009f028 "self.Log(LogLevel.Error, 'spi_slave_hal_prepare_data')"
+cpu AddHook 0x4009f02b "self.Log(LogLevel.Error, 'prepare_data: past entry, a2=0x%x' % self.GetRegisterUnsafe(91).RawValue)"
+cpu AddHook 0x4009f213 "self.Log(LogLevel.Error, 'prepare_data: RETURNING (retw)')"
 # ISR path tracing
 cpu AddHook 0x4008bcb3 "self.Log(LogLevel.Error, 'ISR_PATH_B3 (→user_start)')"
 cpu AddHook 0x4008bccd "self.Log(LogLevel.Error, 'ISR_PATH_CD (user_start call)')"
