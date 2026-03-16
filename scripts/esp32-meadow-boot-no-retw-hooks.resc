@@ -227,6 +227,12 @@ sysbus WriteByte 0x400910E8 0xF0
 
 # esp_intr_alloc NOP REMOVED — retw bug is fixed, interrupt registration should work.
 
+# Skip DMA workaround calls in SPI ISR — not needed in emulation and
+# they add call depth that triggers window overflow at WB=14.
+# spicommon_dmaworkaround_transfer_active at 0x4008bd38: call8 → nop
+sysbus WriteByte 0x4008bd38 0xF0
+sysbus WriteByte 0x4008bd39 0x20
+sysbus WriteByte 0x4008bd3a 0x00
 # Skip freeze_cs/restore_cs in SPI ISR — calls gpio_iomux_in which reads
 # GPIO MappedMemory (returns 0) and dereferences as pointer → crash. — these call gpio_iomux_in which reads GPIO
 # func_in_sel_cfg registers (MappedMemory returns 0) and dereferences as a pointer → crash.
