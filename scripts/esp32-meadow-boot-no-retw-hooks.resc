@@ -227,7 +227,8 @@ sysbus WriteByte 0x400910E8 0xF0
 
 # esp_intr_alloc NOP REMOVED — retw bug is fixed, interrupt registration should work.
 
-# Skip freeze_cs/restore_cs in SPI ISR — these call gpio_iomux_in which reads GPIO
+# Skip freeze_cs/restore_cs in SPI ISR — calls gpio_iomux_in which reads
+# GPIO MappedMemory (returns 0) and dereferences as pointer → crash. — these call gpio_iomux_in which reads GPIO
 # func_in_sel_cfg registers (MappedMemory returns 0) and dereferences as a pointer → crash.
 # freeze_cs/restore_cs are DMA CS workarounds for real hardware glitches, not needed in emulation.
 # In spi_intr at 0x4008bc16: beqz.n a5, 0x4008bc35 → skip DMA freeze_cs path (OK, falls through)

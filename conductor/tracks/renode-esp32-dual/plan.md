@@ -549,11 +549,24 @@ machines together and tracing the interaction to find the minimal bridge point.
   addresses — the same class of bug that corrupts FreeRTOS lists and TCB fields.
   This is a fundamental tlib issue with the Xtensa window spill mechanism.
 
+  **Deeper analysis — not buffer corruption, it's a window overflow crash:**
+  Transaction buffers are CORRECT in both the queue and the HAL context at ISR time
+  (verified via Python hooks reading DRAM). The crash is inside `spi_slave_hal_prepare_data`
+  between the `entry a1, 48` instruction (which fires) and the first register read
+  (which never fires). The `entry` triggers a window overflow at WB=14 (wrapping the
+  16-window register file). The overflow handler either crashes or corrupts the return
+  state, preventing the function from continuing.
+
+  This is the same class of Xtensa window overflow/spill bug documented elsewhere in
+  the plan. The `s32e`/`l32e` instructions in the overflow handler may be writing
+  stale register values to incorrect DRAM addresses, or the stack pointer in the
+  spilled window frame is invalid.
+
   **Next steps:**
-  - Investigate the transaction buffer pointers: who allocates them, when do they get
-    corrupted (between `CreateSpiTransaction` → `xQueueSend` → `xQueueReceiveFromISR`)
-  - May need another tlib fix for window overflow register spill accuracy
-  - Alternative: verify with Python hooks that the queued transaction has valid buffers
+  - Investigate the window overflow handler's `s32e` writes during the WB=14 overflow
+  - Check if the stack pointer in the spilled window is valid
+  - May need a tlib fix for window overflow register spill accuracy
+  - Alternative: reduce call depth to avoid wrapping the 16-window register file
 
 - [ ] Test: ESPCP boot handshake (STM32 ↔ real ESP32 firmware)
 - [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns
