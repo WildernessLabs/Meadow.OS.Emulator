@@ -722,14 +722,6 @@ def _thread_task_callx8_guard():
         _cpu.PC = _RV.Create(0x400e154f, 32)  # skip callx8, go to TaskCompleted
 __builtin__._thread_task_callx8_guard = _thread_task_callx8_guard
 
-def _demote_task_at_creation():
-    # xTaskCreatePinnedToCore entry+3: a6 (register 95) = uxPriority.
-    # Log but do NOT demote — the _dispatch_fixup handles demotion at runtime.
-    # Demoting at creation prevents the task from ever being scheduled.
-    pri = _cpu.GetRegister(95).RawValue
-    if pri >= 24:
-        _cpu.Log(LogLevel.Debug, 'xTaskCreate: pri=%d (not demoting)' % pri)
-__builtin__._demote_task_at_creation = _demote_task_at_creation
 
 _vlie_fix_count = [0]
 def _vListInsertEnd_guard():
@@ -753,30 +745,6 @@ def _vListInsertEnd_guard():
             _cpu.Log(LogLevel.Warning, 'vListInsertEnd: corrupt pxNext=0x%08x, fixed (#%d)' % (pxNext, _vlie_fix_count[0]))
 __builtin__._vListInsertEnd_guard = _vListInsertEnd_guard
 
-_pd_count = [0]
-def _prepare_data_trace():
-    _pd_count[0] += 1
-    a2 = _cpu.GetRegister(91).RawValue
-    if a2 >= 0x3FF00000 and a2 < 0x40000000:
-        hw = _bus.ReadDoubleWord(a2)
-        rx_bitlen = _bus.ReadDoubleWord(a2 + 24) if a2 else 0
-        tx_buf = _bus.ReadDoubleWord(a2 + 32) if a2 else 0
-        use_dma = _bus.ReadByte(a2 + 16) if a2 else 0
-        # a2 should be the HAL context (hw at offset 0). If it's the driver struct
-        # (hw at offset 32), the ISR passed the wrong pointer.
-        hw0 = _bus.ReadDoubleWord(a2)
-        hw32 = _bus.ReadDoubleWord(a2 + 32) if a2 + 32 < 0x40000000 else 0
-        # Fix up a8 (register 97) — it should be [a2+0] (hw pointer) but TCG
-        # stale-global bug leaves it at the pre-rotation value (0 or wrong).
-        hw = _bus.ReadDoubleWord(a2)
-        a8 = _cpu.GetRegister(97).RawValue
-        if a8 != hw and hw >= 0x3FF00000 and hw < 0x40000000:
-            _cpu.SetRegister(97, _RV.Create(int(hw), 32))
-        _cpu.Log(LogLevel.Error, 'PD #%d: a2=0x%08x hw=0x%08x (a8 was 0x%08x)' %
-            (_pd_count[0], a2, hw, a8))
-    else:
-        _cpu.Log(LogLevel.Error, 'PD #%d: a2=0x%08x (invalid/init call)' % (_pd_count[0], a2))
-__builtin__._prepare_data_trace = _prepare_data_trace
 
 def _fix_pd_a8():
     # Hook at 0x4009f031 (memw after l32i a8, a2, 0 in prepare_data).
@@ -790,17 +758,6 @@ def _fix_pd_a8():
             _cpu.SetRegister(97, _RV.Create(int(hw), 32))
 __builtin__._fix_pd_a8 = _fix_pd_a8
 
-def _pd_entry_check():
-    # Hook at entry instruction (0x4009f028) BEFORE entry executes.
-    ps = _cpu.GetRegister(38).RawValue  # PS = register 38
-    callinc = (ps >> 16) & 3
-    wb = _cpu.GetRegister(35).RawValue  # WINDOW_BASE = register 35 (guess)
-    a10 = _cpu.GetRegister(99).RawValue  # a10
-    a2 = _cpu.GetRegister(91).RawValue
-    _cpu.Log(LogLevel.Error,
-        'PD_ENTRY: PS=0x%08x CALLINC=%d WB=%d a2=0x%08x a10=0x%08x' %
-        (ps, callinc, wb, a2, a10))
-__builtin__._pd_entry_check = _pd_entry_check
 
 def _set_a10_zero():
     _cpu.SetRegister(99, _RV.Create(0, 32))
@@ -880,43 +837,8 @@ __builtin__._queue_recv_sched_check = _queue_recv_sched_check
 # ESP32 hooks
 cpu AddHook 0x40091360 "_dispatch_fixup()"
 cpu AddHook 0x400e154c "_thread_task_callx8_guard()"
-# Hook AFTER entry (0x4009244f) so we see callee's registers, not caller's
-cpu AddHook 0x4009244f "_demote_task_at_creation()"
-# Trace SPI task and ProcessMessages
-cpu AddHook 0x400d9abc "self.Log(LogLevel.Error, 'SPI_TASK_ENTER')"
-cpu AddHook 0x400d9ad6 "self.Log(LogLevel.Error, 'SPI_TASK_FLAG_SET')"
-cpu AddHook 0x400d9ae1 "self.Log(LogLevel.Error, 'SPI_PROCESS_MESSAGES')"
-cpu AddHook 0x400d99e8 "self.Log(LogLevel.Error, 'ProcessMessages_ENTER')"
-cpu AddHook 0x4008bbe4 "self.Log(LogLevel.Error, 'SPI_ISR_ENTER')"
-cpu AddHook 0x4009f000 "self.Log(LogLevel.Error, 'spi_slave_hal_user_start')"
-cpu AddHook 0x4009f028 "_pd_entry_check()"
-cpu AddHook 0x4009f02b "_prepare_data_trace()"
+# Functional: fix TCG stale-global bug in spi_slave_hal_prepare_data
 cpu AddHook 0x4009f031 "_fix_pd_a8()"
-cpu AddHook 0x4009f034 "self.Log(LogLevel.Error, 'PD: +0c l32i slave reg a8=0x%x a9=0x%x' % (self.GetRegisterUnsafe(97).RawValue, self.GetRegisterUnsafe(98).RawValue))"
-cpu AddHook 0x4009f03a "self.Log(LogLevel.Error, 'PD: +12 memw (write sync_reset)')"
-cpu AddHook 0x4009f03f "self.Log(LogLevel.Error, 'PD: +17 memw (read back slave)')"
-cpu AddHook 0x4009f04a "self.Log(LogLevel.Error, 'PD: +22 memw (clear sync_reset)')"
-cpu AddHook 0x4009f04f "self.Log(LogLevel.Error, 'PD: +27 l8ui use_dma')"
-cpu AddHook 0x4009f05b "self.Log(LogLevel.Error, 'PD: DMA check a9=0x%x (0=non-DMA)' % self.GetRegisterUnsafe(98).RawValue)"
-cpu AddHook 0x4009f0e5 "self.Log(LogLevel.Error, 'PD: calling lldesc_setup_link (RX DMA)')"
-cpu AddHook 0x4009f12b "self.Log(LogLevel.Error, 'PD: calling lldesc_setup_link (TX DMA)')"
-cpu AddHook 0x4009f16a "self.Log(LogLevel.Error, 'PD: non-DMA path')"
-cpu AddHook 0x4009f1ac "self.Log(LogLevel.Error, 'PD: common tail (setting bit lengths)')"
-cpu AddHook 0x4009f213 "self.Log(LogLevel.Error, 'PD: RETURNING (retw)')"
-# ISR path tracing
-cpu AddHook 0x4008bcb3 "self.Log(LogLevel.Error, 'ISR_PATH_B3 (→user_start)')"
-cpu AddHook 0x4008bccd "self.Log(LogLevel.Error, 'ISR_PATH_CD (user_start call)')"
-cpu AddHook 0x4008bce2 "self.Log(LogLevel.Error, 'ISR_PATH_E2 (esp_intr_enable)')"
-cpu AddHook 0x4008bcfd "self.Log(LogLevel.Error, 'ISR_prepare_data_A (first path)')"
-cpu AddHook 0x4008bd3b "self.Log(LogLevel.Error, 'ISR_pre_PD: a3=0x%x a2=0x%x' % (self.GetRegisterUnsafe(92).RawValue, self.GetRegisterUnsafe(91).RawValue))"
-cpu AddHook 0x4008bd3d "self.Log(LogLevel.Error, 'ISR_prepare_data_B: a10=0x%x' % self.GetRegisterUnsafe(99).RawValue)"
-cpu AddHook 0x4008bd48 "self.Log(LogLevel.Error, 'ISR_bnez_patched (should be NOP)')"
-cpu AddHook 0x4008bd4b "self.Log(LogLevel.Error, 'ISR_j_BCB3 (jump to user_start path)')"
-cpu AddHook 0x4008bc89 "self.Log(LogLevel.Error, 'ISR_EXIT (retw path)')"
-cpu AddHook 0x4008bc96 "self.Log(LogLevel.Error, 'ISR_RESTORE_CS')"
-cpu AddHook 0x400d99fe "self.Log(LogLevel.Error, 'PM: spi_slave_queue_trans returned a10=0x%x' % self.GetRegisterUnsafe(99).RawValue)"
-cpu AddHook 0x400d9a15 "self.Log(LogLevel.Error, 'PM: calling xTaskNotifyWait')"
-cpu AddHook 0x400d9a18 "self.Log(LogLevel.Error, 'PM: xTaskNotifyWait returned')"
 cpu AddHook 0x400941bb "_vListInsertEnd_guard()"
 cpu AddHook 0x40091cb8 "_xqr_diag()"
 cpu AddHook 0x40082c14 "_lock_validate()"
