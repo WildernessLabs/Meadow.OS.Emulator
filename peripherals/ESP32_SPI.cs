@@ -325,7 +325,25 @@ namespace Antmicro.Renode.Peripherals.SPI
             var txData = ReadFromDmaDescriptorChain(dmaOutLinkAddr);
             if(txData != null && txData.Length > 0)
             {
-                this.Log(LogLevel.Warning, "SPI: Sending firmware response to STM32 ({0} bytes)", txData.Length);
+                // Decode ESPCP header from firmware response (27-byte header)
+                // Same offsets as SpiBridge: [9]=type, [10]=iface, [11-14]=func,
+                // [19-22]=msgId, [23-26]=payloadLen
+                if(txData.Length >= 27)
+                {
+                    var proto = txData[0];
+                    var msgType = txData[9];
+                    var iface = txData[10];
+                    var func = (uint)(txData[11] | (txData[12] << 8) | (txData[13] << 16) | (txData[14] << 24));
+                    var msgId = (uint)(txData[19] | (txData[20] << 8) | (txData[21] << 16) | (txData[22] << 24));
+                    var payloadLen = (uint)(txData[23] | (txData[24] << 8) | (txData[25] << 16) | (txData[26] << 24));
+                    this.Log(LogLevel.Warning,
+                        "SPI: ESP32→STM32 ({0}B) proto=0x{1:X2} type=0x{2:X2} iface={3} func={4} msgId=0x{5:X8} payloadLen={6}",
+                        txData.Length, proto, msgType, iface, func, msgId, payloadLen);
+                }
+                else
+                {
+                    this.Log(LogLevel.Warning, "SPI: Sending firmware response to STM32 ({0} bytes)", txData.Length);
+                }
                 bridge.EnqueueFrameToStm32(txData);
             }
 
