@@ -1,7 +1,7 @@
 # Plan: Dual-Machine ESP32 Emulation
 
 ## Track ID: `renode-esp32-dual`
-## Status: `in-progress` (Phase 1 ✅, retw fix ✅, ESP32 boots ✅, dual-machine running ✅, window crash fixed ✅, **ESPCP frames flowing ✅**, Phase 2.2 — handshake validation next)
+## Status: `in-progress` — Phase 1 ✅, Phase 2 ✅ (SPI bridge working, ESPCP frames flowing bidirectionally), Phase 3 ✅ (stubs sufficient), Phase 4 in progress (protocol validation next)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -412,33 +412,38 @@ machines together and tracing the interaction to find the minimal bridge point.
 
   **Both single-machine and dual-machine boot stably for 90+ seconds with zero crashes.**
 
-  **ESPCP frame flow status (2026-03-16):**
-  - STM32 → SpiBridge: ESPCP polling frames flow (type=0x20, iface=5, func=1) ✅
-  - SpiBridge → ESP32_SPI: frame-available callback wired ✅
-  - ESP32 SPI task starts, ProcessMessages loop enters ✅
-  - SPI ISR fires, calls spi_slave_hal_prepare_data ✅
-  - **Blocker: spi_slave_hal_prepare_data (0x4009f028) enters but never returns.**
-    Entry succeeds (a2=0x3ffd23a0, valid HAL context), but the function gets stuck
-    internally — retw.n at 0x4009f213 is never reached. Likely polling an SPI register
-    (via `memw` + `l32i`) that ESP32_SPI returns an unexpected value for. The ISR never
-    reaches `spi_slave_hal_user_start`, so `cmd.usr` is never set, and ESP32_SPI never
-    injects frames from SpiBridge.
-
-- [x] **ESPCP frames flowing end-to-end** — RESOLVED (2026-03-16).
-  Three fixes enabled full SPI bridge frame flow:
+- [x] **ESPCP frames flowing bidirectionally** — RESOLVED (2026-03-16).
+  Three final fixes enabled the full SPI bridge frame flow:
   (a) **Trampoline relocation**: the window init trampoline ELF at 0x4009F000 was
-      overwriting spi_slave_hal_user_start and prepare_data. Replaced with Renode
-      register API (SetRegister).
+      overwriting `spi_slave_hal_user_start` (0x4009F000) and `spi_slave_hal_prepare_data`
+      (0x4009F028). Replaced with Renode register API (`SetRegister` for WINDOWBASE,
+      WINDOWSTART, PS, A1; set PC directly to firmware entry).
   (b) **a8 fixup at prepare_data memw** (0x4009f031): TCG stale-global bug causes the
-      hw pointer loaded by l32i to be lost. Python hook reads [a2+0] and sets a8.
+      hw pointer loaded by l32i to be lost after `entry` window rotation. Python hook
+      reads `[a2+0]` and sets a8.
   (c) **a2 fixup at prepare_data entry** (0x4009f02b): same stale-global issue for the
-      HAL context pointer.
-  Result: prepare_data completes, ISR reaches user_start, cmd.usr set, ESP32_SPI
-  injects frames from SpiBridge. Verified: "Injecting frame from STM32 (32 bytes)"
-  messages confirm ESPCP polling frames flowing through the full chain.
-- [ ] Test: ESPCP boot handshake (STM32 ↔ real ESP32 firmware)
-- [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns
-- [ ] Verify frame integrity (CRC checks pass on both sides)
+      HAL context pointer. Python hook reads driver struct offset.
+
+  **Verified working cycle:**
+  - STM32 sends ESPCP polling frame (32B, type=0x20) → SpiBridge queues it
+  - ESP32_SPI injects frame into firmware DMA buffer → fires SPI IRQ
+  - SPI ISR runs → `spi_slave_hal_prepare_data` → `spi_slave_hal_user_start` → arms `cmd.usr`
+  - `xTaskNotifyWait` returns → `ProcessMessages` processes the ESPCP frame
+  - Firmware generates 4092-byte response → ESP32_SPI reads from DMA TX buffer
+  - Response queued in SpiBridge → STM32 retrieves on next SPI exchange
+  - Cycle repeats continuously with no crashes
+
+  **Known workarounds still in place:**
+  - Thread::Task null method guard at `callx8 a3` (0x400e154c) — race condition
+  - vListInsertEnd pxIndex validation at entry (0x400941bb) — window spill corruption
+  - SPI ISR freeze_cs/restore_cs NOPs (0x4008bc32, 0x4008bd48) — IO_MUX null ptrs
+  - prepare_data a2/a8 fixup hooks — TCG stale-global bug (needs tlib architectural fix)
+
+  **Known tlib issue (non-blocking):** TCG `gen_exit_tb` writes ALL fixed globals
+  unconditionally, including values that were modified by helpers (entry's window
+  rotation). This is why a2 and a8 need Python hook fixups. The proper fix requires
+  either making gen_exit_tb skip unmodified globals, or emitting explicit global
+  reloads after helper calls. Tracked in tlib but not blocking ESPCP operation.
 
 ## Phase 3: ESP32 Peripheral Stubs
 
@@ -455,17 +460,18 @@ incrementally as integration testing reveals what's needed — not pre-emptively
 - [x] esp_task_wdt_init returns ESP_OK, esp_task_wdt_add returns ESP_OK, esp_int_wdt_init returns
 - [x] GPIO ROM callx8 NOPs in SPI ctor — gpio_pad_select_gpio reads NULL from IO_MUX
 
-### Also Done (moved from In Progress)
+### Also Done
 - [x] ESP32 SPI3 peripheral (`peripherals/ESP32_SPI.cs`) — register map, DMA descriptors,
-  SpiBridge connection. Replaced MappedMemory at 0x3FF65000.
+  SpiBridge connection, frame injection, IRQ generation. Full SPI slave driver compatible.
 - [x] DPORT interrupt matrix (`peripherals/ESP32_DPORT.cs`) — 69-source mapping table,
-  GPIO inputs, level-OR routing. Fires interrupts via direct OnGPIO calls.
-- [x] Xtensa interrupt delivery — fixed in tlib (`check_interrupts` after INTSET change,
-  removed `base.OnGPIO` call). xTickCount advances, SPI ISR fires.
+  level-OR routing. Routes SPI3 interrupt to CPU via OnGPIO.
+- [x] Xtensa interrupt delivery — two tlib bugs fixed. Tick injection + SPI ISR both work.
 - [x] Thread::Task race condition — Python guard at `callx8 a3` (0x400e154c)
 - [x] vListInsertEnd pxIndex corruption — Python guard at entry (0x400941bb)
+- [x] Trampoline relocation — replaced code overwrite at 0x4009F000 with register API init
+- [x] prepare_data a2/a8 stale-global fixup hooks — workaround for TCG gen_exit_tb bug
 
-### Future Stubs (as needed during integration testing)
+### Future Stubs (as needed during Phase 4 integration testing)
 - [ ] WiFi hardware stubs (if needed beyond current skip of WiFiRequestHandler::Setup)
 - [ ] BLE hardware stubs (if needed beyond current skip of BluetoothRequestHandler)
 - [ ] SPI flash controller for NVS reads/writes + initial partition data
@@ -474,19 +480,22 @@ incrementally as integration testing reveals what's needed — not pre-emptively
 
 **Goal:** Both machines running real firmware end-to-end, full ESPCP protocol working.
 
-**Note:** Phase 4 is now a continuation of Phase 2.2 — the dual-machine script and initial
-SPI connection are being done as part of Phase 2.2's integration-first approach. Phase 4
-covers the deeper validation once the basic connection works.
+**Current state:** ESPCP frames flow bidirectionally. The firmware's `ProcessMessages`
+loop processes frames and generates responses. The SPI ISR cycles continuously. Both
+machines run stably with no crashes. The basic SPI bridge connection is WORKING.
 
 ### 4.1 — ESPCP Protocol Validation
-- [ ] System config exchange works (GetConfiguration → SystemRequestHandler → response)
-- [ ] Compare SPI traces with EspcpStub approach to verify protocol fidelity
+- [x] Basic frame flow: STM32 sends polls → ESP32 receives → firmware responds ✅
+- [ ] Verify firmware actually parses the ESPCP header (decode type/iface/func)
+- [ ] System config exchange: GetConfiguration → SystemRequestHandler → response
+- [ ] Compare response content with EspcpStub approach to verify protocol fidelity
 - [ ] Multi-packet messages work (PayloadLength > MAXIMUM_PACKET_SIZE)
 
 ### 4.2 — Full System Validation
-- [ ] WiFi start/connect works (with stubbed radio)
+- [ ] STM32 reads ESP32 response and processes it (ESPCP response handler)
 - [ ] HCOM commands work alongside dual-machine ESPCP
 - [ ] System runs stably for extended periods (minutes, not seconds)
+- [ ] WiFi/BLE stubs sufficient or need enhancement for full boot sequence
 
 ---
 
@@ -527,7 +536,7 @@ covers the deeper validation once the basic connection works.
 | 2026-03-10 | ESP-IDF toolchain required for next steps | `esp32` cpuType has distinct ISA from `sample_controller` — can't use generic Xtensa binaries. Need ESP-IDF 4.2.4 toolchain to build hello-world or Meadow firmware. |
 | 2026-03-10 | Bare-metal approach for boot spike | Full ESP-IDF build system has Python 3.10 compat issues (gevent). Bare-metal C + asm startup with direct cross-compiler use works for the spike. |
 | 2026-03-10 | Windowed ABI requires explicit init | ESP32 Xtensa always uses windowed ABI (no `-mabi=call0`). Must init WINDOWBASE=0, WINDOWSTART=1, PS.WOE=1 before any `entry` instruction. |
-| 2026-03-10 | Trampoline for ESP-IDF ELF loading | ESP-IDF ELF entry point (`call_start_cpu0` at 0x40081BBC) uses `entry` instruction. Can't set window registers via Renode API — must use a code trampoline at 0x4009F000. |
+| 2026-03-10 | ~~Trampoline for ESP-IDF ELF loading~~ **SUPERSEDED 2026-03-16** | Originally used a code trampoline at 0x4009F000 to init window registers. **Replaced with Renode register API** (`SetRegister` for WINDOWBASE/WINDOWSTART/PS/A1, set PC directly) because the trampoline overwrote `spi_slave_hal_user_start` and `spi_slave_hal_prepare_data` at the same address range. |
 | 2026-03-10 | IRAM +1KB patch for emulator build | Meadow firmware overflows IRAM by 652 bytes with toolchain `esp-2020r3`. Patching `esp32_out.ld` to extend `iram0_0_seg` by 1KB works. Root cause likely: slightly different code generation vs production build env. |
 | 2026-03-10 | CMake 3.28 required | CMake 4.x removed compatibility with `cmake_minimum_required(VERSION 2.6)` used by ESP-IDF 4.2.4's mbedtls. Downloaded CMake 3.28.6 to `/tmp/`. |
 | 2026-03-10 | Use real ESP32 ROM binary | Espressif distributes ROM in their QEMU fork (github.com/espressif/qemu, esp-develop branch). Provides full exception vectors, ROM utility functions. Much better than hand-writing stubs. |
@@ -592,6 +601,9 @@ covers the deeper validation once the basic connection works.
 | 2026-03-13 | **`or a1,a1,a1` bug status unclear** | 683 instances of `or a1,a1,a1` in firmware (compiler-generated NOPs). Previously documented as corrupting A1 in Renode. The tlib translate_or code looks correct (`tcg_gen_or_i32(out, in, in)` with same TCG variable). May have been a retw-cascade symptom. Needs isolated testing to confirm. |
 | 2026-03-15 | **Dual-machine boot works** | Both STM32 (NuttX) and ESP32 (Meadow firmware) boot and run simultaneously in the same Renode emulation. STM32 reaches ESPCP driver init at ~25s (SPI2 register config writes observed). ESP32 reaches idle with SPI task running and ticks. Multi-machine Python hooks use `TryGetMachineByName()` API. Build artifacts symlinked from main worktree since NuttX hasn't been built in the -esp32-dual worktree. |
 | 2026-03-16 | **Window overflow crash — root cause and fix** | The PC=0 crash during SPI init was a race condition, not a window overflow bug. `Thread::Task(void*)` at 0x400e1538 calls `GetMethod()` which returns NULL because the SPI task (priority 24) preempts the constructor before the method pointer is set. Fix: Python hook at `callx8 a3` (0x400e154c) redirects to loop start when a3 is null. Secondary crash in vListInsertEnd from pxIndex corruption (window overflow register spill writes IRAM addresses into list fields) fixed with validation hook. Four tlib robustness fixes also applied: translate_rfw local temp, window_check n>w early exit, test_ill_retw a0 fixup, diagnostic logging. Both single-machine and dual-machine now stable for 90+ seconds. |
+| 2026-03-16 | **Trampoline overwrites SPI HAL functions** | The window init trampoline ELF (48 bytes at 0x4009F000) overlaps with `spi_slave_hal_user_start` (0x4009F000, 38B) and `spi_slave_hal_prepare_data` (0x4009F028). This was why HELPER(entry) never fired for prepare_data and the ISR couldn't complete the SPI transaction cycle. Fix: Renode register API (`SetRegister`) for window init, eliminating the code trampoline entirely. |
+| 2026-03-16 | **TCG stale-global bug in gen_exit_tb** | After a helper call that modifies `env->regs` directly (e.g., entry's window rotation), TCG fixed globals (`cpu_R[0..15]`) retain stale pre-helper values in their host registers. `gen_exit_tb` writes ALL fixed globals back unconditionally, overwriting the helper-modified values. This causes callee registers after `entry` to have wrong values (e.g., a2 gets caller's a2 instead of caller's a10 after call8). Workaround: Python hooks that fix a2 and a8 at prepare_data entry. Proper fix needs TCG-level change to either skip unmodified globals in gen_exit_tb or reload globals after helper calls. |
+| 2026-03-16 | **ESPCP frames flowing bidirectionally** | Full SPI bridge working: STM32 NuttX sends ESPCP polling frames through SpiBridge → ESP32_SPI injects into firmware DMA buffers → SPI ISR fires → firmware ProcessMessages processes frame → generates 4092-byte response → response flows back through SpiBridge to STM32. Cycle repeats continuously. |
 | 2026-03-16 | **FreeRTOS stack base save area is intentionally zero** | Researched pxPortInitialiseStack (ESP-IDF 4.2.4): the entire stack frame is zeroed, including the base save area at [SP-12]. This is by design — terminates GDB backtrace and RETW chain. On real hardware, the 16-window register file never wraps because: (1) call chains are < 8 deep with call8, (2) SPILL_ALL_WINDOWS during context switches prevents accumulation, (3) compiler mixes call4/call8 keeping effective depth low. In emulation, the SPI init chain can reach 8 call8 levels (WS=0x5555), wrapping to WB=0 where WOVF8's `l32e a0, a1, -12` loads 0. |
 
 ## Changes Log
@@ -646,3 +658,10 @@ covers the deeper validation once the basic connection works.
 | 2026-03-16 | `scripts/esp32-meadow-boot-no-retw-hooks.resc` | **Thread::Task null method guard**: Python hook at callx8 a3 (0x400e154c) in `Thread::Task(void*)`. SPI constructor creates priority-24 task that preempts before method pointer is set → GetMethod returns 0 → callx8 jumps to 0. Hook detects null/invalid a3 and redirects to loop start (0x400e153b) to retry. |
 | 2026-03-16 | `scripts/esp32-meadow-boot-no-retw-hooks.resc`, `scripts/meadow-dual.resc` | **vListInsertEnd guard**: Python hook at vListInsertEnd entry (0x400941bb) validates pxIndex (list+4) and pxIndex->pxNext (pxIndex+8) before dereferencing. Resets corrupt pointers (outside DRAM 0x3FF00000-0x40000000) to &xListEnd (list+8). Prevents STORE_PROHIBITED crashes from window overflow register spill corruption. |
 | 2026-03-16 | `scripts/meadow-dual.resc` | Added Thread::Task null method guard and vListInsertEnd guard to dual-machine boot script (same hooks as single-machine). Both machines now boot and run stably for 90+ seconds with zero crashes. |
+| 2026-03-16 | tlib `arch/xtensa/win_helper.c`, `translate.c`, `helper.h` | **rfwo no-phys-sync fix** (`d6f6bcfc`): rfwo uses new `restore_owb_no_phys_sync` helper that skips `sync_phys_from_window`, preventing overflow handler scratch values from corrupting caller's phys_regs. rfwu keeps full sync. |
+| 2026-03-16 | tlib `arch/xtensa/translate.c` | **call4/8/12 CALLINC fix** (`9c77ec0b`): `gen_callw_slot` and `translate_callw` used `tcg_const_i32` for CALLINC deposit and jump target. Changed to `tcg_temp_local_new_i32`. Same pattern as retw/rfw fixes. |
+| 2026-03-16 | tlib `arch/xtensa/translate.c`, `win_helper.c` | **Entry rotation + cpu_R reload** (`0132f8c4`): Moved window rotation into `HELPER(entry)` to avoid stale-global issue with separate `sync_windowbase`. Added `tcg_gen_ld_i32` loop to reload all 16 `cpu_R` globals from `env->regs` after entry helper. Also fixed `translate_entry` to use local temps for pc/s/imm parameters. |
+| 2026-03-16 | `scripts/meadow-dual.resc`, `scripts/esp32-meadow-boot-no-retw-hooks.resc` | **Trampoline relocation**: Replaced `sysbus LoadELF @tests/trampoline/trampoline.elf` (which overwrote SPI HAL functions at 0x4009F000-0x4009F02F) with Renode register API calls: `SetRegister WINDOWBASE/WINDOWSTART/PS/A1`, `PC 0x40081BBC`. Applied to both boot scripts. |
+| 2026-03-16 | `scripts/meadow-dual.resc` | **SPI ISR patches**: Added missing freeze_cs NOP (0x4008bc32) and restore_cs branch NOP (0x4008bd48) to dual-machine script. Without these, ISR skips `spi_slave_hal_user_start` and `cmd.usr` is never set. |
+| 2026-03-16 | `scripts/meadow-dual.resc` | **prepare_data a2/a8 fixup hooks**: Python hooks at 0x4009f02b (entry+3) and 0x4009f031 (first memw) fix the HAL context pointer and hw pointer that are corrupted by TCG stale-global bug after entry's window rotation. |
+| 2026-03-16 | `scripts/meadow-dual.resc` | **ESPCP frames flowing**: Full bidirectional SPI bridge verified. STM32 polling frames injected into ESP32 firmware DMA buffers, firmware generates 4092-byte responses, responses flow back to STM32 via SpiBridge. ISR cycles continuously with no crashes. |
