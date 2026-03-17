@@ -354,7 +354,26 @@ if [ ! -f "$RENODE_DLL" ]; then
 fi
 
 # ============================================================
-# 8. Firmware build output
+# 8. ESP32 ROM binary (required for dual-machine mode)
+# ============================================================
+section "ESP32 ROM Binary"
+
+ESP32_ROM="$SCRIPT_DIR/roms/esp32-v3-rom.bin"
+if [ -f "$ESP32_ROM" ]; then
+    ok "esp32-v3-rom.bin ($(ls -lh "$ESP32_ROM" | awk '{print $5}'))"
+else
+    echo "  Downloading ESP32 ROM from Espressif QEMU repo..."
+    mkdir -p "$SCRIPT_DIR/roms"
+    if curl -fSL -o "$ESP32_ROM" \
+        https://github.com/espressif/qemu/raw/esp-develop/pc-bios/esp32-v3-rom.bin 2>/dev/null; then
+        added "esp32-v3-rom.bin"
+    else
+        fail "ESP32 ROM download — see roms/README.md for manual instructions"
+    fi
+fi
+
+# ============================================================
+# 9. Firmware build output
 # ============================================================
 section "Firmware Build"
 
