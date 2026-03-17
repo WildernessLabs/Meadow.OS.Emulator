@@ -811,20 +811,6 @@ def _lock_validate():
         W(a2, 0)
 __builtin__._lock_validate = _lock_validate
 
-_idle_count = [0]
-_tick_interval = 50
-def _idle_tick_direct():
-    _idle_count[0] += 1
-    c = _idle_count[0]
-    if c % _tick_interval == 0:
-        ps = _cpu.GetRegister(38).RawValue
-        new_ps = (ps & ~0x1F) | 0x20
-        _cpu.SetRegister(38, _RV.Create(int(new_ps), 32))
-        _cpu.OnGPIO(6, True)
-        _cpu.OnGPIO(6, False)
-        if c <= 1000 or c % 10000 == 0:
-            _cpu.Log(LogLevel.Error, 'TICK_INJECT #%d' % (c // _tick_interval))
-__builtin__._idle_tick_direct = _idle_tick_direct
 
 def _queue_recv_sched_check():
     a10 = _cpu.GetRegister(99).RawValue
@@ -844,7 +830,7 @@ cpu AddHook 0x40091cb8 "_xqr_diag()"
 cpu AddHook 0x40082c14 "_lock_validate()"
 cpu AddHook 0x40157d12 "_set_a10_zero()"
 cpu AddHook 0x40007d57 "_ets_printf_hook()"
-cpu AddHook 0x400920fe "_idle_tick_direct()"
+# CCOMPARE0 native timer handles FreeRTOS tick — no injection hook needed
 cpu AddHook 0x40091cf8 "_queue_recv_sched_check()"
 
 # Exception/panic trace hooks
