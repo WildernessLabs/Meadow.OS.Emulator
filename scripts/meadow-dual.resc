@@ -22,6 +22,7 @@ include @peripherals/ESP32_RTC_CNTL.cs
 include @peripherals/ESP32_TimerGroup.cs
 include @peripherals/ESP32_DPORT.cs
 include @peripherals/ESP32_SPI.cs
+include @peripherals/XtensaHotPathHooks.cs
 
 # =============================================================================
 # Machine 1: STM32 F7 — NuttX Meadow Legacy OS
@@ -649,189 +650,19 @@ def _ets_printf_hook():
         _cpu.Log(LogLevel.Warning, 'UART> %s' % msg)
 __builtin__._ets_printf_hook = _ets_printf_hook
 __builtin__._read_cstr = _read_cstr
-
-_ipc_demoted = [False]
-_total_demoted = [0]
-def _demote_ipc_tasks(R, W):
-    if _total_demoted[0] >= 6:
-        return
-    rl24 = 0x3FFC9384 + 24 * 20
-    cnt24 = R(rl24)
-    if cnt24 == 0:
-        return
-    sentinel24 = rl24 + 8
-    item = R(rl24 + 12)
-    for _ in range(cnt24 + 1):
-        if item == sentinel24 or item == 0:
-            break
-        if _total_demoted[0] >= 6:
-            break
-        next_item = R(item + 4)
-        tcb = R(item + 12)
-        pri = R(tcb + 48)
-        if pri == 24:
-            W(tcb + 48, 0)
-            nx = R(item + 4)
-            pv = R(item + 8)
-            W(nx + 8, pv)
-            W(pv + 4, nx)
-            pi = R(rl24 + 4)
-            if pi == item:
-                W(rl24 + 4, pv)
-            W(item + 16, 0)
-            W(rl24, R(rl24) - 1)
-            rl0 = 0x3FFC9384
-            ri = R(rl0 + 4)
-            rp = R(ri + 8)
-            W(item + 4, ri)
-            W(item + 8, rp)
-            W(rp + 4, item)
-            W(ri + 8, item)
-            W(item + 16, rl0)
-            W(rl0, R(rl0) + 1)
-            _total_demoted[0] += 1
-            _cpu.Log(LogLevel.Error, 'DEMOTED IPC task #%d TCB=0x%x from pri24 to pri0' % (_total_demoted[0], tcb))
-        item = next_item
-    if R(rl24) == 0:
-        for p in range(24, -1, -1):
-            if R(0x3FFC9384 + p * 20) > 0:
-                W(0x3FFC92EC, p)
-                break
-
-def _dispatch_fixup():
-    R = _bus.ReadDoubleWord
-    W = _bus.WriteDoubleWord
-    _demote_ipc_tasks(R, W)
-    if not _ipc_demoted[0]:
-        _ipc_demoted[0] = True
-        W(0x3FFC92BC, 1)
-    for p in range(25):
-        base = 0x3FFC9384 + p * 20
-        pi = R(base + 4)
-        if pi < 0x3FF00000 or pi > 0x40000000:
-            W(base + 4, base + 8)
-__builtin__._dispatch_fixup = _dispatch_fixup
-
-_thread_null_count = [0]
-def _thread_task_callx8_guard():
-    a3 = _cpu.GetRegister(92).RawValue
-    if a3 == 0 or a3 < 0x40000000 or a3 >= 0x40200000:
-        _thread_null_count[0] += 1
-        if _thread_null_count[0] <= 5:
-            _cpu.Log(LogLevel.Warning, 'Thread::Task: null method a3=0x%08x, skip (#%d)' % (a3, _thread_null_count[0]))
-        _cpu.PC = _RV.Create(0x400e154f, 32)  # skip callx8, go to TaskCompleted
-__builtin__._thread_task_callx8_guard = _thread_task_callx8_guard
-
-
-_vlie_fix_count = [0]
-def _vListInsertEnd_guard():
-    R = _bus.ReadDoubleWord
-    W = _bus.WriteDoubleWord
-    a2 = _cpu.GetRegister(91).RawValue
-    if a2 < 0x3FF00000 or a2 >= 0x40000000:
-        return
-    pxIndex = R(a2 + 4)
-    if pxIndex < 0x3FF00000 or pxIndex >= 0x40000000:
-        W(a2 + 4, a2 + 8)
-        _vlie_fix_count[0] += 1
-        if _vlie_fix_count[0] <= 10:
-            _cpu.Log(LogLevel.Warning, 'vListInsertEnd: corrupt pxIndex=0x%08x, fixed (#%d)' % (pxIndex, _vlie_fix_count[0]))
-        return
-    pxNext = R(pxIndex + 8)
-    if pxNext < 0x3FF00000 or pxNext >= 0x40000000:
-        W(pxIndex + 8, a2 + 8)
-        _vlie_fix_count[0] += 1
-        if _vlie_fix_count[0] <= 10:
-            _cpu.Log(LogLevel.Warning, 'vListInsertEnd: corrupt pxNext=0x%08x, fixed (#%d)' % (pxNext, _vlie_fix_count[0]))
-__builtin__._vListInsertEnd_guard = _vListInsertEnd_guard
-
-
-def _fix_pd_a8():
-    # Hook at 0x4009f031 (memw after l32i a8, a2, 0 in prepare_data).
-    # Due to TCG stale-global bug, a8 may not have the value loaded by l32i.
-    # Fix: read [a2+0] and set a8 if it's wrong.
-    a2 = _cpu.GetRegister(91).RawValue
-    a8 = _cpu.GetRegister(97).RawValue
-    if a2 >= 0x3FF00000 and a2 < 0x40000000:
-        hw = _bus.ReadDoubleWord(a2)
-        if a8 != hw and hw >= 0x3FF00000:
-            _cpu.SetRegister(97, _RV.Create(int(hw), 32))
-__builtin__._fix_pd_a8 = _fix_pd_a8
-
-
-def _set_a10_zero():
-    _cpu.SetRegister(99, _RV.Create(0, 32))
-__builtin__._set_a10_zero = _set_a10_zero
-
-_xqr_count = [0]
-def _xqr_diag():
-    _xqr_count[0] += 1
-    R = _bus.ReadDoubleWord
-    W = _bus.WriteDoubleWord
-    a2 = _cpu.GetRegister(99).RawValue
-    if a2 < 0x3FF00000 or a2 >= 0x40000000:
-        return
-    wts_pi = R(a2 + 20)
-    wtr_pi = R(a2 + 40)
-    if wts_pi != 0 or wtr_pi != 0:
-        return
-    _cpu.Log(LogLevel.Error, 'XQR_FIX #%d: queue=0x%08x uninit' % (_xqr_count[0], a2))
-    try:
-        wts = a2 + 16
-        W(wts, 0); W(wts + 4, wts + 8); W(wts + 8, 0xFFFFFFFF); W(wts + 12, wts + 8); W(wts + 16, wts + 8)
-        wtr = a2 + 36
-        W(wtr, 0); W(wtr + 4, wtr + 8); W(wtr + 8, 0xFFFFFFFF); W(wtr + 12, wtr + 8); W(wtr + 16, wtr + 8)
-        W(a2, a2 + 80); W(a2 + 4, a2 + 80); W(a2 + 8, a2 + 80); W(a2 + 12, 0)
-        W(a2 + 56, 0); W(a2 + 60, 1); W(a2 + 64, 0)
-    except Exception as e:
-        _cpu.Log(LogLevel.Error, 'XQR_FIX: EXCEPTION: %s' % str(e))
-__builtin__._xqr_diag = _xqr_diag
-
-_lock_fix_count = [0]
-def _lock_validate():
-    R = _bus.ReadDoubleWord
-    W = _bus.WriteDoubleWord
-    a10 = _cpu.GetRegister(99).RawValue
-    a2 = _cpu.GetRegister(91).RawValue
-    _lock_fix_count[0] += 1
-    lockptr = a10
-    if lockptr < 0x3FF00000 or lockptr >= 0x40000000:
-        lockptr = a2
-    if lockptr < 0x3FF00000 or lockptr >= 0x40000000:
-        return
-    handle = R(lockptr)
-    if handle == 0:
-        return
-    if handle < 0x3FF00000 or handle >= 0x40000000:
-        W(a2, 0)
-        return
-    wts_pi = R(handle + 20)
-    wtr_pi = R(handle + 40)
-    if wts_pi == 0 and wtr_pi == 0:
-        W(a2, 0)
-__builtin__._lock_validate = _lock_validate
-
-
-def _queue_recv_sched_check():
-    a10 = _cpu.GetRegister(99).RawValue
-    if a10 != 2:
-        from Antmicro.Renode.Peripherals.CPU import RegisterValue
-        _cpu.SetRegister(0, RegisterValue.Create(0x40091d83, 32))
-__builtin__._queue_recv_sched_check = _queue_recv_sched_check
 """
 
-# ESP32 hooks
-cpu AddHook 0x40091360 "_dispatch_fixup()"
-cpu AddHook 0x400e154c "_thread_task_callx8_guard()"
-# Functional: fix TCG stale-global bug in spi_slave_hal_prepare_data
-cpu AddHook 0x4009f031 "_fix_pd_a8()"
-cpu AddHook 0x400941bb "_vListInsertEnd_guard()"
-cpu AddHook 0x40091cb8 "_xqr_diag()"
-cpu AddHook 0x40082c14 "_lock_validate()"
-cpu AddHook 0x40157d12 "_set_a10_zero()"
+# ESP32 hooks — compiled C# (XtensaHotPathHooks.cs) for performance
+cpu InstallDispatchFixup 0x40091360
+cpu InstallThreadTaskGuard 0x400e154c 0x400e154f
+cpu InstallFixPdA8 0x4009f031
+cpu InstallVListInsertEndGuard 0x400941bb
+cpu InstallXqrDiag 0x40091cb8
+cpu InstallLockValidate 0x40082c14
+cpu InstallSetRegZero 0x40157d12 99
+cpu InstallQueueRecvSchedCheck 0x40091cf8 0x40091d83
+# ets_printf stays as IronPython — low frequency, complex string formatting
 cpu AddHook 0x40007d57 "_ets_printf_hook()"
-# CCOMPARE0 native timer handles FreeRTOS tick — no injection hook needed
-cpu AddHook 0x40091cf8 "_queue_recv_sched_check()"
 
 # Exception/panic trace hooks
 cpu AddHook 0x40080300 "self.Log(LogLevel.Error, 'KERNEL_EXC EXCCAUSE=%d EPC1=0x%x EXCVADDR=0x%x' % (self.GetRegisterUnsafe(77).RawValue, self.GetRegisterUnsafe(51).RawValue, self.GetRegisterUnsafe(83).RawValue))"
