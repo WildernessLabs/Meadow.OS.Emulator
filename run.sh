@@ -54,6 +54,7 @@ fi
 
 # Parse arguments
 LEGACY=false
+ESP32=false
 SCRIPT=""
 MONITOR_PORT=1234
 
@@ -62,8 +63,26 @@ for arg in "$@"; do
         --legacy)
             LEGACY=true
             ;;
+        --esp32)
+            ESP32=true
+            ;;
         --port=*)
             MONITOR_PORT="${arg#--port=}"
+            ;;
+        --help|-h)
+            echo "Usage: ./run.sh [options] [script-name]"
+            echo ""
+            echo "Options:"
+            echo "  --legacy        Run NuttX Legacy OS (default: Meadow.OS)"
+            echo "  --esp32         Run with real ESP32 coprocessor (dual-machine emulation)"
+            echo "                  Without --esp32, the ESP32 is stubbed via EspcpStub"
+            echo "  --port=N        Renode monitor port (default: 1234)"
+            echo ""
+            echo "Examples:"
+            echo "  ./run.sh --legacy              # NuttX + EspcpStub (no ESP32)"
+            echo "  ./run.sh --legacy --esp32      # NuttX + real ESP32 firmware"
+            echo "  ./run.sh                       # Meadow.OS (default)"
+            exit 0
             ;;
         *)
             SCRIPT="$arg"
@@ -71,9 +90,11 @@ for arg in "$@"; do
     esac
 done
 
-# Select default script based on OS variant
+# Select default script based on OS variant and ESP32 flag
 if [ -z "$SCRIPT" ]; then
-    if [ "$LEGACY" = true ]; then
+    if [ "$LEGACY" = true ] && [ "$ESP32" = true ]; then
+        SCRIPT="meadow-dual"
+    elif [ "$LEGACY" = true ]; then
         SCRIPT="meadow-legacy-headless"
     else
         SCRIPT="meadow-os"
@@ -119,10 +140,55 @@ else
     fi
 fi
 
+# ESP32 dual-machine prerequisites
+if [ "$ESP32" = true ]; then
+    # ESP32 firmware — look in sibling repos (Meadow-ESP32 for legacy, Meadow.OS for new)
+    ESP32_FW=""
+    for candidate in \
+        "${ESP32_FW_PATH:-}" \
+        "$SCRIPT_DIR/../Meadow-ESP32/build/MeadowComms.elf" \
+        "$SCRIPT_DIR/../Meadow.OS/esp32/build/MeadowComms.elf" \
+    ; do
+        if [ -f "$candidate" ]; then
+            ESP32_FW="$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
+            break
+        fi
+    done
+
+    if [ -z "$ESP32_FW" ]; then
+        echo "ERROR: ESP32 firmware (MeadowComms.elf) not found."
+        echo "       Expected in sibling Meadow-ESP32/build/ or set ESP32_FW_PATH"
+        echo "       Build it:  cd ../Meadow-ESP32 && ./build.sh"
+        exit 1
+    fi
+    echo "ESP32 firmware: $ESP32_FW"
+    export ESP32_FW
+
+    # ESP32 ROM
+    if [ ! -f "$SCRIPT_DIR/roms/esp32-v3-rom.bin" ]; then
+        echo "ERROR: ESP32 ROM not found at roms/esp32-v3-rom.bin"
+        echo "       See roms/README.md for download instructions"
+        exit 1
+    fi
+fi
+
 echo "=== Starting Renode with $SCRIPT ==="
 echo "Monitor: telnet localhost $MONITOR_PORT"
 echo "HCOM:    socket://localhost:4242"
+if [ "$ESP32" = true ]; then
+    echo "ESP32:   dual-machine mode (real coprocessor)"
+    echo "         meadow config route socket://localhost:4242"
+else
+    echo "ESP32:   stubbed (EspcpStub)"
+fi
 echo "Press Ctrl+C to stop."
 echo ""
 cd "$SCRIPT_DIR"
-$RENODE_CMD --disable-xwt --port "$MONITOR_PORT" --execute "include @$SCRIPT"
+
+# For dual-machine mode, pass the ESP32 firmware path as a Renode variable
+if [ "$ESP32" = true ]; then
+    $RENODE_CMD --disable-xwt --port "$MONITOR_PORT" \
+        --execute "set esp32_fw @$ESP32_FW; include @$SCRIPT"
+else
+    $RENODE_CMD --disable-xwt --port "$MONITOR_PORT" --execute "include @$SCRIPT"
+fi
