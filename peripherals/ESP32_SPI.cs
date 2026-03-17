@@ -336,9 +336,30 @@ namespace Antmicro.Renode.Peripherals.SPI
                     var func = (uint)(txData[11] | (txData[12] << 8) | (txData[13] << 16) | (txData[14] << 24));
                     var msgId = (uint)(txData[19] | (txData[20] << 8) | (txData[21] << 16) | (txData[22] << 24));
                     var payloadLen = (uint)(txData[23] | (txData[24] << 8) | (txData[25] << 16) | (txData[26] << 24));
+                    // Build hex + ASCII dump of first 70 bytes of payload (after 27-byte header)
+                    var payloadStart = 27;
+                    var dumpLen = Math.Min((int)payloadLen, Math.Min(70, txData.Length - payloadStart));
+                    var hexDump = "";
+                    var asciiDump = "";
+                    if(dumpLen > 0 && payloadLen > 0 && payloadLen < 4096)
+                    {
+                        for(int j = 0; j < dumpLen; j++)
+                        {
+                            var b = txData[payloadStart + j];
+                            hexDump += string.Format("{0:X2} ", b);
+                            asciiDump += (b >= 0x20 && b < 0x7F) ? (char)b : '.';
+                        }
+                    }
                     this.Log(LogLevel.Warning,
                         "SPI: ESP32→STM32 ({0}B) proto=0x{1:X2} type=0x{2:X2} iface={3} func={4} msgId=0x{5:X8} payloadLen={6}",
                         txData.Length, proto, msgType, iface, func, msgId, payloadLen);
+                    if(dumpLen > 0)
+                    {
+                        this.Log(LogLevel.Warning,
+                            "SPI:   payload[0..{0}]: {1}", dumpLen - 1, hexDump.Trim());
+                        this.Log(LogLevel.Warning,
+                            "SPI:   ASCII: \"{0}\"", asciiDump);
+                    }
                 }
                 else
                 {

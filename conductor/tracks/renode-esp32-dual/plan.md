@@ -486,8 +486,13 @@ machines run stably with no crashes. The basic SPI bridge connection is WORKING.
 
 ### 4.1 — ESPCP Protocol Validation
 - [x] Basic frame flow: STM32 sends polls → ESP32 receives → firmware responds ✅
-- [ ] Verify firmware actually parses the ESPCP header (decode type/iface/func)
-- [ ] System config exchange: GetConfiguration → SystemRequestHandler → response
+- [x] Firmware parses ESPCP headers and generates correct responses ✅
+  - Transport Response (type=0x20): echoes msgId, iface=5, func=1, empty 70-byte payload (ACK)
+  - System Event (type=0x04, iface=4): firmware-initiated, 70-byte payload containing
+    device info: "MeadowF7" (hardware platform) + "emulator" (device name/processor)
+  - Cycle repeats every ~4s, consistent and crash-free
+- [ ] System config exchange: GetConfiguration → SystemRequestHandler → response with
+  full device details (serial number, OS version, etc.)
 - [ ] Compare response content with EspcpStub approach to verify protocol fidelity
 - [ ] Multi-packet messages work (PayloadLength > MAXIMUM_PACKET_SIZE)
 
