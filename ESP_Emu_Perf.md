@@ -77,29 +77,53 @@ Only `_ets_printf_hook` remains as IronPython (low frequency, complex string for
 
 Verified: dual-machine boots, 3305 SPI frames in 2 minutes, zero exceptions.
 
-### Phase 4: Investigate remaining Xtensa tlib bottlenecks — IN PROGRESS
-**Effort:** Unknown | **Target:** 0.28x → 1.0x real-time
+### Phase 4: Optimize remaining overhead — IN PROGRESS
+**Effort:** Ongoing | **Result so far:** 0.28x → 0.45x | **Target:** 1.0x
 
-Phases 1-3 achieved a **280x speedup** (0.001x → 0.28x). The remaining gap to
-1:1 is now the Xtensa tlib instruction translation itself — the STM32 (ARM)
-side runs at ~1:1, so the ESP32 CPU emulation is the sole bottleneck.
+#### Phase 4a: C# SPI bypass + logging reduction + tuning — COMPLETE ✅
 
-Measured after Phases 1-3 (60s wall-time test):
-- Virtual time: 12.3s in 44s host time = **0.28x real-time**
-- Cumulative load: 3.6x (host needs 3.6s per 1s virtual)
-- SPI frames flowing, zero exceptions, native CCOMPARE0 tick working
+- [x] Migrated `espcp_spi_bypass_dual` from IronPython to C# (`EspcpSpiBypass.cs`)
+  - Was firing 15K+/30s with 3x `GetRegisterUnsafe` warnings each = 45K+ log lines
+- [x] SpiBridge TX frame logging downgraded from Warning to Debug (52K lines/min eliminated)
+- [x] ESP32 MIPS raised from 10 to 100 (throttle was for old IronPython hooks)
+- [x] Quantum increased to 10ms (from 100μs default)
+- [x] MaximumBlockSize increased to 10000, TB chaining enabled
 
-Likely areas:
-- Xtensa window overflow/underflow exception handling (CALL8/ENTRY/RETW)
-- TCG code generation patterns for Xtensa-specific ops
-- Register window rotation overhead in tlib
-- Potential excessive TB invalidation or retranslation
+**Measured: 0.42x (was 0.28x) with installed Renode, 0.45x after tuning**
 
-- [ ] Profile with hooks removed — measure instructions/sec for ESP32 vs STM32
-- [ ] Check if window overflow/underflow handling has excessive overhead
-- [ ] Compare with stock Renode Xtensa performance on simple benchmarks
-- [ ] Investigate tlib translation cache hit rate and TB chaining
-- [ ] Check if ESP32 C# hooks (8 total) contribute measurable overhead at 0.28x
+#### Phase 4b: Profiling & WAITI halt — IN PROGRESS
+
+**Key findings from profiling:**
+
+1. **STM32 alone runs at ~37x real-time** (12min 57s virtual in 21s host).
+   Adding the ESP32 drags it down to 0.45x — the ESP32 is the sole bottleneck.
+
+2. **ESP32 spends ~90% of time in idle hook** (`esp_vApplicationIdleHook` at
+   0x400d5eb0). The firmware has no real work to do in steady state — it's
+   burning CPU cycling through idle callbacks and calling `esp_pm_impl_waiti`.
+
+3. **Xtensa WAITI instruction was a no-op** in Renode's tlib. The comment said
+   "Don't halt — without timer interrupts, EXCP_HLT pauses the machine forever."
+   But we fixed timer interrupts in Phase 2 (CCOMPARE0 works).
+
+4. **WAITI halt fix applied** to Renode fork (`exc_helper.c`): WAITI now sets
+   `env->wfi = 1` and calls `cpu_loop_exit()` like ARM WFI. However, testing
+   shows no improvement because:
+   - The fork's .NET 8 build is slower than the installed Mono Renode (~3.2x load vs ~2.2x)
+   - The CPU wakes immediately on the next CCOMPARE0 tick (every 10ms virtual)
+   - The idle hook callback loop runs between WAITI calls, consuming cycles
+
+5. **Host throughput is ~48 MIPS combined** (installed Renode). The 100 MIPS
+   budget for each CPU means the emulator can't keep up — load is 2.2x.
+   Raising MIPS to 240 makes it worse (4.85x load).
+
+**Remaining investigation:**
+
+- [ ] Test WAITI fix with installed Renode (requires building Mono-compatible fork)
+- [ ] Profile Xtensa window overflow/underflow frequency in steady-state workload
+- [ ] Consider hooking idle task to skip callback loop entirely (just WAITI)
+- [ ] Investigate if ESP32 can be paused when idle (CPU halt between timer ticks)
+- [ ] Compare fork .NET 8 vs Mono runtime performance for tlib workloads
 
 ## Results
 
@@ -114,17 +138,19 @@ Likely areas:
 
 ### Performance (measured)
 
-| Metric | Before | After Phases 1-3 | Target |
-|--------|--------|-----------------|--------|
-| Real-time ratio | 0.001x | **0.28x** | 1.0x |
-| Speedup | — | **280x** | 1000x |
-| Host load (s host / s virtual) | ~1000x | 3.6x | 1.0x |
-| IronPython hooks on hot paths | ~36 | 1 (ets_printf, low freq) | — |
-| Native FreeRTOS tick | Broken (hack) | Working (CCOMPARE0) | — |
-| SPI frames in 2 min | ~0 (timeout) | 3305 | — |
-| Exceptions | Frequent | Zero | — |
+| Metric | Before | After Ph 1-3 | After Ph 4a | Target |
+|--------|--------|-------------|-------------|--------|
+| Real-time ratio | 0.001x | 0.28x | **0.45x** | 1.0x |
+| Speedup (cumulative) | — | 280x | **450x** | 1000x |
+| Host load (s host / s virtual) | ~1000x | 3.6x | **2.2x** | 1.0x |
+| IronPython hooks on hot paths | ~36 | 1 | 0 | — |
+| Log lines per minute | >100K | ~53K | **~170** | — |
+| Native FreeRTOS tick | Broken | Working | Working | — |
+| SPI frames in 2 min | ~0 | 3305 | ~105K | — |
+| Exceptions | Frequent | Zero | Zero | — |
 
-Remaining bottleneck: Xtensa tlib instruction translation (Phase 4).
+Remaining bottleneck: ESP32 idle task burning host CPU (90% of ESP32 time in
+`esp_vApplicationIdleHook`). STM32 alone runs at 37x real-time.
 
 ## Files
 
@@ -134,5 +160,7 @@ Remaining bottleneck: Xtensa tlib instruction translation (Phase 4).
 | `peripherals/XtensaHotPathHooks.cs` | All 8 compiled C# hooks for ESP32 |
 | `peripherals/ESP32_TimerGroup.cs` | Timer Group stub (RTC calibration only) |
 | `peripherals/ESP32_DPORT.cs` | Interrupt matrix (functional) |
+| `peripherals/EspcpSpiBypass.cs` | Compiled C# SPI bypass (was IronPython, 15K calls/30s) |
 | `peripherals/QspiDmaBypass.cs` | Reference: C# hook pattern (STM32) |
 | `peripherals/MqReceiveIntercept.cs` | Reference: C# hook pattern (STM32) |
+| `renode/.../exc_helper.c` | WAITI halt fix (Renode fork, pending validation) |
