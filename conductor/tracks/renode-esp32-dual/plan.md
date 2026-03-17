@@ -392,20 +392,47 @@ machines together and tracing the interaction to find the minimal bridge point.
 
   **Investigation and resolution (2026-03-16) — see Decision Log for full details:**
 
-  tlib fixes (committed to `bryancostanich/renode` branch `meadow-emulator-fixes`, `ca374e31`):
-  - translate_rfw: `tcg_const_i32` → `tcg_temp_local_new_i32` (same pattern as retw fix)
-  - window_check: n>w early exit via `cpu_loop_exit` (was: clamp + spurious overflow)
-  - test_ill_retw: a0 fixup when n=0 but WINDOWSTART shows caller at distance m
-  - Diagnostic logging: PC=0 detection, window rotation tracing at high WB
+  tlib fixes (committed to `bryancostanich/renode` branch `meadow-emulator-fixes`):
+  - `ca374e31`: translate_rfw local temp, window_check n>w early exit, test_ill_retw
+    a0 fixup, diagnostic logging
+  - **`d6f6bcfc`: rfwo no-phys-sync fix (ROOT CAUSE FIX)**. During rfwo, skip
+    `sync_phys_from_window` so overflow handler scratch register modifications don't
+    propagate to phys_regs. On real hardware, the overflow handler's a0 scratch value
+    overwrites the physical register, but the underflow handler restores from memory
+    before anyone reads it. In tlib, the sync step was artificially committing the
+    scratch value to phys_regs, corrupting the caller's return address at the same
+    physical position. New helper `restore_owb_no_phys_sync` used by rfwo; rfwu keeps
+    the full sync (underflow loads from memory need to be committed).
 
   Boot script fixes (both `esp32-meadow-boot-no-retw-hooks.resc` and `meadow-dual.resc`):
-  - Thread::Task null method guard at `callx8 a3` (0x400e154c) — race condition where
-    priority-24 SPI task preempts constructor before method pointer is set
-  - vListInsertEnd guard at entry (0x400941bb) — validates pxIndex and pxNext, resets
-    corrupt pointers from window overflow register spills
+  - Thread::Task null method guard at `callx8 a3` (0x400e154c)
+  - vListInsertEnd guard at entry (0x400941bb)
+  - SPI ISR patches (freeze_cs NOP, restore_cs branch NOP) added to meadow-dual.resc
+  - Task creation-time logging at xTaskCreatePinnedToCore
 
   **Both single-machine and dual-machine boot stably for 90+ seconds with zero crashes.**
 
+  **ESPCP frame flow status (2026-03-16):**
+  - STM32 → SpiBridge: ESPCP polling frames flow (type=0x20, iface=5, func=1) ✅
+  - SpiBridge → ESP32_SPI: frame-available callback wired ✅
+  - ESP32 SPI task starts, ProcessMessages loop enters ✅
+  - SPI ISR fires, calls spi_slave_hal_prepare_data ✅
+  - **Blocker: spi_slave_hal_prepare_data (0x4009f028) enters but never returns.**
+    Entry succeeds (a2=0x3ffd23a0, valid HAL context), but the function gets stuck
+    internally — retw.n at 0x4009f213 is never reached. Likely polling an SPI register
+    (via `memw` + `l32i`) that ESP32_SPI returns an unexpected value for. The ISR never
+    reaches `spi_slave_hal_user_start`, so `cmd.usr` is never set, and ESP32_SPI never
+    injects frames from SpiBridge.
+
+- [ ] **Fix spi_slave_hal_prepare_data parameter corruption** — the ISR passes the correct
+  HAL context (a10=driver+32) via call8, but after entry with callinc=2, the callee sees
+  a2=driver (NOT driver+32). Root cause: gen_exit_tb writes stale pre-rotation TCG global
+  values over post-rotation values set by sync_windowbase. Fixed CALLINC deposit
+  (tcg_const_i32 → local temp, `9c77ec0b`), but the stale-global issue remains. Options:
+  (a) Move window rotation into HELPER(entry) so it happens in the same helper call as
+      the register setup, before TCG globals are written back
+  (b) Add TCG global invalidation after gen_helper_sync_windowbase
+  (c) Use cpu_loop_exit in sync_windowbase to prevent gen_exit_tb from running
 - [ ] Test: ESPCP boot handshake (STM32 ↔ real ESP32 firmware)
 - [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns
 - [ ] Verify frame integrity (CRC checks pass on both sides)
