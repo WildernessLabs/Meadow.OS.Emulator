@@ -98,9 +98,103 @@ sysbus LoadBinary @roms/esp32-v3-rom.bin 0x40000000
 # Load the Meadow ESP32 firmware ELF
 sysbus LoadELF @/Users/bryancostanich/Git_Repos/Wilderness_Labs/Meadow.OS/esp32/build/MeadowComms.elf
 
-# Window register init trampoline
-sysbus LoadELF @tests/trampoline/trampoline.elf
-cpu PC 0x4009F00C
+# Window register init trampoline — relocated to 0x400A0300 (past IRAM text end).
+# Original was at 0x4009F000 which OVERWRITES spi_slave_hal_user_start (0x4009F000)
+# and spi_slave_hal_prepare_data (0x4009F028)!
+# Literal pool at 0x400A0300-0x400A030B:
+#   +0x00: entry point address (0x40081BBC = call_start_cpu0)
+#   +0x04: initial SP (0x3FFE5F00)
+#   +0x08: initial PS (0x00040000 = WOE|CALLINC=0)
+# Code at 0x400A030C:
+#   movi a0, 0; wsr.windowbase a0; rsync
+#   movi a0, 1; wsr.windowstart a0; rsync
+#   l32r a0, [PS]; wsr.ps a0; rsync
+#   l32r a1, [SP]; l32r a8, [entry]; movi a0, 0; callx8 a8
+# Entry point
+sysbus WriteDoubleWord 0x400A0300 0x40081BBC
+# SP
+sysbus WriteDoubleWord 0x400A0304 0x3FFE5F00
+# PS = WOE | CALLINC(0) = 0x00040000
+sysbus WriteDoubleWord 0x400A0308 0x00040000
+# Code: movi a0, 0 (0C 00)
+sysbus WriteByte 0x400A030C 0x0C
+sysbus WriteByte 0x400A030D 0x00
+# wsr.windowbase a0 (00 48 13)
+sysbus WriteByte 0x400A030E 0x00
+sysbus WriteByte 0x400A030F 0x48
+sysbus WriteByte 0x400A0310 0x13
+# rsync (00 20 00)
+sysbus WriteByte 0x400A0311 0x00
+sysbus WriteByte 0x400A0312 0x20
+sysbus WriteByte 0x400A0313 0x10
+# movi a0, 1 (0C 10)
+sysbus WriteByte 0x400A0314 0x0C
+sysbus WriteByte 0x400A0315 0x10
+# wsr.windowstart a0 (00 49 13)
+sysbus WriteByte 0x400A0316 0x00
+sysbus WriteByte 0x400A0317 0x49
+sysbus WriteByte 0x400A0318 0x13
+# rsync (00 20 00)
+sysbus WriteByte 0x400A0319 0x00
+sysbus WriteByte 0x400A031A 0x20
+sysbus WriteByte 0x400A031B 0x10
+# l32r a0, [0x400A0308] = PS literal
+# l32r offset = (0x400A0308 - (0x400A031C & ~3)) / (-4) + 1 ... complex
+# Actually let me just use the original trampoline bytes with adjusted l32r offsets
+# Simpler: use movi for PS since it fits in 12-bit immediate
+# movi a0, 0 — then wsr.ps a0 — but PS needs WOE bit (0x40000)
+# PS=0x00040000 doesn't fit movi. Use l32r.
+# l32r a0, literal: byte0 = (reg << 4) | 0x01, offset encodes the literal distance
+# For l32r at 0x400A031C targeting 0x400A0308:
+#   offset = (0x400A0308 - ((0x400A031C + 3) & ~3)) >> 2 ... actually l32r uses:
+#   addr = ((PC+3) & ~3) + (sign_extend(imm16) << 2)
+#   imm16 = (addr - ((PC+3) & ~3)) >> 2
+# PC = 0x400A031C, (PC+3)&~3 = 0x400A031C (already aligned)
+# imm16 = (0x400A0308 - 0x400A031C) >> 2 = (-0x14) >> 2 = -5 = 0xFFFB (16-bit signed)
+# l32r a0: byte0 = (0 << 4) | 1 = 0x01, byte1 = 0xFB, byte2 = 0xFF
+sysbus WriteByte 0x400A031C 0x01
+sysbus WriteByte 0x400A031D 0xFB
+sysbus WriteByte 0x400A031E 0xFF
+# wsr.ps a0 (00 E6 13)
+sysbus WriteByte 0x400A031F 0x00
+sysbus WriteByte 0x400A0320 0xE6
+sysbus WriteByte 0x400A0321 0x13
+# rsync
+sysbus WriteByte 0x400A0322 0x00
+sysbus WriteByte 0x400A0323 0x20
+sysbus WriteByte 0x400A0324 0x10
+# l32r a1, [0x400A0304] = SP literal
+# PC = 0x400A0325, (PC+3)&~3 = 0x400A0328
+# imm16 = (0x400A0304 - 0x400A0328) >> 2 = (-0x24) >> 2 = -9 = 0xFFF7
+# l32r a1: byte0 = (1 << 4) | 1 = 0x11, byte1 = 0xF7, byte2 = 0xFF
+sysbus WriteByte 0x400A0325 0x11
+sysbus WriteByte 0x400A0326 0xF7
+sysbus WriteByte 0x400A0327 0xFF
+# l32r a8, [0x400A0300] = entry point literal
+# PC = 0x400A0328, (PC+3)&~3 = 0x400A032C
+# imm16 = (0x400A0300 - 0x400A032C) >> 2 = (-0x2C) >> 2 = -11 = 0xFFF5
+# l32r a8: byte0 = (8 << 4) | 1 = 0x81, byte1 = 0xF5, byte2 = 0xFF
+sysbus WriteByte 0x400A0328 0x81
+sysbus WriteByte 0x400A0329 0xF5
+sysbus WriteByte 0x400A032A 0xFF
+# movi a0, 0 (0C 00)
+sysbus WriteByte 0x400A032B 0x0C
+sysbus WriteByte 0x400A032C 0x00
+# callx8 a8 (E0 08 00)
+sysbus WriteByte 0x400A032D 0xE0
+sysbus WriteByte 0x400A032E 0x08
+sysbus WriteByte 0x400A032F 0x00
+# DISABLED — using register API instead (see below)
+# cpu PC 0x400A030C
+
+# ACTUALLY: skip the whole trampoline. Just init registers directly.
+# The trampoline code at 0x400A0300 sets WINDOWBASE/WINDOWSTART/PS/SP then
+# callx8 to the firmware entry. We can do this with Renode register API:
+cpu SetRegister "WINDOWBASE" 0
+cpu SetRegister "WINDOWSTART" 1
+cpu SetRegister "PS" 0x00040000
+cpu SetRegister "A1" 0x3FFE5F00
+cpu PC 0x40081BBC
 
 # Set VECBASE to the firmware's exception vectors in IRAM
 cpu SetRegister "VECBASE" 0x40080000
