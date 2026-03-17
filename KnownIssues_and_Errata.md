@@ -318,7 +318,23 @@ Last updated: 2026-03-17
 - **Workaround:** Hook at `meadow_hw_version_find_device_ver` writes initialized=1
   and version=3 (CCMv2) to the version struct. Legacy address: 0x08140d64.
 
-### 5.2 Mono Runtime Not Flashed
+### 5.2 Firmware Version Numbers Zeroed Without Config YAML
+- **Severity:** Medium
+- **Status:** FIXED (via hook)
+- **Component:** `hcom_nx_config_init` → `hcom_nx_config_get_short_version_string`
+- **Description:** `hcom_nx_config_init` explicitly zeroes config+0x30..0x3C (firmware
+  version: major/minor/revision/build) then tries to load `/meadow0/meadow.config.yaml`.
+  In emulation, the YAML file doesn't exist, so version numbers stay zero.
+  `get_short_version_string` checks if all four dwords are zero and returns an empty
+  string, causing `OSVersion|` and `MonoVersion|` to be blank in `device info`.
+- **Impact:** Meadow.CLI `device info` shows empty OS and Runtime version fields.
+- **Workaround:** Hook at the instruction after the zero-fill (hcom_nx_config_init+0xBA)
+  writes version numbers (2.0.0.0) to config+0x30..0x3C. The existing `mono_ver_copy`
+  hook copies these to the Mono version fields (config+0x5C..0x68).
+- **Note:** CoprocessorVersion is still absent — requires version fields in the
+  EspcpStub's SystemGetConfiguration response (future work).
+
+### 5.3 Mono Runtime Not Flashed
 - **Severity:** Low
 - **Status:** EXPECTED
 - **Component:** Mono/.NET runtime
@@ -327,7 +343,7 @@ Last updated: 2026-03-17
   unavailable.
 - **Impact:** Expected and acceptable for OS-level emulation.
 
-### 5.3 Hook Addresses Are Binary-Specific
+### 5.4 Hook Addresses Are Binary-Specific
 - **Severity:** Medium
 - **Status:** KNOWN | Future automation
 - **Component:** All hooks (IronPython and C#)

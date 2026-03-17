@@ -11,6 +11,14 @@
 # FIXED IN RENODE: SVC with PRIMASK=1 now handled correctly in NVIC.cs.
 # The SvcPrimaskFix.cs hook is no longer needed.
 
+# Workaround: Firmware version numbers at config+0x30..0x3C are zeroed by
+# hcom_nx_config_init (normally populated from /meadow0/meadow.config.yaml
+# which doesn't exist in emulation). Write version numbers so OSVersion and
+# RuntimeVersion appear in `device info`. R4 = config pointer at this hook.
+# Format: major.minor.revision.build → "2.0.0.0"
+set fw_ver_fix "r4 = cpu.GetRegisterUnsafe(4).RawValue; machine.SystemBus.WriteDoubleWord(r4 + 0x30, 2); machine.SystemBus.WriteDoubleWord(r4 + 0x34, 0); machine.SystemBus.WriteDoubleWord(r4 + 0x38, 0); machine.SystemBus.WriteDoubleWord(r4 + 0x3C, 0)"
+cpu AddHook $hook_FW_VER_FIX_ADDR $fw_ver_fix
+
 # Workaround: Force GPIO board version to F7FeatherV2 (2).
 # Hook meadow_hw_version_find_device_ver at entry.
 # Write initialized=1 and version=2 to hw_version struct.
