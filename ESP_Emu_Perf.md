@@ -77,16 +77,29 @@ Only `_ets_printf_hook` remains as IronPython (low frequency, complex string for
 
 Verified: dual-machine boots, 3305 SPI frames in 2 minutes, zero exceptions.
 
-### Phase 4: Investigate remaining Xtensa tlib bottlenecks (optional)
-**Effort:** Unknown | **Expected speedup:** Unknown
+### Phase 4: Investigate remaining Xtensa tlib bottlenecks — IN PROGRESS
+**Effort:** Unknown | **Target:** 0.28x → 1.0x real-time
 
-After hook overhead is eliminated, profile whether tlib's Xtensa translation
-itself is a bottleneck (window register ops, TCG code generation patterns).
-This would require Renode-level profiling and is lower priority.
+Phases 1-3 achieved a **280x speedup** (0.001x → 0.28x). The remaining gap to
+1:1 is now the Xtensa tlib instruction translation itself — the STM32 (ARM)
+side runs at ~1:1, so the ESP32 CPU emulation is the sole bottleneck.
+
+Measured after Phases 1-3 (60s wall-time test):
+- Virtual time: 12.3s in 44s host time = **0.28x real-time**
+- Cumulative load: 3.6x (host needs 3.6s per 1s virtual)
+- SPI frames flowing, zero exceptions, native CCOMPARE0 tick working
+
+Likely areas:
+- Xtensa window overflow/underflow exception handling (CALL8/ENTRY/RETW)
+- TCG code generation patterns for Xtensa-specific ops
+- Register window rotation overhead in tlib
+- Potential excessive TB invalidation or retranslation
 
 - [ ] Profile with hooks removed — measure instructions/sec for ESP32 vs STM32
 - [ ] Check if window overflow/underflow handling has excessive overhead
 - [ ] Compare with stock Renode Xtensa performance on simple benchmarks
+- [ ] Investigate tlib translation cache hit rate and TB chaining
+- [ ] Check if ESP32 C# hooks (8 total) contribute measurable overhead at 0.28x
 
 ## Results
 
@@ -99,14 +112,19 @@ This would require Renode-level profiling and is lower priority.
 | After Phase 2 | ~10 | 0 | ~10 |
 | After Phase 3 | 3 (ets_printf + 2 exception traces) | 8 | 11 |
 
-### Performance (estimated)
+### Performance (measured)
 
-| Metric | Before | After All Phases |
-|--------|--------|-----------------|
-| IronPython hooks on hot paths | ~36 | 1 (ets_printf, low freq) |
-| Native FreeRTOS tick | Broken (hack) | Working (CCOMPARE0) |
-| SPI frames in 2 min | ~0 (timeout) | 3305 |
-| Exceptions | Frequent | Zero |
+| Metric | Before | After Phases 1-3 | Target |
+|--------|--------|-----------------|--------|
+| Real-time ratio | 0.001x | **0.28x** | 1.0x |
+| Speedup | — | **280x** | 1000x |
+| Host load (s host / s virtual) | ~1000x | 3.6x | 1.0x |
+| IronPython hooks on hot paths | ~36 | 1 (ets_printf, low freq) | — |
+| Native FreeRTOS tick | Broken (hack) | Working (CCOMPARE0) | — |
+| SPI frames in 2 min | ~0 (timeout) | 3305 | — |
+| Exceptions | Frequent | Zero | — |
+
+Remaining bottleneck: Xtensa tlib instruction translation (Phase 4).
 
 ## Files
 
