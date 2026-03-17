@@ -658,6 +658,10 @@ cpu InstallXqrDiag 0x40091cb8
 cpu InstallLockValidate 0x40082c14
 cpu InstallSetRegZero 0x40157d12 99
 cpu InstallQueueRecvSchedCheck 0x40091cf8 0x40091d83
+# Halt CPU on WAITI instruction — ESP32 spends ~90% of host CPU in idle loop.
+# esp_pm_impl_waiti: entry at 0x401aef88, waiti at 0x401aef8b, retw at 0x401aef8e.
+# Halting on WAITI lets the CCOMPARE0 timer interrupt (100Hz) wake the CPU.
+cpu InstallIdleSkip 0x401aef8b 0x401aef8e
 # ets_printf stays as IronPython — low frequency, complex string formatting
 cpu AddHook 0x40007d57 "_ets_printf_hook()"
 

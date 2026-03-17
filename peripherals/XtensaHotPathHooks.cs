@@ -359,5 +359,32 @@ namespace Antmicro.Renode.Hooks
 
             LogInstall(cpu, "InstallSetRegZero", hookAddress);
         }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // IdleSkip — makes esp_vApplicationIdleHook return immediately
+        //
+        // The ESP32 idle task spends ~90% of host CPU time looping through
+        // idle hook callbacks (watchdog reset, etc.) that aren't needed in
+        // emulation. This hook skips the callback loop by returning immediately
+        // via RETW (Xtensa windowed return), saving the host from translating
+        // millions of idle instructions per second.
+        //
+        // The CCOMPARE0 timer still fires at 100Hz to drive FreeRTOS ticks,
+        // and the idle task loop naturally calls this function again.
+        // ─────────────────────────────────────────────────────────────────────
+        public static void InstallIdleSkip(this ICPUWithHooks cpu,
+            [AutoParameter] Machine machine, ulong hookAddress, ulong retwAddress)
+        {
+            // Hook at the WAITI instruction inside esp_pm_impl_waiti.
+            // When the idle task reaches WAITI, we halt the CPU entirely.
+            // The CCOMPARE0 timer interrupt will unhalt it every 10ms virtual.
+            // This prevents the ESP32 from burning host CPU in the idle loop.
+            cpu.AddHook(hookAddress, (ICpuSupportingGdb c, ulong pc) =>
+            {
+                cpu.IsHalted = true;
+            });
+
+            LogInstall(cpu, "InstallIdleSkip (halt on WAITI)", hookAddress);
+        }
     }
 }
