@@ -1,0 +1,27 @@
+## ESP32 Boot Spike — Phase 1 test script
+## Tests that the ESP32 platform definition loads and Xtensa CPU executes instructions.
+##
+## Usage:
+##   mono /Applications/Renode.app/Contents/MacOS/bin/Renode.exe scripts/esp32-boot-test.resc
+##
+## This script loads the Zephyr hello-world sample compiled for Xtensa sample_controller
+## to verify basic CPU execution. The ESP32 platform memory regions overlap with the
+## sample_controller layout, so the binary should execute.
+
+using sysbus
+
+# Create the ESP32 machine
+mach create "esp32"
+machine LoadPlatformDescription @platforms/meadow-esp32.repl
+
+# Show UART output
+showAnalyzer uart0
+showAnalyzer cpu.uartSemihosting
+
+# Load Zephyr hello-world for Xtensa (uses semihosting UART, so output goes to uartSemihosting)
+# This validates that the Xtensa CPU with esp32 cpuType can execute code.
+macro reset
+"""
+    sysbus LoadELF @https://dl.antmicro.com/projects/renode/xtensa-sample-controller-zephyr-hello-world.elf-s_293544-4be60f8a3891e70c30e1e8a471df4ad12ab08144
+"""
+runMacro $reset

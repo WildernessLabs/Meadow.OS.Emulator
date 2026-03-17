@@ -1,0 +1,26 @@
+// Meadow F7 Micro board — STM32F777ZIT6 + external peripherals
+// Dual-machine variant: uses SpiBridge instead of EspcpStub on SPI2.
+// SpiBridge forwards ESPCP frames to/from the real ESP32 machine.
+
+using "stm32f777.repl"
+
+// --- Board-Level External Peripherals ---
+
+// External SDRAM via FMC — 32MB (matches CONFIG_HEAP2_SIZE)
+sdram: Memory.MappedMemory @ sysbus 0xC0000000
+    size: 0x2000000
+
+// QSPI flash — 64MB Winbond W25QXXXJV (external, on Meadow board)
+// Backing memory at 0x90000000 for memory-mapped read access.
+// W25Q connects to the on-chip QUADSPI controller.
+qspiFlashMem: Memory.MappedMemory @ sysbus 0x90000000
+    size: 0x4000000
+
+w25q: SPI.Winbond_W25QXXXJV @ quadspi
+    underlyingMemory: qspiFlashMem
+
+// SPI Bridge — replaces EspcpStub for dual-machine operation.
+// Captures ESPCP frames from NuttX SPI2 and queues them for the ESP32 machine.
+spiBridge: SPI.SpiBridge @ spi2
+    Ready -> gpioPortI@10
+    MessageWaiting -> gpioPortI@0

@@ -1,0 +1,223 @@
+// Meadow ESP32 platform definition — ESP32-D0WDQ6 (standard ESP32)
+// Memory map based on ESP32 Technical Reference Manual v5.3
+//
+// This is a minimal bring-up platform for the renode-esp32-dual track.
+// Only includes memory regions and peripherals needed for initial boot testing.
+
+// ============================================================================
+// Internal ROM — boot ROM containing first-stage bootloader and reset vector
+// Reset vector is at 0x40000400
+// ============================================================================
+rom: Memory.MappedMemory @ sysbus 0x40000000
+    size: 0x70000
+
+// Internal ROM 1 — used by ROM code
+rom1: Memory.MappedMemory @ sysbus 0x3FF90000
+    size: 0x10000
+
+// ============================================================================
+// Internal SRAM — instruction and data buses
+// ============================================================================
+
+// SRAM0 (IRAM) — 192KB instruction RAM (0x40070000 - 0x4009FFFF)
+// Apps typically use 0x40080000+, but map the full range
+iram: Memory.MappedMemory @ sysbus 0x40070000
+    size: 0x30000
+
+// SRAM1 — 128KB, accessible on data bus (0x3FFE0000) and instruction bus (0x400A0000)
+// Data bus mapping:
+sram1Data: Memory.MappedMemory @ sysbus 0x3FFE0000
+    size: 0x20000
+
+// Instruction bus mapping of SRAM1 (alias):
+sram1Inst: Memory.MappedMemory @ sysbus 0x400A0000
+    size: 0x20000
+
+// SRAM2 — 200KB data RAM (0x3FFAE000 - 0x3FFDFFFF)
+// This is the main DRAM region for ESP-IDF
+sram2: Memory.MappedMemory @ sysbus 0x3FFAE000
+    size: 0x32000
+
+// Extended DRAM lower — covers 0x3FDC0000 - 0x3FF8FFFF
+// On real hardware, this is SRAM accessible via data bus when cache is configured.
+// ESP-IDF uses this region for heap, task stacks, and FreeRTOS data structures.
+sram2extLow: Memory.MappedMemory @ sysbus 0x3FDC0000
+    size: 0x140000
+
+// Extended DRAM upper — covers 0x3FFA0000 - 0x3FFADFFF
+// Bridges the gap between rom1 (0x3FF90000-0x3FF9FFFF) and sram2 (0x3FFAE000)
+sram2extHigh: Memory.MappedMemory @ sysbus 0x3FFA0000
+    size: 0xE000
+
+// ============================================================================
+// RTC Memory
+// ============================================================================
+
+// RTC FAST memory + padding — covers 0x3FF80000 - 0x3FF8FFFF
+// Real RTC FAST is 8KB (0x3FF80000-0x3FF81FFF), but firmware accesses
+// up to 0x3FF8FFFF (heap metadata / stack spill). Extend to fill gap before rom1.
+rtcFastData: Memory.MappedMemory @ sysbus 0x3FF80000
+    size: 0x10000
+
+// RTC FAST memory — instruction bus alias
+rtcFastInst: Memory.MappedMemory @ sysbus 0x400C0000
+    size: 0x2000
+
+// RTC SLOW memory — 8KB
+rtcSlow: Memory.MappedMemory @ sysbus 0x50000000
+    size: 0x2000
+
+// ============================================================================
+// External Flash Cache — memory-mapped flash access via cache/MMU
+// ============================================================================
+
+// DROM (data read-only via flash cache) — 4MB
+// ESP-IDF maps const data and rodata here
+drom: Memory.MappedMemory @ sysbus 0x3F400000
+    size: 0x400000
+
+// IROM (instruction read-only via flash cache) — up to ~3.5MB
+// ESP-IDF maps .text (code) here
+irom: Memory.MappedMemory @ sysbus 0x400C2000
+    size: 0x33E000
+
+// ============================================================================
+// CPU
+// ============================================================================
+cpu: CPU.Xtensa @ sysbus
+    cpuType: "esp32"
+    frequency: 240000000
+
+// ============================================================================
+// UART — debug console output
+// ============================================================================
+
+// UART0 at 0x3FF40000 — primary debug/console UART (boot ROM uses this)
+uart0: UART.ESP32_UART @ sysbus 0x3FF40000
+
+// UART0 data bus mirror at 0x60000000
+// ESP32 maps peripheral registers at 0x3FF40000-0x3FF7FFFF on the AHB bus
+// and mirrors them at 0x60000000-0x6003FFFF on the data bus. ESP-IDF's
+// ets_write_char_uart uses this mirror for debug output.
+uart0Mirror: UART.ESP32_UART @ sysbus 0x60000000
+
+// ============================================================================
+// Peripheral register stubs — prevent bus errors during init
+// These are minimal MappedMemory regions covering peripheral register space.
+// They allow reads/writes without crashing but don't implement behavior.
+// ============================================================================
+
+// DPORT registers (system/clock/reset control + interrupt matrix)
+// Custom peripheral: cache flush done bits + peripheral→CPU interrupt routing.
+// GPIO inputs [0-68] = peripheral interrupt sources
+// GPIO outputs [0-31] = CPU interrupt lines
+// DPORT registers (system/clock/reset control + interrupt matrix)
+// Interrupt matrix routes peripheral sources to CPU interrupt lines via
+// direct OnGPIO calls (not GPIO wiring) to properly OR with hardwired
+// sources like the CCOMPARE0 timer on interrupt 6.
+dport: Miscellaneous.ESP32_DPORT @ sysbus 0x3FF00000
+
+// GPIO registers
+gpio: Memory.MappedMemory @ sysbus 0x3FF44000
+    size: 0x1000
+
+// IO_MUX registers (pin multiplexing)
+ioMux: Memory.MappedMemory @ sysbus 0x3FF49000
+    size: 0x1000
+
+// RTC_CNTL registers (RTC control, power management, brown-out)
+// Custom peripheral: auto-sets TIME_VALID bit when TIME_UPDATE is polled
+rtcCntl: Miscellaneous.ESP32_RTC_CNTL @ sysbus 0x3FF48000
+
+// Timer Group 0
+// Custom peripheral: auto-sets RTC_CALI_RDY bit for clock calibration
+timerGroup0: Timers.ESP32_TimerGroup @ sysbus 0x3FF5F000
+
+// Timer Group 1
+timerGroup1: Timers.ESP32_TimerGroup @ sysbus 0x3FF60000
+
+// SPI0 controller (flash interface)
+spi0: Memory.MappedMemory @ sysbus 0x3FF43000
+    size: 0x1000
+
+// SPI1 controller
+spi1: Memory.MappedMemory @ sysbus 0x3FF42000
+    size: 0x1000
+
+// SPI2 (HSPI)
+spi2: Memory.MappedMemory @ sysbus 0x3FF64000
+    size: 0x1000
+
+// SPI3 (VSPI) — Meadow ESPCP SPI peripheral
+// Custom C# peripheral: handles register interface for ESP-IDF spi_slave driver,
+// DMA descriptor chain reads/writes, and cross-machine SpiBridge connection.
+// IRQ routed through DPORT interrupt matrix (source 31 → CPU interrupt via mapping).
+spi3: SPI.ESP32_SPI @ sysbus 0x3FF65000
+    IRQ -> dport@31
+
+// I2C0
+i2c0: Memory.MappedMemory @ sysbus 0x3FF53000
+    size: 0x1000
+
+// I2C1
+i2c1: Memory.MappedMemory @ sysbus 0x3FF67000
+    size: 0x1000
+
+// UART1
+uart1Regs: Memory.MappedMemory @ sysbus 0x3FF50000
+    size: 0x1000
+
+// UART2
+uart2Regs: Memory.MappedMemory @ sysbus 0x3FF6E000
+    size: 0x1000
+
+// EFUSE registers — read MAC address, chip info
+efuse: Memory.MappedMemory @ sysbus 0x3FF5A000
+    size: 0x1000
+
+// LEDC (PWM)
+ledc: Memory.MappedMemory @ sysbus 0x3FF59000
+    size: 0x1000
+
+// RMT
+rmt: Memory.MappedMemory @ sysbus 0x3FF56000
+    size: 0x1000
+
+// PCNT
+pcnt: Memory.MappedMemory @ sysbus 0x3FF57000
+    size: 0x1000
+
+// MCPWM0
+mcpwm0: Memory.MappedMemory @ sysbus 0x3FF6C000
+    size: 0x1000
+
+// MCPWM1
+mcpwm1: Memory.MappedMemory @ sysbus 0x3FF6D000
+    size: 0x1000
+
+// I2S0
+i2s0: Memory.MappedMemory @ sysbus 0x3FF4F000
+    size: 0x1000
+
+// I2S1
+i2s1: Memory.MappedMemory @ sysbus 0x3FF68000
+    size: 0x1000
+
+// WiFi registers (base)
+wifiRegs: Memory.MappedMemory @ sysbus 0x3FF73000
+    size: 0x1000
+
+// Bluetooth registers
+btRegs: Memory.MappedMemory @ sysbus 0x3FF6B000
+    size: 0x1000
+
+// APLL / SDIO registers (RTC I2C bus for PLL configuration)
+apllRegs: Memory.MappedMemory @ sysbus 0x3FF66000
+    size: 0x1000
+
+// WiFi BB (baseband) registers
+wifiBB: Memory.MappedMemory @ sysbus 0x3FF71000
+    size: 0x1000
+
+// Semihosting UART — fallback for debug output if ESP32_UART doesn't work
+uartSemihosting: UART.SemihostingUart @ cpu

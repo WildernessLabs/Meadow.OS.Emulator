@@ -8,7 +8,7 @@
 | renode-legacy-os  | Emulator Support for Production Meadow OS (Legacy NuttX) | `complete` (build, boot, HCOM, Meadow.CLI all verified) |
 | renode-esp32      | ESP32 Coprocessor Emulation (SPI Stub)    | `complete` (EspcpStub.cs — boot + post-boot polling, all ESPCP interfaces stubbed) |
 | renode-mono       | Mono Runtime Bring-Up in Emulator         | `in-progress` (Phase 2.2: Mono task starts, crashes in assembly path setup) |
-| renode-esp32-dual | Dual-Machine ESP32 Emulation (Full Fidelity) | `planned` (real ESP32 firmware on Xtensa + SPI bridge) |
+| renode-esp32-dual | Dual-Machine ESP32 Emulation (Full Fidelity) | `in-progress` (Phase 1 ✅, Phase 2 in-progress — SpiBridge + SPI ctor skip) |
 | renode-network    | Network Stack End-to-End Testing          | `planned` (bridge ESPCP socket ops to host; blocked on `renode-mono`) |
 | renode-ci         | CI Integration for Emulated Testing       | `planned` |
 | ux-improvements   | UX Improvements (setup.sh, README)        | `complete` (setup.sh checks/installs all prereqs, README updated with Quick Start) |

@@ -1,0 +1,951 @@
+## Meadow Dual-Machine — STM32 F7 + ESP32, connected via SpiBridge
+##
+## This script boots both the NuttX legacy OS on the STM32 and the
+## Meadow ESP-IDF firmware on the ESP32, with SpiBridge replacing
+## EspcpStub on SPI2 for cross-machine ESPCP communication.
+##
+## Usage:
+##   ./run.sh meadow-dual
+##   OR:
+##   dotnet path/to/Renode.dll --console --disable-xwt \
+##     -e 'include @scripts/meadow-dual.resc'
+
+# =============================================================================
+# Compile shared C# peripherals (must be before any machine creation)
+# =============================================================================
+include @peripherals/Winbond_W25QXXXJV.cs
+include @peripherals/SpiBridge.cs
+include @peripherals/QspiDmaBypass.cs
+include @peripherals/SvcPrimaskFix.cs
+include @peripherals/MqReceiveIntercept.cs
+include @peripherals/ESP32_RTC_CNTL.cs
+include @peripherals/ESP32_TimerGroup.cs
+include @peripherals/ESP32_DPORT.cs
+include @peripherals/ESP32_SPI.cs
+
+# =============================================================================
+# Machine 1: STM32 F7 — NuttX Meadow Legacy OS
+# =============================================================================
+mach create "stm32"
+machine LoadPlatformDescription @platforms/meadow-f7-dual.repl
+
+# STM32 needs enough virtual time to boot NuttX and start the HCOM handler.
+# Without this, the ESP32 machine consumes all execution time (heavy Python
+# hooks for window overflow workarounds) and the STM32 barely advances.
+cpu PerformanceInMips 100
+
+using sysbus
+
+# RCC peripheral with proper clock ready bit handling
+machine PyDevFromFile @scripts/pydev/rcc.py 0x40023800 0x400 true "rcc"
+
+# USB OTG FS stub — handles GRSTCTL polling (AHBIDL bit)
+machine PyDevFromFile @scripts/pydev/otg_fs.py 0x50000000 0x40000 true "otg_fs"
+
+# FMC (Flexible Memory Controller) stub — SDRAM init writes to 0xA0000000
+machine PyDevFromFile @scripts/pydev/fmc.py 0xA0000000 0x1000 true "fmc"
+
+# SpiBridge — starts booted and ready
+sysbus.spi2.spiBridge Reset
+
+# Legacy memory layout
+sysbus LoadBinary @build/legacy/nuttx_user.bin 0x08040000
+sysbus LoadBinary @build/legacy/nuttx_vectors.bin 0x08040000
+sysbus LoadBinary @build/legacy/nuttx_kernel.bin 0x08140000
+
+# Mono runtime — load into QSPI flash and SDRAM
+sysbus LoadBinary @build/legacy/nuttx_mono.bin 0x90000000
+sysbus LoadBinary @build/legacy/nuttx_mono.bin 0xC0000000
+
+# LittleFS filesystem image (optional — may not exist in build)
+# sysbus LoadBinary @build/legacy/littlefs.bin 0x90500000
+
+sysbus.cpu VectorTableOffset 0x08040000
+
+# USART1: Console/syslog output
+showAnalyzer usart1
+
+# UART4: HCOM transport — exposed as TCP socket on port 4242
+emulation CreateServerSocketTerminal 4242 "hcom" false
+connector Connect sysbus.uart4 hcom
+
+# UART5: ESP32 control signal channel — exposed as TCP socket on port 4243
+emulation CreateServerSocketTerminal 4243 "esp32ctrl" false
+connector Connect sysbus.uart5 esp32ctrl
+
+# Hook definitions and SDRAM patches (auto-generated with resolved addresses)
+# NOTE: hooks.resc registers espcp_spi_bypass targeting EspcpStub. We override it below.
+include @build/legacy/hooks.resc
+include @build/legacy/sdram-patches.resc
+
+# Override espcp_spi_bypass: use SpiBridge instead of EspcpStub.
+# AddHook stacks, so both hooks will fire. The EspcpStub one will crash but we catch it.
+# Better approach: use cpu RemoveHooksAt to clear the old hook, then add ours.
+cpu RemoveHooksAt 0x081488A0
+set espcp_spi_bypass_dual "from System import Array, Byte; stub = machine['sysbus.spi2.spiBridge']; tx = cpu.GetRegisterUnsafe(0).RawValue; rx = cpu.GetRegisterUnsafe(1).RawValue; length = int(cpu.GetRegisterUnsafe(2).RawValue); txdata = machine.SystemBus.ReadBytes(tx, length) if tx else Array.CreateInstance(Byte, length); rxarr = Array.CreateInstance(Byte, length); [rxarr.__setitem__(i, stub.Transmit(txdata[i])) for i in range(length)]; stub.FinishTransmission(); machine.SystemBus.WriteBytes(rxarr, rx) if rx else None; cpu.PC = cpu.LR"
+cpu AddHook 0x081488A0 $espcp_spi_bypass_dual
+
+# =============================================================================
+# Machine 2: ESP32 — Meadow ESP-IDF Firmware
+# =============================================================================
+mach create "esp32"
+machine LoadPlatformDescription @platforms/meadow-esp32.repl
+
+# Reduce ESP32 MIPS relative to STM32 (100 MIPS) so the STM32 gets enough
+# virtual time to boot NuttX and run the HCOM handler. Without this ratio,
+# the ESP32's heavy Python hooks (window overflow workarounds, SPI fixups)
+# starve the STM32 of execution time.
+cpu PerformanceInMips 10
+
+using sysbus
+
+# Set up UART terminal on port 4245
+emulation CreateServerSocketTerminal 4245 "esp32uart" false
+connector Connect uart0 esp32uart
+
+# Load the ESP32 ROM binary at 0x40000000
+sysbus LoadBinary @roms/esp32-v3-rom.bin 0x40000000
+
+# Load the Meadow ESP32 firmware ELF
+# ESP32 firmware ELF — set via run.sh --esp32, or default to sibling Meadow-ESP32 repo
+$esp32_fw?=@../Meadow-ESP32/build/MeadowComms.elf
+sysbus LoadELF $esp32_fw
+
+# Window register init trampoline — relocated to 0x400A0300 (past IRAM text end).
+# Original was at 0x4009F000 which OVERWRITES spi_slave_hal_user_start (0x4009F000)
+# and spi_slave_hal_prepare_data (0x4009F028)!
+# Literal pool at 0x400A0300-0x400A030B:
+#   +0x00: entry point address (0x40081BBC = call_start_cpu0)
+#   +0x04: initial SP (0x3FFE5F00)
+#   +0x08: initial PS (0x00040000 = WOE|CALLINC=0)
+# Code at 0x400A030C:
+#   movi a0, 0; wsr.windowbase a0; rsync
+#   movi a0, 1; wsr.windowstart a0; rsync
+#   l32r a0, [PS]; wsr.ps a0; rsync
+#   l32r a1, [SP]; l32r a8, [entry]; movi a0, 0; callx8 a8
+# Entry point
+sysbus WriteDoubleWord 0x400A0300 0x40081BBC
+# SP
+sysbus WriteDoubleWord 0x400A0304 0x3FFE5F00
+# PS = WOE | CALLINC(0) = 0x00040000
+sysbus WriteDoubleWord 0x400A0308 0x00040000
+# Code: movi a0, 0 (0C 00)
+sysbus WriteByte 0x400A030C 0x0C
+sysbus WriteByte 0x400A030D 0x00
+# wsr.windowbase a0 (00 48 13)
+sysbus WriteByte 0x400A030E 0x00
+sysbus WriteByte 0x400A030F 0x48
+sysbus WriteByte 0x400A0310 0x13
+# rsync (00 20 00)
+sysbus WriteByte 0x400A0311 0x00
+sysbus WriteByte 0x400A0312 0x20
+sysbus WriteByte 0x400A0313 0x10
+# movi a0, 1 (0C 10)
+sysbus WriteByte 0x400A0314 0x0C
+sysbus WriteByte 0x400A0315 0x10
+# wsr.windowstart a0 (00 49 13)
+sysbus WriteByte 0x400A0316 0x00
+sysbus WriteByte 0x400A0317 0x49
+sysbus WriteByte 0x400A0318 0x13
+# rsync (00 20 00)
+sysbus WriteByte 0x400A0319 0x00
+sysbus WriteByte 0x400A031A 0x20
+sysbus WriteByte 0x400A031B 0x10
+# l32r a0, [0x400A0308] = PS literal
+# l32r offset = (0x400A0308 - (0x400A031C & ~3)) / (-4) + 1 ... complex
+# Actually let me just use the original trampoline bytes with adjusted l32r offsets
+# Simpler: use movi for PS since it fits in 12-bit immediate
+# movi a0, 0 — then wsr.ps a0 — but PS needs WOE bit (0x40000)
+# PS=0x00040000 doesn't fit movi. Use l32r.
+# l32r a0, literal: byte0 = (reg << 4) | 0x01, offset encodes the literal distance
+# For l32r at 0x400A031C targeting 0x400A0308:
+#   offset = (0x400A0308 - ((0x400A031C + 3) & ~3)) >> 2 ... actually l32r uses:
+#   addr = ((PC+3) & ~3) + (sign_extend(imm16) << 2)
+#   imm16 = (addr - ((PC+3) & ~3)) >> 2
+# PC = 0x400A031C, (PC+3)&~3 = 0x400A031C (already aligned)
+# imm16 = (0x400A0308 - 0x400A031C) >> 2 = (-0x14) >> 2 = -5 = 0xFFFB (16-bit signed)
+# l32r a0: byte0 = (0 << 4) | 1 = 0x01, byte1 = 0xFB, byte2 = 0xFF
+sysbus WriteByte 0x400A031C 0x01
+sysbus WriteByte 0x400A031D 0xFB
+sysbus WriteByte 0x400A031E 0xFF
+# wsr.ps a0 (00 E6 13)
+sysbus WriteByte 0x400A031F 0x00
+sysbus WriteByte 0x400A0320 0xE6
+sysbus WriteByte 0x400A0321 0x13
+# rsync
+sysbus WriteByte 0x400A0322 0x00
+sysbus WriteByte 0x400A0323 0x20
+sysbus WriteByte 0x400A0324 0x10
+# l32r a1, [0x400A0304] = SP literal
+# PC = 0x400A0325, (PC+3)&~3 = 0x400A0328
+# imm16 = (0x400A0304 - 0x400A0328) >> 2 = (-0x24) >> 2 = -9 = 0xFFF7
+# l32r a1: byte0 = (1 << 4) | 1 = 0x11, byte1 = 0xF7, byte2 = 0xFF
+sysbus WriteByte 0x400A0325 0x11
+sysbus WriteByte 0x400A0326 0xF7
+sysbus WriteByte 0x400A0327 0xFF
+# l32r a8, [0x400A0300] = entry point literal
+# PC = 0x400A0328, (PC+3)&~3 = 0x400A032C
+# imm16 = (0x400A0300 - 0x400A032C) >> 2 = (-0x2C) >> 2 = -11 = 0xFFF5
+# l32r a8: byte0 = (8 << 4) | 1 = 0x81, byte1 = 0xF5, byte2 = 0xFF
+sysbus WriteByte 0x400A0328 0x81
+sysbus WriteByte 0x400A0329 0xF5
+sysbus WriteByte 0x400A032A 0xFF
+# movi a0, 0 (0C 00)
+sysbus WriteByte 0x400A032B 0x0C
+sysbus WriteByte 0x400A032C 0x00
+# callx8 a8 (E0 08 00)
+sysbus WriteByte 0x400A032D 0xE0
+sysbus WriteByte 0x400A032E 0x08
+sysbus WriteByte 0x400A032F 0x00
+# DISABLED — using register API instead (see below)
+# cpu PC 0x400A030C
+
+# ACTUALLY: skip the whole trampoline. Just init registers directly.
+# The trampoline code at 0x400A0300 sets WINDOWBASE/WINDOWSTART/PS/SP then
+# callx8 to the firmware entry. We can do this with Renode register API:
+cpu SetRegister "WINDOWBASE" 0
+cpu SetRegister "WINDOWSTART" 1
+cpu SetRegister "PS" 0x00040000
+cpu SetRegister "A1" 0x3FFE5F00
+cpu PC 0x40081BBC
+
+# Set VECBASE to the firmware's exception vectors in IRAM
+cpu SetRegister "VECBASE" 0x40080000
+
+# =============================================================================
+# ESP32 binary patches — all the same patches from esp32-meadow-boot-no-retw-hooks.resc
+# =============================================================================
+
+# NOP _xtos_set_intlevel calls (10 callx8 sites)
+sysbus WriteByte 0x40081EE3 0x82
+sysbus WriteByte 0x40081EE4 0xC0
+sysbus WriteByte 0x40081EE5 0x00
+sysbus WriteByte 0x40081F57 0x82
+sysbus WriteByte 0x40081F58 0xC0
+sysbus WriteByte 0x40081F59 0x00
+sysbus WriteByte 0x40081FA3 0x82
+sysbus WriteByte 0x40081FA4 0xC0
+sysbus WriteByte 0x40081FA5 0x00
+sysbus WriteByte 0x4008AAFE 0x82
+sysbus WriteByte 0x4008AAFF 0xC0
+sysbus WriteByte 0x4008AB00 0x00
+sysbus WriteByte 0x4008AB73 0x82
+sysbus WriteByte 0x4008AB74 0xC0
+sysbus WriteByte 0x4008AB75 0x00
+sysbus WriteByte 0x4008AC6E 0x82
+sysbus WriteByte 0x4008AC6F 0xC0
+sysbus WriteByte 0x4008AC70 0x00
+sysbus WriteByte 0x4008AD52 0x82
+sysbus WriteByte 0x4008AD53 0xC0
+sysbus WriteByte 0x4008AD54 0x00
+sysbus WriteByte 0x4008ADDF 0x82
+sysbus WriteByte 0x4008ADE0 0xC0
+sysbus WriteByte 0x4008ADE1 0x00
+sysbus WriteByte 0x400910DE 0x82
+sysbus WriteByte 0x400910DF 0xC0
+sysbus WriteByte 0x400910E0 0x00
+sysbus WriteByte 0x40091225 0x82
+sysbus WriteByte 0x40091226 0xC0
+sysbus WriteByte 0x40091227 0x00
+
+# Fix INTLEVEL in FreeRTOS lock functions
+sysbus WriteByte 0x40082c49 0xB2
+sysbus WriteByte 0x40082c4a 0xA0
+sysbus WriteByte 0x40082c4b 0x00
+sysbus WriteByte 0x40082ca7 0xB2
+sysbus WriteByte 0x40082ca8 0xA0
+sysbus WriteByte 0x40082ca9 0x00
+
+# vTaskSwitchContext exit trampoline (27 bytes)
+sysbus WriteByte 0x40092C33 0x80
+sysbus WriteByte 0x40092C34 0x48
+sysbus WriteByte 0x40092C35 0x03
+sysbus WriteByte 0x40092C36 0x82
+sysbus WriteByte 0x40092C37 0xC8
+sysbus WriteByte 0x40092C38 0xFF
+sysbus WriteByte 0x40092C39 0x92
+sysbus WriteByte 0x40092C3A 0xA0
+sysbus WriteByte 0x40092C3B 0x01
+sysbus WriteByte 0x40092C3C 0x00
+sysbus WriteByte 0x40092C3D 0x18
+sysbus WriteByte 0x40092C3E 0x40
+sysbus WriteByte 0x40092C3F 0x00
+sysbus WriteByte 0x40092C40 0x99
+sysbus WriteByte 0x40092C41 0xA1
+sysbus WriteByte 0x40092C42 0x90
+sysbus WriteByte 0x40092C43 0x49
+sysbus WriteByte 0x40092C44 0x13
+sysbus WriteByte 0x40092C45 0x80
+sysbus WriteByte 0x40092C46 0x48
+sysbus WriteByte 0x40092C47 0x13
+sysbus WriteByte 0x40092C48 0x10
+sysbus WriteByte 0x40092C49 0x20
+sysbus WriteByte 0x40092C4A 0x00
+sysbus WriteByte 0x40092C4B 0x06
+sysbus WriteByte 0x40092C4C 0xC5
+sysbus WriteByte 0x40092C4D 0xF9
+
+# Trampoline: callx8 → jx
+sysbus WriteByte 0x4009f02d 0xA0
+
+# Base save areas for window overflow
+sysbus WriteDoubleWord 0x3FFE5EF0 0x3FFE5F00
+sysbus WriteDoubleWord 0x3FFE5EF4 0x3FFE5F00
+sysbus WriteDoubleWord 0x3FFE5EF8 0x3FFE5F00
+sysbus WriteDoubleWord 0x3FFE5EFC 0x3FFE5F00
+sysbus WriteDoubleWord 0x3FFE5EB0 0x3FFE5F00
+sysbus WriteDoubleWord 0x3FFE5EB4 0x3FFE5F00
+sysbus WriteDoubleWord 0x3FFE5EB8 0x3FFE5F00
+sysbus WriteDoubleWord 0x3FFE5EBC 0x3FFE5F00
+sysbus WriteDoubleWord 0x3FFE5EE0 0x00000000
+sysbus WriteDoubleWord 0x3FFE5EE4 0x00000000
+sysbus WriteDoubleWord 0x3FFE5EE8 0x00000000
+sysbus WriteDoubleWord 0x3FFE5EEC 0x00000000
+
+# FPU/rer patches
+sysbus WriteByte 0x40094499 0x0D
+sysbus WriteByte 0x4009449A 0xF0
+sysbus WriteByte 0x40094459 0x0D
+sysbus WriteByte 0x4009445A 0xF0
+sysbus WriteByte 0x40081452 0x00
+sysbus WriteByte 0x40081453 0xA0
+sysbus WriteByte 0x40081454 0x22
+
+# ets_delay_us → retw.n
+sysbus WriteByte 0x40008537 0x1D
+sysbus WriteByte 0x40008538 0xF0
+
+# g_ticks_per_us
+sysbus WriteDoubleWord 0x3FFE01E0 0x000000F0
+sysbus WriteDoubleWord 0x3FFE40F0 0x000000F0
+
+# esp_clk_init → retw.n
+sysbus WriteByte 0x400D4E73 0x1D
+sysbus WriteByte 0x400D4E74 0xF0
+
+# vPortEnter/ExitCritical → retw.n
+sysbus WriteByte 0x400911a3 0x1D
+sysbus WriteByte 0x400911a4 0xF0
+sysbus WriteByte 0x400910E7 0x1D
+sysbus WriteByte 0x400910E8 0xF0
+
+# NOP esp_intr_alloc in uart_isr_register
+sysbus WriteByte 0x40157d0f 0x82
+sysbus WriteByte 0x40157d10 0xC0
+sysbus WriteByte 0x40157d11 0x00
+
+# Skip esp_brownout_init
+sysbus WriteByte 0x400d594b 0x86
+sysbus WriteByte 0x400d594c 0x0B
+sysbus WriteByte 0x400d594d 0x00
+
+# Skip __register_frame_info_bases
+sysbus WriteByte 0x40199b57 0x46
+sysbus WriteByte 0x40199b58 0x0D
+sysbus WriteByte 0x40199b59 0x00
+
+# Skip Logging::Setup
+sysbus WriteByte 0x400d76c3 0x46
+sysbus WriteByte 0x400d76c4 0x13
+sysbus WriteByte 0x400d76c5 0x00
+
+# Skip strftime ROM call
+sysbus WriteByte 0x400d65ca 0x82
+sysbus WriteByte 0x400d65cb 0xC0
+sysbus WriteByte 0x400d65cc 0x00
+
+# Skip NvsManager::Setup
+sysbus WriteByte 0x400d66fb 0x46
+sysbus WriteByte 0x400d66fc 0x17
+sysbus WriteByte 0x400d66fd 0x00
+
+# xQueueGenericReceive pre-scheduler patch
+sysbus WriteByte 0x40091d07 0x06
+sysbus WriteByte 0x40091d08 0x3E
+sysbus WriteByte 0x40091d09 0x00
+
+# Skip task/TCB cleanup functions
+sysbus WriteByte 0x400920a3 0x46
+sysbus WriteByte 0x400920a4 0x11
+sysbus WriteByte 0x400920a5 0x00
+sysbus WriteByte 0x4009206f 0x06
+sysbus WriteByte 0x40092070 0x0A
+sysbus WriteByte 0x40092071 0x00
+sysbus WriteByte 0x4019a767 0xC6
+sysbus WriteByte 0x4019a768 0x36
+sysbus WriteByte 0x4019a769 0x00
+sysbus WriteByte 0x400910b3 0x46
+sysbus WriteByte 0x400910b4 0x00
+sysbus WriteByte 0x400910b5 0x00
+
+# waiti → nop
+sysbus WriteByte 0x401aef8b 0xF0
+sysbus WriteByte 0x401aef8c 0x20
+sysbus WriteByte 0x401aef8d 0x00
+
+# Skip esp_log_write
+sysbus WriteByte 0x40094d83 0x1D
+sysbus WriteByte 0x40094d84 0xF0
+
+# Core affinity NOP for single-core
+sysbus WriteByte 0x40092B7E 0x82
+sysbus WriteByte 0x40092B7F 0xC0
+sysbus WriteByte 0x40092B80 0x00
+
+# vTaskSwitchContext dual-core exit bypass
+sysbus WriteByte 0x40092B9E 0x92
+sysbus WriteByte 0x40092B9F 0x62
+sysbus WriteByte 0x40092BA0 0x00
+sysbus WriteByte 0x40092BA1 0x86
+sysbus WriteByte 0x40092BA2 0x23
+sysbus WriteByte 0x40092BA3 0x00
+sysbus WriteByte 0x40092BF3 0x06
+sysbus WriteByte 0x40092BF4 0x0F
+sysbus WriteByte 0x40092BF5 0x00
+
+# malloc → heap_caps_malloc_default
+sysbus WriteByte 0x40097c78 0x06
+sysbus WriteByte 0x40097c79 0x52
+sysbus WriteByte 0x40097c7a 0xA6
+
+# s32c1i → l32i (all 62 instances)
+sysbus WriteByte 0x4008FB9C 0x20
+sysbus WriteByte 0x4008FD85 0x27
+sysbus WriteByte 0x40091112 0x22
+sysbus WriteByte 0x40092A80 0x2D
+sysbus WriteByte 0x400996A9 0x20
+sysbus WriteByte 0x4009BA6F 0x20
+sysbus WriteByte 0x400DB4FF 0x20
+sysbus WriteByte 0x400E08A4 0x25
+sysbus WriteByte 0x400E22BD 0x29
+sysbus WriteByte 0x400EE2E6 0x25
+sysbus WriteByte 0x400EFCAF 0x20
+sysbus WriteByte 0x400F3032 0x20
+sysbus WriteByte 0x400F4CBB 0x25
+sysbus WriteByte 0x400F4D0A 0x20
+sysbus WriteByte 0x400F4F03 0x20
+sysbus WriteByte 0x400F5892 0x25
+sysbus WriteByte 0x400F621C 0x25
+sysbus WriteByte 0x400F9FC1 0x25
+sysbus WriteByte 0x400FD9B2 0x2F
+sysbus WriteByte 0x4010816A 0x25
+sysbus WriteByte 0x40108CC3 0x20
+sysbus WriteByte 0x4010A763 0x25
+sysbus WriteByte 0x4010A7F3 0x25
+sysbus WriteByte 0x4010CE31 0x20
+sysbus WriteByte 0x4010DAB4 0x25
+sysbus WriteByte 0x40111B74 0x25
+sysbus WriteByte 0x40114349 0x25
+sysbus WriteByte 0x40114716 0x25
+sysbus WriteByte 0x401171DF 0x20
+sysbus WriteByte 0x4011DCDF 0x20
+sysbus WriteByte 0x40123EF5 0x20
+sysbus WriteByte 0x4012DF92 0x20
+sysbus WriteByte 0x4012F3EB 0x20
+sysbus WriteByte 0x40133D96 0x25
+sysbus WriteByte 0x401359B9 0x2D
+sysbus WriteByte 0x40137DB7 0x25
+sysbus WriteByte 0x4013AF70 0x20
+sysbus WriteByte 0x4013F022 0x20
+sysbus WriteByte 0x40147B2F 0x25
+sysbus WriteByte 0x4014A0C6 0x25
+sysbus WriteByte 0x40151067 0x2A
+sysbus WriteByte 0x40152476 0x2E
+sysbus WriteByte 0x40153912 0x25
+sysbus WriteByte 0x40153B29 0x2E
+sysbus WriteByte 0x40155F7F 0x28
+sysbus WriteByte 0x4015602E 0x28
+sysbus WriteByte 0x40159729 0x20
+sysbus WriteByte 0x4015FE21 0x25
+sysbus WriteByte 0x40165BDA 0x27
+sysbus WriteByte 0x4016925E 0x20
+sysbus WriteByte 0x40169319 0x20
+sysbus WriteByte 0x4019032A 0x2D
+sysbus WriteByte 0x401924FE 0x21
+sysbus WriteByte 0x40197E84 0x28
+sysbus WriteByte 0x4019868C 0x2A
+sysbus WriteByte 0x401A812F 0x28
+sysbus WriteByte 0x401AB86A 0x20
+sysbus WriteByte 0x401ABCF6 0x20
+sysbus WriteByte 0x401AC252 0x20
+sysbus WriteByte 0x401AC8B2 0x20
+sysbus WriteByte 0x401B0356 0x25
+
+# __assert_func → retw.n
+sysbus WriteByte 0x40199DA3 0x1D
+sysbus WriteByte 0x40199DA4 0xF0
+
+# esp_crosscore_int_send_yield → j vPortYield
+sysbus WriteByte 0x40081E28 0x06
+sysbus WriteByte 0x40081E29 0x60
+sysbus WriteByte 0x40081E2A 0x3D
+
+# Flash function skips
+sysbus WriteByte 0x4013565B 0x1D
+sysbus WriteByte 0x4013565C 0xF0
+sysbus WriteByte 0x4008A193 0x1D
+sysbus WriteByte 0x4008A194 0xF0
+sysbus WriteByte 0x4008A1BF 0x1D
+sysbus WriteByte 0x4008A1C0 0xF0
+sysbus WriteByte 0x4008A393 0x1D
+sysbus WriteByte 0x4008A394 0xF0
+sysbus WriteByte 0x4008A123 0x1D
+sysbus WriteByte 0x4008A124 0xF0
+sysbus WriteByte 0x40135F4F 0x0C
+sysbus WriteByte 0x40135F50 0x02
+sysbus WriteByte 0x40135F51 0x1D
+sysbus WriteByte 0x40135F52 0xF0
+
+# app_cpu_started hook
+cpu AddHook 0x40081D50 "self.Bus.WriteByte(0x3FFC91A8, 1)"
+
+# NOP freeze_cs/restore_cs in SPI ISR — reads gpio_iomux_in which dereferences
+# NULL function pointers from IO_MUX MappedMemory (returns 0).
+# freeze_cs callx8 at 0x4008bc32 → NOP
+sysbus WriteByte 0x4008bc32 0xF0
+sysbus WriteByte 0x4008bc33 0x20
+sysbus WriteByte 0x4008bc34 0x00
+# restore_cs branch at 0x4008bd48 (bnez to 0x4008bc96) → NOP
+# Without this NOP, the ISR skips spi_slave_hal_user_start and cmd.usr is never set.
+sysbus WriteByte 0x4008bd48 0xF0
+sysbus WriteByte 0x4008bd49 0x20
+sysbus WriteByte 0x4008bd4a 0x00
+
+# NOP GPIO ROM calls in SPI ctor
+sysbus WriteByte 0x400d9455 0xF0
+sysbus WriteByte 0x400d9456 0x20
+sysbus WriteByte 0x400d9457 0x00
+sysbus WriteByte 0x400d945f 0xF0
+sysbus WriteByte 0x400d9460 0x20
+sysbus WriteByte 0x400d9461 0x00
+sysbus WriteByte 0x400d9467 0xF0
+sysbus WriteByte 0x400d9468 0x20
+sysbus WriteByte 0x400d9469 0x00
+sysbus WriteByte 0x400d9471 0xF0
+sysbus WriteByte 0x400d9472 0x20
+sysbus WriteByte 0x400d9473 0x00
+sysbus WriteByte 0x400d947b 0xF0
+sysbus WriteByte 0x400d947c 0x20
+sysbus WriteByte 0x400d947d 0x00
+sysbus WriteByte 0x400d9485 0xF0
+sysbus WriteByte 0x400d9486 0x20
+sysbus WriteByte 0x400d9487 0x00
+sysbus WriteByte 0x400d948f 0xF0
+sysbus WriteByte 0x400d9490 0x20
+sysbus WriteByte 0x400d9491 0x00
+
+# Skip BT GetInstance (return NULL)
+sysbus WriteByte 0x400d9dd3 0x22
+sysbus WriteByte 0x400d9dd4 0xA0
+sysbus WriteByte 0x400d9dd5 0x00
+sysbus WriteByte 0x400d9dd6 0x1D
+sysbus WriteByte 0x400d9dd7 0xF0
+
+# Skip WiFi Setup
+sysbus WriteByte 0x400de26b 0x46
+sysbus WriteByte 0x400de26c 0x1B
+sysbus WriteByte 0x400de26d 0x00
+
+# Skip FileSystem::Setup
+sysbus WriteByte 0x400d6f23 0x1D
+sysbus WriteByte 0x400d6f24 0xF0
+
+# Skip watchdogs
+sysbus WriteByte 0x400d5b33 0x22
+sysbus WriteByte 0x400d5b34 0xA0
+sysbus WriteByte 0x400d5b35 0x00
+sysbus WriteByte 0x400d5b36 0x1D
+sysbus WriteByte 0x400d5b37 0xF0
+sysbus WriteByte 0x400d5c3b 0x22
+sysbus WriteByte 0x400d5c3c 0xA0
+sysbus WriteByte 0x400d5c3d 0x00
+sysbus WriteByte 0x400d5c3e 0x1D
+sysbus WriteByte 0x400d5c3f 0xF0
+sysbus WriteByte 0x400d5daf 0x1D
+sysbus WriteByte 0x400d5db0 0xF0
+
+# =============================================================================
+# ESP32 Python hooks — tick simulation, IPC demotion, diagnostics
+# =============================================================================
+python
+"""
+import clr
+import __builtin__
+clr.AddReference('Renode')
+from Antmicro.Renode.Peripherals.CPU import RegisterValue as _RV
+
+_emu = Antmicro.Renode.Core.EmulationManager.Instance.CurrentEmulation
+# Get the ESP32 machine by name
+_success, _machine = _emu.TryGetMachineByName('esp32')
+_bus = _machine.SystemBus
+_cpu = _bus.GetCPUs()[0]
+
+def _read_cstr(addr, maxlen=128):
+    R = _bus.ReadByte
+    if addr < 0x3F000000 or addr >= 0x50000000:
+        return ''
+    chars = []
+    for i in range(maxlen):
+        b = R(addr + i)
+        if b == 0:
+            break
+        if b >= 0x20 and b < 0x7F:
+            chars.append(chr(b))
+        elif b == 0x0A:
+            chars.append('\\n')
+        else:
+            chars.append('.')
+    return ''.join(chars)
+
+def _ets_printf_hook():
+    fmt_addr = _cpu.GetRegister(91).RawValue
+    if fmt_addr < 0x3F000000 or fmt_addr >= 0x50000000:
+        return
+    fmt = _read_cstr(fmt_addr, 200)
+    if not fmt:
+        return
+    args = []
+    for reg in (92, 93, 94, 95, 96):
+        args.append(_cpu.GetRegister(reg).RawValue)
+    result = []
+    ai = 0
+    i = 0
+    while i < len(fmt):
+        if fmt[i] == '%' and i + 1 < len(fmt):
+            i += 1
+            while i < len(fmt) and fmt[i] in '0123456789.-+ #l':
+                i += 1
+            if i >= len(fmt):
+                break
+            spec = fmt[i]
+            if ai < len(args):
+                v = args[ai]
+                ai += 1
+                if spec == 's':
+                    result.append(_read_cstr(v, 64))
+                elif spec in ('d', 'i'):
+                    if v >= 0x80000000:
+                        v = v - 0x100000000
+                    result.append(str(v))
+                elif spec == 'u':
+                    result.append(str(v))
+                elif spec == 'x':
+                    result.append('%x' % v)
+                elif spec == 'p':
+                    result.append('0x%x' % v)
+                elif spec == '%':
+                    result.append('%')
+                    ai -= 1
+                else:
+                    result.append('%%%s' % spec)
+            else:
+                result.append('%%%s' % spec)
+        else:
+            result.append(fmt[i])
+        i += 1
+    import re
+    msg = re.sub(r'\\x1B\\[[0-9;]*m', '', ''.join(result)).strip()
+    if msg:
+        _cpu.Log(LogLevel.Warning, 'UART> %s' % msg)
+__builtin__._ets_printf_hook = _ets_printf_hook
+__builtin__._read_cstr = _read_cstr
+
+_ipc_demoted = [False]
+_total_demoted = [0]
+def _demote_ipc_tasks(R, W):
+    if _total_demoted[0] >= 6:
+        return
+    rl24 = 0x3FFC9384 + 24 * 20
+    cnt24 = R(rl24)
+    if cnt24 == 0:
+        return
+    sentinel24 = rl24 + 8
+    item = R(rl24 + 12)
+    for _ in range(cnt24 + 1):
+        if item == sentinel24 or item == 0:
+            break
+        if _total_demoted[0] >= 6:
+            break
+        next_item = R(item + 4)
+        tcb = R(item + 12)
+        pri = R(tcb + 48)
+        if pri == 24:
+            W(tcb + 48, 0)
+            nx = R(item + 4)
+            pv = R(item + 8)
+            W(nx + 8, pv)
+            W(pv + 4, nx)
+            pi = R(rl24 + 4)
+            if pi == item:
+                W(rl24 + 4, pv)
+            W(item + 16, 0)
+            W(rl24, R(rl24) - 1)
+            rl0 = 0x3FFC9384
+            ri = R(rl0 + 4)
+            rp = R(ri + 8)
+            W(item + 4, ri)
+            W(item + 8, rp)
+            W(rp + 4, item)
+            W(ri + 8, item)
+            W(item + 16, rl0)
+            W(rl0, R(rl0) + 1)
+            _total_demoted[0] += 1
+            _cpu.Log(LogLevel.Error, 'DEMOTED IPC task #%d TCB=0x%x from pri24 to pri0' % (_total_demoted[0], tcb))
+        item = next_item
+    if R(rl24) == 0:
+        for p in range(24, -1, -1):
+            if R(0x3FFC9384 + p * 20) > 0:
+                W(0x3FFC92EC, p)
+                break
+
+def _dispatch_fixup():
+    R = _bus.ReadDoubleWord
+    W = _bus.WriteDoubleWord
+    _demote_ipc_tasks(R, W)
+    if not _ipc_demoted[0]:
+        _ipc_demoted[0] = True
+        W(0x3FFC92BC, 1)
+    for p in range(25):
+        base = 0x3FFC9384 + p * 20
+        pi = R(base + 4)
+        if pi < 0x3FF00000 or pi > 0x40000000:
+            W(base + 4, base + 8)
+__builtin__._dispatch_fixup = _dispatch_fixup
+
+_thread_null_count = [0]
+def _thread_task_callx8_guard():
+    a3 = _cpu.GetRegister(92).RawValue
+    if a3 == 0 or a3 < 0x40000000 or a3 >= 0x40200000:
+        _thread_null_count[0] += 1
+        if _thread_null_count[0] <= 5:
+            _cpu.Log(LogLevel.Warning, 'Thread::Task: null method a3=0x%08x, skip (#%d)' % (a3, _thread_null_count[0]))
+        _cpu.PC = _RV.Create(0x400e154f, 32)  # skip callx8, go to TaskCompleted
+__builtin__._thread_task_callx8_guard = _thread_task_callx8_guard
+
+def _demote_task_at_creation():
+    # xTaskCreatePinnedToCore entry+3: a6 (register 95) = uxPriority.
+    # Log but do NOT demote — the _dispatch_fixup handles demotion at runtime.
+    # Demoting at creation prevents the task from ever being scheduled.
+    pri = _cpu.GetRegister(95).RawValue
+    if pri >= 24:
+        _cpu.Log(LogLevel.Debug, 'xTaskCreate: pri=%d (not demoting)' % pri)
+__builtin__._demote_task_at_creation = _demote_task_at_creation
+
+_vlie_fix_count = [0]
+def _vListInsertEnd_guard():
+    R = _bus.ReadDoubleWord
+    W = _bus.WriteDoubleWord
+    a2 = _cpu.GetRegister(91).RawValue
+    if a2 < 0x3FF00000 or a2 >= 0x40000000:
+        return
+    pxIndex = R(a2 + 4)
+    if pxIndex < 0x3FF00000 or pxIndex >= 0x40000000:
+        W(a2 + 4, a2 + 8)
+        _vlie_fix_count[0] += 1
+        if _vlie_fix_count[0] <= 10:
+            _cpu.Log(LogLevel.Warning, 'vListInsertEnd: corrupt pxIndex=0x%08x, fixed (#%d)' % (pxIndex, _vlie_fix_count[0]))
+        return
+    pxNext = R(pxIndex + 8)
+    if pxNext < 0x3FF00000 or pxNext >= 0x40000000:
+        W(pxIndex + 8, a2 + 8)
+        _vlie_fix_count[0] += 1
+        if _vlie_fix_count[0] <= 10:
+            _cpu.Log(LogLevel.Warning, 'vListInsertEnd: corrupt pxNext=0x%08x, fixed (#%d)' % (pxNext, _vlie_fix_count[0]))
+__builtin__._vListInsertEnd_guard = _vListInsertEnd_guard
+
+_pd_count = [0]
+def _prepare_data_trace():
+    _pd_count[0] += 1
+    a2 = _cpu.GetRegister(91).RawValue
+    if a2 >= 0x3FF00000 and a2 < 0x40000000:
+        hw = _bus.ReadDoubleWord(a2)
+        rx_bitlen = _bus.ReadDoubleWord(a2 + 24) if a2 else 0
+        tx_buf = _bus.ReadDoubleWord(a2 + 32) if a2 else 0
+        use_dma = _bus.ReadByte(a2 + 16) if a2 else 0
+        # a2 should be the HAL context (hw at offset 0). If it's the driver struct
+        # (hw at offset 32), the ISR passed the wrong pointer.
+        hw0 = _bus.ReadDoubleWord(a2)
+        hw32 = _bus.ReadDoubleWord(a2 + 32) if a2 + 32 < 0x40000000 else 0
+        # Fix up a8 (register 97) — it should be [a2+0] (hw pointer) but TCG
+        # stale-global bug leaves it at the pre-rotation value (0 or wrong).
+        hw = _bus.ReadDoubleWord(a2)
+        a8 = _cpu.GetRegister(97).RawValue
+        if a8 != hw and hw >= 0x3FF00000 and hw < 0x40000000:
+            _cpu.SetRegister(97, _RV.Create(int(hw), 32))
+        _cpu.Log(LogLevel.Error, 'PD #%d: a2=0x%08x hw=0x%08x (a8 was 0x%08x)' %
+            (_pd_count[0], a2, hw, a8))
+    else:
+        _cpu.Log(LogLevel.Error, 'PD #%d: a2=0x%08x (invalid/init call)' % (_pd_count[0], a2))
+__builtin__._prepare_data_trace = _prepare_data_trace
+
+def _fix_pd_a8():
+    # Hook at 0x4009f031 (memw after l32i a8, a2, 0 in prepare_data).
+    # Due to TCG stale-global bug, a8 may not have the value loaded by l32i.
+    # Fix: read [a2+0] and set a8 if it's wrong.
+    a2 = _cpu.GetRegister(91).RawValue
+    a8 = _cpu.GetRegister(97).RawValue
+    if a2 >= 0x3FF00000 and a2 < 0x40000000:
+        hw = _bus.ReadDoubleWord(a2)
+        if a8 != hw and hw >= 0x3FF00000:
+            _cpu.SetRegister(97, _RV.Create(int(hw), 32))
+__builtin__._fix_pd_a8 = _fix_pd_a8
+
+def _pd_entry_check():
+    # Hook at entry instruction (0x4009f028) BEFORE entry executes.
+    ps = _cpu.GetRegister(38).RawValue  # PS = register 38
+    callinc = (ps >> 16) & 3
+    wb = _cpu.GetRegister(35).RawValue  # WINDOW_BASE = register 35 (guess)
+    a10 = _cpu.GetRegister(99).RawValue  # a10
+    a2 = _cpu.GetRegister(91).RawValue
+    _cpu.Log(LogLevel.Error,
+        'PD_ENTRY: PS=0x%08x CALLINC=%d WB=%d a2=0x%08x a10=0x%08x' %
+        (ps, callinc, wb, a2, a10))
+__builtin__._pd_entry_check = _pd_entry_check
+
+def _set_a10_zero():
+    _cpu.SetRegister(99, _RV.Create(0, 32))
+__builtin__._set_a10_zero = _set_a10_zero
+
+_xqr_count = [0]
+def _xqr_diag():
+    _xqr_count[0] += 1
+    R = _bus.ReadDoubleWord
+    W = _bus.WriteDoubleWord
+    a2 = _cpu.GetRegister(99).RawValue
+    if a2 < 0x3FF00000 or a2 >= 0x40000000:
+        return
+    wts_pi = R(a2 + 20)
+    wtr_pi = R(a2 + 40)
+    if wts_pi != 0 or wtr_pi != 0:
+        return
+    _cpu.Log(LogLevel.Error, 'XQR_FIX #%d: queue=0x%08x uninit' % (_xqr_count[0], a2))
+    try:
+        wts = a2 + 16
+        W(wts, 0); W(wts + 4, wts + 8); W(wts + 8, 0xFFFFFFFF); W(wts + 12, wts + 8); W(wts + 16, wts + 8)
+        wtr = a2 + 36
+        W(wtr, 0); W(wtr + 4, wtr + 8); W(wtr + 8, 0xFFFFFFFF); W(wtr + 12, wtr + 8); W(wtr + 16, wtr + 8)
+        W(a2, a2 + 80); W(a2 + 4, a2 + 80); W(a2 + 8, a2 + 80); W(a2 + 12, 0)
+        W(a2 + 56, 0); W(a2 + 60, 1); W(a2 + 64, 0)
+    except Exception as e:
+        _cpu.Log(LogLevel.Error, 'XQR_FIX: EXCEPTION: %s' % str(e))
+__builtin__._xqr_diag = _xqr_diag
+
+_lock_fix_count = [0]
+def _lock_validate():
+    R = _bus.ReadDoubleWord
+    W = _bus.WriteDoubleWord
+    a10 = _cpu.GetRegister(99).RawValue
+    a2 = _cpu.GetRegister(91).RawValue
+    _lock_fix_count[0] += 1
+    lockptr = a10
+    if lockptr < 0x3FF00000 or lockptr >= 0x40000000:
+        lockptr = a2
+    if lockptr < 0x3FF00000 or lockptr >= 0x40000000:
+        return
+    handle = R(lockptr)
+    if handle == 0:
+        return
+    if handle < 0x3FF00000 or handle >= 0x40000000:
+        W(a2, 0)
+        return
+    wts_pi = R(handle + 20)
+    wtr_pi = R(handle + 40)
+    if wts_pi == 0 and wtr_pi == 0:
+        W(a2, 0)
+__builtin__._lock_validate = _lock_validate
+
+_idle_count = [0]
+_tick_interval = 50
+def _idle_tick_direct():
+    _idle_count[0] += 1
+    c = _idle_count[0]
+    if c % _tick_interval == 0:
+        ps = _cpu.GetRegister(38).RawValue
+        new_ps = (ps & ~0x1F) | 0x20
+        _cpu.SetRegister(38, _RV.Create(int(new_ps), 32))
+        _cpu.OnGPIO(6, True)
+        _cpu.OnGPIO(6, False)
+        if c <= 1000 or c % 10000 == 0:
+            _cpu.Log(LogLevel.Error, 'TICK_INJECT #%d' % (c // _tick_interval))
+__builtin__._idle_tick_direct = _idle_tick_direct
+
+def _queue_recv_sched_check():
+    a10 = _cpu.GetRegister(99).RawValue
+    if a10 != 2:
+        from Antmicro.Renode.Peripherals.CPU import RegisterValue
+        _cpu.SetRegister(0, RegisterValue.Create(0x40091d83, 32))
+__builtin__._queue_recv_sched_check = _queue_recv_sched_check
+"""
+
+# ESP32 hooks
+cpu AddHook 0x40091360 "_dispatch_fixup()"
+cpu AddHook 0x400e154c "_thread_task_callx8_guard()"
+# Hook AFTER entry (0x4009244f) so we see callee's registers, not caller's
+cpu AddHook 0x4009244f "_demote_task_at_creation()"
+# Trace SPI task and ProcessMessages
+cpu AddHook 0x400d9abc "self.Log(LogLevel.Error, 'SPI_TASK_ENTER')"
+cpu AddHook 0x400d9ad6 "self.Log(LogLevel.Error, 'SPI_TASK_FLAG_SET')"
+cpu AddHook 0x400d9ae1 "self.Log(LogLevel.Error, 'SPI_PROCESS_MESSAGES')"
+cpu AddHook 0x400d99e8 "self.Log(LogLevel.Error, 'ProcessMessages_ENTER')"
+cpu AddHook 0x4008bbe4 "self.Log(LogLevel.Error, 'SPI_ISR_ENTER')"
+cpu AddHook 0x4009f000 "self.Log(LogLevel.Error, 'spi_slave_hal_user_start')"
+cpu AddHook 0x4009f028 "_pd_entry_check()"
+cpu AddHook 0x4009f02b "_prepare_data_trace()"
+cpu AddHook 0x4009f031 "_fix_pd_a8()"
+cpu AddHook 0x4009f034 "self.Log(LogLevel.Error, 'PD: +0c l32i slave reg a8=0x%x a9=0x%x' % (self.GetRegisterUnsafe(97).RawValue, self.GetRegisterUnsafe(98).RawValue))"
+cpu AddHook 0x4009f03a "self.Log(LogLevel.Error, 'PD: +12 memw (write sync_reset)')"
+cpu AddHook 0x4009f03f "self.Log(LogLevel.Error, 'PD: +17 memw (read back slave)')"
+cpu AddHook 0x4009f04a "self.Log(LogLevel.Error, 'PD: +22 memw (clear sync_reset)')"
+cpu AddHook 0x4009f04f "self.Log(LogLevel.Error, 'PD: +27 l8ui use_dma')"
+cpu AddHook 0x4009f05b "self.Log(LogLevel.Error, 'PD: DMA check a9=0x%x (0=non-DMA)' % self.GetRegisterUnsafe(98).RawValue)"
+cpu AddHook 0x4009f0e5 "self.Log(LogLevel.Error, 'PD: calling lldesc_setup_link (RX DMA)')"
+cpu AddHook 0x4009f12b "self.Log(LogLevel.Error, 'PD: calling lldesc_setup_link (TX DMA)')"
+cpu AddHook 0x4009f16a "self.Log(LogLevel.Error, 'PD: non-DMA path')"
+cpu AddHook 0x4009f1ac "self.Log(LogLevel.Error, 'PD: common tail (setting bit lengths)')"
+cpu AddHook 0x4009f213 "self.Log(LogLevel.Error, 'PD: RETURNING (retw)')"
+# ISR path tracing
+cpu AddHook 0x4008bcb3 "self.Log(LogLevel.Error, 'ISR_PATH_B3 (→user_start)')"
+cpu AddHook 0x4008bccd "self.Log(LogLevel.Error, 'ISR_PATH_CD (user_start call)')"
+cpu AddHook 0x4008bce2 "self.Log(LogLevel.Error, 'ISR_PATH_E2 (esp_intr_enable)')"
+cpu AddHook 0x4008bcfd "self.Log(LogLevel.Error, 'ISR_prepare_data_A (first path)')"
+cpu AddHook 0x4008bd3b "self.Log(LogLevel.Error, 'ISR_pre_PD: a3=0x%x a2=0x%x' % (self.GetRegisterUnsafe(92).RawValue, self.GetRegisterUnsafe(91).RawValue))"
+cpu AddHook 0x4008bd3d "self.Log(LogLevel.Error, 'ISR_prepare_data_B: a10=0x%x' % self.GetRegisterUnsafe(99).RawValue)"
+cpu AddHook 0x4008bd48 "self.Log(LogLevel.Error, 'ISR_bnez_patched (should be NOP)')"
+cpu AddHook 0x4008bd4b "self.Log(LogLevel.Error, 'ISR_j_BCB3 (jump to user_start path)')"
+cpu AddHook 0x4008bc89 "self.Log(LogLevel.Error, 'ISR_EXIT (retw path)')"
+cpu AddHook 0x4008bc96 "self.Log(LogLevel.Error, 'ISR_RESTORE_CS')"
+cpu AddHook 0x400d99fe "self.Log(LogLevel.Error, 'PM: spi_slave_queue_trans returned a10=0x%x' % self.GetRegisterUnsafe(99).RawValue)"
+cpu AddHook 0x400d9a15 "self.Log(LogLevel.Error, 'PM: calling xTaskNotifyWait')"
+cpu AddHook 0x400d9a18 "self.Log(LogLevel.Error, 'PM: xTaskNotifyWait returned')"
+cpu AddHook 0x400941bb "_vListInsertEnd_guard()"
+cpu AddHook 0x40091cb8 "_xqr_diag()"
+cpu AddHook 0x40082c14 "_lock_validate()"
+cpu AddHook 0x40157d12 "_set_a10_zero()"
+cpu AddHook 0x40007d57 "_ets_printf_hook()"
+cpu AddHook 0x400920fe "_idle_tick_direct()"
+cpu AddHook 0x40091cf8 "_queue_recv_sched_check()"
+
+# Exception/panic trace hooks
+cpu AddHook 0x40080300 "self.Log(LogLevel.Error, 'KERNEL_EXC EXCCAUSE=%d EPC1=0x%x EXCVADDR=0x%x' % (self.GetRegisterUnsafe(77).RawValue, self.GetRegisterUnsafe(51).RawValue, self.GetRegisterUnsafe(83).RawValue))"
+cpu AddHook 0x400803C0 "self.Log(LogLevel.Error, 'DOUBLE_EXC EXCCAUSE=%d DEPC=0x%x EPC1=0x%x EXCVADDR=0x%x' % (self.GetRegisterUnsafe(77).RawValue, self.GetRegisterUnsafe(58).RawValue, self.GetRegisterUnsafe(51).RawValue, self.GetRegisterUnsafe(83).RawValue))"
+
+# =============================================================================
+# Cross-machine wiring: connect SpiBridge (STM32) → ESP32_SPI (ESP32)
+# =============================================================================
+python """
+_emu = Antmicro.Renode.Core.EmulationManager.Instance.CurrentEmulation
+_ok_stm32, _stm32_machine = _emu.TryGetMachineByName('stm32')
+_ok_esp32, _esp32_machine = _emu.TryGetMachineByName('esp32')
+if _ok_stm32 and _ok_esp32:
+    _bridge = [p.Peripheral for p in _stm32_machine.GetRegisteredPeripherals() if type(p.Peripheral).__name__ == 'SpiBridge'][0]
+    _esp32_spi = [p.Peripheral for p in _esp32_machine.GetRegisteredPeripherals() if type(p.Peripheral).__name__ == 'ESP32_SPI'][0]
+    _esp32_spi.SetBridge(_bridge)
+"""
+
+# Enable ESPCP polling immediately (normally enabled after Mono init)
+mach set "stm32"
+sysbus WriteByte 0x2007FFF0 1
+
+log "Meadow dual-machine ready. STM32 (NuttX) + ESP32 (Meadow firmware)."
+
+start
