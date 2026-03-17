@@ -38,11 +38,14 @@ sysbus LoadBinary @roms/esp32-v3-rom.bin 0x40000000
 # Sections: DROM @ 0x3F400020, DRAM @ 0x3FFBDB60, IRAM @ 0x40080000, IROM @ 0x400D0020
 sysbus LoadELF @/Users/bryancostanich/Git_Repos/Wilderness_Labs/Meadow.OS/esp32/build/MeadowComms.elf
 
-# Window register init trampoline — sets WINDOWBASE/WINDOWSTART/PS, then
-# uses callx8 to call_start_cpu0 (proper windowed call for overflow handling).
-# Trampoline code at 0x4009F00C, literal pool at 0x4009F000-0x4009F00B.
-sysbus LoadELF @tests/trampoline/trampoline.elf
-cpu PC 0x4009F00C
+# Window register init — use Renode register API instead of a code trampoline.
+# The original trampoline at 0x4009F000 OVERWRITES spi_slave_hal_user_start and
+# spi_slave_hal_prepare_data. Use register API instead.
+cpu SetRegister "WINDOWBASE" 0
+cpu SetRegister "WINDOWSTART" 1
+cpu SetRegister "PS" 0x00040000
+cpu SetRegister "A1" 0x3FFE5F00
+cpu PC 0x40081BBC
 
 # Set VECBASE to the firmware's exception vectors in IRAM.
 # The ESP-IDF linker places window overflow/underflow handlers at 0x40080000+:

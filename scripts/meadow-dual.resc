@@ -753,11 +753,29 @@ def _prepare_data_trace():
         # (hw at offset 32), the ISR passed the wrong pointer.
         hw0 = _bus.ReadDoubleWord(a2)
         hw32 = _bus.ReadDoubleWord(a2 + 32) if a2 + 32 < 0x40000000 else 0
-        _cpu.Log(LogLevel.Error, 'PD #%d: a2=0x%08x [a2+0]=0x%08x [a2+32]=0x%08x' %
-            (_pd_count[0], a2, hw0, hw32))
+        # Fix up a8 (register 97) — it should be [a2+0] (hw pointer) but TCG
+        # stale-global bug leaves it at the pre-rotation value (0 or wrong).
+        hw = _bus.ReadDoubleWord(a2)
+        a8 = _cpu.GetRegister(97).RawValue
+        if a8 != hw and hw >= 0x3FF00000 and hw < 0x40000000:
+            _cpu.SetRegister(97, _RV.Create(int(hw), 32))
+        _cpu.Log(LogLevel.Error, 'PD #%d: a2=0x%08x hw=0x%08x (a8 was 0x%08x)' %
+            (_pd_count[0], a2, hw, a8))
     else:
         _cpu.Log(LogLevel.Error, 'PD #%d: a2=0x%08x (invalid/init call)' % (_pd_count[0], a2))
 __builtin__._prepare_data_trace = _prepare_data_trace
+
+def _fix_pd_a8():
+    # Hook at 0x4009f031 (memw after l32i a8, a2, 0 in prepare_data).
+    # Due to TCG stale-global bug, a8 may not have the value loaded by l32i.
+    # Fix: read [a2+0] and set a8 if it's wrong.
+    a2 = _cpu.GetRegister(91).RawValue
+    a8 = _cpu.GetRegister(97).RawValue
+    if a2 >= 0x3FF00000 and a2 < 0x40000000:
+        hw = _bus.ReadDoubleWord(a2)
+        if a8 != hw and hw >= 0x3FF00000:
+            _cpu.SetRegister(97, _RV.Create(int(hw), 32))
+__builtin__._fix_pd_a8 = _fix_pd_a8
 
 def _pd_entry_check():
     # Hook at entry instruction (0x4009f028) BEFORE entry executes.
@@ -860,8 +878,8 @@ cpu AddHook 0x4008bbe4 "self.Log(LogLevel.Error, 'SPI_ISR_ENTER')"
 cpu AddHook 0x4009f000 "self.Log(LogLevel.Error, 'spi_slave_hal_user_start')"
 cpu AddHook 0x4009f028 "_pd_entry_check()"
 cpu AddHook 0x4009f02b "_prepare_data_trace()"
-cpu AddHook 0x4009f031 "self.Log(LogLevel.Error, 'PD: +09 memw (a8=0x%x)' % self.GetRegisterUnsafe(97).RawValue)"
-cpu AddHook 0x4009f034 "self.Log(LogLevel.Error, 'PD: +0c l32i slave reg')"
+cpu AddHook 0x4009f031 "_fix_pd_a8()"
+cpu AddHook 0x4009f034 "self.Log(LogLevel.Error, 'PD: +0c l32i slave reg a8=0x%x a9=0x%x' % (self.GetRegisterUnsafe(97).RawValue, self.GetRegisterUnsafe(98).RawValue))"
 cpu AddHook 0x4009f03a "self.Log(LogLevel.Error, 'PD: +12 memw (write sync_reset)')"
 cpu AddHook 0x4009f03f "self.Log(LogLevel.Error, 'PD: +17 memw (read back slave)')"
 cpu AddHook 0x4009f04a "self.Log(LogLevel.Error, 'PD: +22 memw (clear sync_reset)')"
