@@ -142,6 +142,7 @@ def main():
         "PWRMGMT_LSI_CALC_PREP_THREAD_FUNC": ("pwrmgmt_lsi_calc_prep_thread_func", ksyms),
         "ESPCP_THREAD": ("espcp_thread", ksyms),
         "MQ_RECEIVE": ("mq_receive", ksyms),
+        "USLEEP": ("usleep", ksyms),
         "LFS_FORMAT": ("lfs_format", ksyms),
         # User symbols
         "HCOM_VIA_NX_COPY_MONO_RUNTIME_TO_RAM": ("hcom_via_nx_copy_mono_runtime_to_ram", usyms),
@@ -226,6 +227,21 @@ def main():
         if lr:
             addrs["ESPCP_THREAD_LR"] = lr
             print(f"  espcp_thread LR = 0x{lr:08X}")
+            # Loop top: the `bne` after `cmp r0, #4` jumps back to the loop top.
+            # Pattern: bl mq_receive; cmp r0, #4; bne.n <loop_top>
+            # The bne target (with Thumb bit) is the loop top address.
+            for i, (iaddr, text) in enumerate(insns):
+                if iaddr == lr:
+                    # LR points to `cmp r0, #4`, next insn is `bne <loop_top>`
+                    if i + 1 < len(insns):
+                        bne_text = insns[i + 1][1]
+                        import re as _re
+                        m = _re.search(r'bne(?:\.n)?\s+([0-9a-f]+)', bne_text)
+                        if m:
+                            loop_top = int(m.group(1), 16) | 1  # add Thumb bit
+                            addrs["ESPCP_THREAD_LOOP_TOP"] = loop_top
+                            print(f"  espcp_thread loop top = 0x{loop_top:08X}")
+                    break
         else:
             print("WARNING: Could not find mq_receive call in espcp_thread", file=sys.stderr)
 

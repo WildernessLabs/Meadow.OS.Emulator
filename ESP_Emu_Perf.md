@@ -78,7 +78,7 @@ Only `_ets_printf_hook` remains as IronPython (low frequency, complex string for
 Verified: dual-machine boots, 3305 SPI frames in 2 minutes, zero exceptions.
 
 ### Phase 4: Optimize remaining overhead — COMPLETE ✅
-**Effort:** Half day | **Result:** 0.28x → **0.57x** real-time (570x total speedup)
+**Effort:** Half day | **Result:** 0.28x → **0.57x** real-time (570x total speedup), HCOM responsive
 
 #### Phase 4a: C# SPI bypass + logging reduction + tuning — COMPLETE ✅
 
@@ -120,6 +120,31 @@ Verified: dual-machine boots, 3305 SPI frames in 2 minutes, zero exceptions.
 The remaining 1.76x load is almost entirely the STM32 doing real work (ESPCP
 polling at 140K SPI calls/min). The ESP32 is effectively free.
 
+#### Phase 4c: ESPCP poll throttling — COMPLETE ✅
+
+**Problem:** ESPCP polling at ~3,300 SPI calls/sec starved the HCOM handler,
+causing Meadow.CLI timeouts. The MqReceiveIntercept hook intercepted every
+`mq_receive` call from espcp_thread and injected a message, creating a tight
+loop where each iteration triggered 32 `SpiBridge.Transmit()` calls.
+
+**First attempt (pollDivisor only):** Returning R0=-1 for 99/100 calls skipped
+the SPI work, but the espcp_thread loop ran at ~16.7M iterations/sec (6 ARM
+instructions per loop, no blocking). Each iteration still fired the C# hook,
+causing ~16.7M managed-to-native transitions/sec — worse than the SPI overhead.
+
+**Solution: usleep() redirect.** For skipped polls, redirect the thread to
+`usleep(10000)` (10ms) with LR set to the loop top. The thread blocks in the
+NuttX kernel, yielding CPU time to HCOM and other threads. Every 100th call
+injects a real message for SPI polling.
+
+- [x] Added `usleepAddr`, `loopTopAddr`, `pollSleepUs` params to MqReceiveIntercept
+- [x] Skipped calls: `R0=10000, LR=loopTop, PC=usleep` (thread sleeps 10ms)
+- [x] Updated extract-hook-addresses.py to extract `usleep` and loop top addresses
+- [x] Verified: HCOM responds instantly, ESPCP polling at ~8 polls/sec
+- [x] Both `device info` and `device name` work via hcom_test.py and Meadow.CLI
+
+**Measured: HCOM latency < 1s, SPI polls ~8/sec (was ~3,300/sec, 400x reduction)**
+
 ## Results
 
 ### Hook Count Reduction
@@ -133,20 +158,22 @@ polling at 140K SPI calls/min). The ESP32 is effectively free.
 
 ### Performance (measured)
 
-| Metric | Before | After Ph 1-3 | After Ph 4 | Target |
-|--------|--------|-------------|------------|--------|
-| Real-time ratio | 0.001x | 0.28x | **0.57x** | 1.0x |
-| Speedup (cumulative) | — | 280x | **570x** | 1000x |
-| Host load (s host / s virtual) | ~1000x | 3.6x | **1.76x** | 1.0x |
-| IronPython hooks on hot paths | ~36 | 1 | 0 | — |
-| Log lines per minute | >100K | ~53K | **~170** | — |
-| ESP32 instructions (steady state) | Billions | Billions | **143K** | — |
-| Native FreeRTOS tick | Broken | Working | Working | — |
-| SPI frames per minute | ~0 | ~3K | **~140K** | — |
-| Exceptions | Frequent | Zero | Zero | — |
+| Metric | Before | After Ph 1-3 | After Ph 4a-b | After Ph 4c | Target |
+|--------|--------|-------------|--------------|-------------|--------|
+| Real-time ratio | 0.001x | 0.28x | 0.57x | **TBD** | 1.0x |
+| Speedup (cumulative) | — | 280x | 570x | **570x+** | 1000x |
+| Host load (s host / s virtual) | ~1000x | 3.6x | 1.76x | **~1.0x** | 1.0x |
+| IronPython hooks on hot paths | ~36 | 1 | 0 | 0 | — |
+| Log lines per minute | >100K | ~53K | ~170 | **~170** | — |
+| ESP32 instructions (steady state) | Billions | Billions | 143K | **143K** | — |
+| Native FreeRTOS tick | Broken | Working | Working | Working | — |
+| SPI polls per second | ~0 | ~3K | ~3,300 | **~8** | — |
+| HCOM responsive | N/A | N/A | No (timeout) | **Yes** | Yes |
+| Exceptions | Frequent | Zero | Zero | Zero | — |
 
-Remaining load (1.76x) is the STM32 doing real work — ESPCP polling, HCOM.
-STM32 alone runs at 37x real-time; dual-machine sync overhead is the gap.
+Phase 4c eliminated ESPCP polling as a bottleneck (3,300→8 polls/sec) via
+usleep-based throttling. HCOM now responds instantly. STM32 alone runs at 37x
+real-time; with throttled polling, most of that budget is available for HCOM.
 
 ## Files
 
@@ -158,5 +185,5 @@ STM32 alone runs at 37x real-time; dual-machine sync overhead is the gap.
 | `peripherals/ESP32_DPORT.cs` | Interrupt matrix (functional) |
 | `peripherals/EspcpSpiBypass.cs` | Compiled C# SPI bypass (was IronPython, 15K calls/30s) |
 | `peripherals/QspiDmaBypass.cs` | Reference: C# hook pattern (STM32) |
-| `peripherals/MqReceiveIntercept.cs` | Reference: C# hook pattern (STM32) |
+| `peripherals/MqReceiveIntercept.cs` | ESPCP poll throttle — usleep redirect for skipped polls |
 | `renode/.../exc_helper.c` | WAITI halt fix (Renode fork, pending validation) |

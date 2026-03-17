@@ -99,7 +99,10 @@ cpu AddHook $hook_PWRMGMT_LSI_CALC_PREP_THREAD_FUNC $lsi_skip
 # Post-boot ESPCP polling via mq_receive intercept.
 # Uses compiled C# hook (MqReceiveIntercept.cs) instead of IronPython for performance.
 # Fires on ALL mq_receive calls system-wide; must be fast.
-cpu InstallMqIntercept $hook_MQ_RECEIVE $hook_ESPCP_THREAD_LR 0x2007C010 0x2007FFF0
+# pollDivisor=100: only inject a real SPI poll every 100th call from espcp_thread.
+# Skipped calls redirect to usleep(10ms) so the thread blocks in the kernel instead
+# of spinning in a tight loop that starves HCOM (~16M iterations/sec without sleep).
+cpu InstallMqIntercept $hook_MQ_RECEIVE $hook_ESPCP_THREAD_LR 0x2007C010 0x2007FFF0 100 $hook_USLEEP $hook_ESPCP_THREAD_LOOP_TOP 10000
 
 # ESPCP post-boot polling disabled during Mono init to avoid CPU starvation.
 # Enable later via: sysbus WriteByte 0x2007FFF0 1

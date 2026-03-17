@@ -4,7 +4,7 @@ Consolidated list of all known Renode bugs, emulation limitations, and firmware
 workarounds for the Meadow.OS Emulator. Each item includes severity, current
 status, and workaround details.
 
-Last updated: 2026-03-10
+Last updated: 2026-03-17
 
 ---
 
@@ -17,6 +17,7 @@ Last updated: 2026-03-10
 5. [Firmware Architectural Constraints](#5-firmware-architectural-constraints)
 6. [Build and Toolchain](#6-build-and-toolchain)
 7. [Operational / Environment](#7-operational--environment)
+8. [Performance](#8-performance)
 
 ---
 
@@ -24,7 +25,7 @@ Last updated: 2026-03-10
 
 ### 1.1 SVC-with-PRIMASK Silently Skipped
 - **Severity:** Critical
-- **Status:** FIXED (via hooks) | Upstream: `renode-upstream` U.2
+- **Status:** FIXED (via C# hook `SvcPrimaskFix.cs`) | Upstream: `renode-upstream` U.2
 - **Component:** Cortex-M7 CPU model
 - **Description:** Renode v1.16.1 silently skips `SVC` instruction execution when
   `PRIMASK=1`. Per ARMv7-M spec, this should escalate to HardFault (synchronous,
@@ -32,11 +33,9 @@ Last updated: 2026-03-10
   SVC calls (NuttX, FreeRTOS).
 - **Impact:** NuttX `arm_fullcontextrestore()` crashes — `enter_critical_section()`
   sets PRIMASK=1, SVC is skipped, execution falls through to `PANIC()`.
-- **Workaround:** IronPython hooks at all SVC instruction addresses that clear
-  PRIMASK before execution:
-  ```
-  set svc_fix "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.PRIMASK = RegisterValue.Create(0, 32)"
-  ```
+- **Workaround:** Compiled C# hook (`peripherals/SvcPrimaskFix.cs`) clears PRIMASK
+  before all SVC instruction addresses. Originally IronPython but migrated to C#
+  for performance — SVC fires thousands of times per second during Mono JIT.
   Legacy addresses: 0x08162f72, 0x081631be, 0x081631ce, 0x081631d8, 0x081631e4, 0x0817b148
 
 ### 1.2 FPU Exception Frame Mismatch
@@ -66,6 +65,27 @@ Last updated: 2026-03-10
 - **Impact:** HCOM commands that trigger a system reset (e.g., `device config wifi`)
   cause the emulator to hang.
 - **Workaround:** Avoid issuing HCOM commands that trigger SYSRESETREQ during emulation.
+
+### 1.4 Xtensa WAITI Instruction Was a No-Op
+- **Severity:** High
+- **Status:** FIXED (in WildernessLabs Renode fork + C# hook fallback)
+- **Component:** Xtensa CPU model (tlib `exc_helper.c`)
+- **Description:** Renode's Xtensa tlib implemented `WAITI` as a no-op with the
+  comment "Don't halt — without timer interrupts, EXCP_HLT pauses the machine
+  forever." This was incorrect for configurations where the CCOMPARE0 timer works
+  (which it does for ESP32 after Phase 2 fix). Without halt, the ESP32 idle task
+  burned 100% host CPU spinning through `esp_pm_impl_waiti` → WAITI → no-op loop.
+- **Impact:** ESP32 consumed ~90% of host CPU in steady state despite having no
+  real work. This was the primary bottleneck limiting dual-machine performance.
+- **Fix (fork):** Modified `HELPER(waiti)` in `exc_helper.c` to set
+  `env->wfi = 1` and `env->exception_index = EXCP_HLT`, same pattern as ARM WFI.
+  The CCOMPARE0 timer interrupt (100Hz FreeRTOS tick) wakes the CPU every 10ms.
+- **Fix (installed Renode):** C# hook `InstallIdleSkip` in
+  `peripherals/XtensaHotPathHooks.cs` sets `cpu.IsHalted = true` when the ESP32
+  PC reaches the WAITI instruction address (0x401aef8b). Works without rebuilding
+  Renode.
+- **Result:** ESP32 instructions dropped from billions to 143K in steady state
+  (99.99% reduction).
 
 ---
 
@@ -102,14 +122,16 @@ Last updated: 2026-03-10
 
 ### 2.3 QUADSPI DMA Requests Not Generated
 - **Severity:** High
-- **Status:** FIXED (via hook) | Upstream: `renode-upstream` U.6
+- **Status:** FIXED (via C# hook `QspiDmaBypass.cs`)
 - **Component:** STM32H7_QuadSPI + DMA
 - **Description:** QUADSPI controller doesn't drive DMA request lines. DMA
   transfers to/from flash never start.
 - **Impact:** LittleFS mount fails with ETIMEDOUT during flash I/O.
-- **Workaround:** Hook at `qspi_memory` entry that reads `struct qspi_meminfo_s`
-  from R1 and copies directly between flash backing memory (0x90000000) and the
-  provided buffer via `SystemBus.ReadBytes`/`WriteBytes`.
+- **Workaround:** Compiled C# hook (`peripherals/QspiDmaBypass.cs`) at
+  `qspi_memory` entry reads `struct qspi_meminfo_s` from R1 and copies directly
+  between flash backing memory (0x90000000) and the provided buffer via
+  `SystemBus.ReadBytes`/`WriteBytes`. Originally IronPython, migrated to C# for
+  performance (22K calls during assembly load).
   ```
   struct qspi_meminfo_s layout:
     +0  flags    (u8)   — QSPIMEM_WRITE = 0x04
@@ -121,15 +143,18 @@ Last updated: 2026-03-10
 
 ### 2.4 STM32SPI DMA Not Supported
 - **Severity:** High (for ESPCP)
-- **Status:** FIXED (via hook)
+- **Status:** FIXED (via C# hook `EspcpSpiBypass.cs`)
 - **Component:** STM32SPI
 - **Description:** Renode's `STM32SPI` controller doesn't support DMA
   transactions (TXDMAEN unhandled). SPI DMA transfers never complete.
 - **Impact:** ESPCP driver's `espcp_send_data_over_spi()` hangs waiting for
   DMA completion.
-- **Workaround:** Hook at `espcp_send_data_over_spi` entry (0x08147c94 legacy)
-  bypasses SPI controller entirely — reads TX buffer from memory, feeds bytes
-  through `EspcpStub.Transmit()`, writes RX bytes back to memory.
+- **Workaround:** Compiled C# hook (`peripherals/EspcpSpiBypass.cs`) at
+  `espcp_send_data_over_spi` entry bypasses SPI controller entirely — reads TX
+  buffer from memory, feeds bytes through `SpiBridge.Transmit()`, writes RX
+  bytes back to memory. Originally IronPython, migrated to C# for performance
+  (15K+ calls/30s, each generating 3x GetRegisterUnsafe deprecation warnings).
+  Legacy address: 0x08147c94. Dual-machine address: 0x081488A0.
 
 ### 2.5 QUADSPI Register Bits Unhandled
 - **Severity:** Low (cosmetic warnings)
@@ -171,36 +196,22 @@ Last updated: 2026-03-10
 
 ## 3. ESPCP / ESP32 Coprocessor
 
-### 3.1 ESPCP Control Signals Use UART, Not GPIO EXTI
+### 3.1 ESPCP Dual-Machine SPI Communication
 - **Severity:** Medium
-- **Status:** DEFERRED — mq_inject hook removed (causes crash); ESPCP thread blocks harmlessly
-- **Component:** ESPCP driver, USART3
-- **Description:** On real hardware, the ESP32 sends control signal lines via
-  USART3 (`/dev/ttyS2`): `+++MW` (message waiting), `+++SIR` (SPI ready),
-  `+++RDY` (ready), `+++RST` (reset). The user-space
-  `hcom_esp32_network_monitor_thread` reads UART and dispatches to handlers.
-  GPIO pins (PI0, PD2, PI10) exist as hardware signals but are NOT
-  interrupt-driven via EXTI.
+- **Status:** WORKING (dual-machine mode via SpiBridge)
+- **Component:** ESPCP driver, SPI2, SpiBridge
+- **Description:** In single-machine mode, ESPCP uses the `EspcpStub` C# peripheral
+  to simulate ESP32 SPI responses. In dual-machine mode (STM32 + ESP32), the real
+  ESP32 firmware runs on an emulated Xtensa CPU. SPI communication is bridged via
+  `SpiBridge.cs` which connects the STM32's SPI2 to the ESP32's SPI slave.
+- **Control signals:** On real hardware, ESP32 sends UART signals (`+++MW`, `+++SIR`,
+  `+++RDY`). In dual-machine mode, GPIO pins (PI0=MessageWaiting, PD2=SPI Ready,
+  PI10=Ready) are connected directly between machines.
+- **MqReceiveIntercept:** C# hook (`peripherals/MqReceiveIntercept.cs`) at
+  `mq_receive` (0x08157130) continuously injects `send_response` messages into the
+  ESPCP thread's message queue, driving SPI polling. See §8.1 for performance impact.
 - **Note:** `mint_config_interrupt` is for managed code GPIO interrupts
   (STM32→Mono/.NET), NOT for ESPCP (confirmed by Wilderness Labs engineer).
-- **Impact:** Without UART signaling emulation, the ESPCP thread blocks on
-  `mq_receive` waiting for a message that never arrives. WiFi/BT/network
-  operations are unavailable. HCOM device info works fine without it.
-- **Previous approach (removed):** Hook at `mq_receive` (0x0814de46 legacy)
-  injected a fake "transport/send_response" message. This caused a Usage Fault
-  (UNDEFINSTR at PC 0x0814de5f) in EspcpMainThread. Root cause: NOT the FPU
-  frame mismatch (legacy build uses 32-byte standard frames). Likely a stack
-  or register corruption issue within `espcp_get_message` when driven by the
-  injected message. The crash is reproducible and occurs regardless of which
-  throttle/re-queue strategy is used.
-- **Current state:** ESPCP init hooks remain (mono bypass, force init, SPI
-  bypass, SPI lock skip). The thread starts, blocks on mq_receive harmlessly,
-  and doesn't consume CPU. HCOM works.
-- **Future fix options:**
-  1. Emulate ESP32 UART output on virtual USART3 (`+++MW\n`) so the firmware's
-     native monitor thread triggers naturally (avoids mq_receive injection entirely)
-  2. Debug the mq_inject crash root cause (PC 0x0814de5f is between instruction
-     boundaries — stack corruption or misaligned return address)
 
 ### 3.2 ESPCP SPI Lock Deadlock
 - **Severity:** High
@@ -227,17 +238,6 @@ Last updated: 2026-03-10
 - **Description:** Firmware gates ESP32 operations behind a Mono runtime state
   check. Since Mono isn't flashed in emulation, this blocks ESPCP HCOM commands.
 - **Workaround:** Hook at 0x08057bee returns 0 (not running) to bypass the check.
-
-### 3.5 ESPCP Continuous Polling CPU Burn (Resolved)
-- **Severity:** N/A (no longer applicable)
-- **Status:** RESOLVED — mq_inject removed, thread blocks on mq_receive
-- **Component:** ESPCP thread
-- **Description:** When the mq_inject hook was active, the ESPCP thread
-  continuously re-queued `send_response` messages via `espcp_add_message_to_queue`
-  (0x0814dfec), creating a tight polling loop that starved HCOM.
-- **Resolution:** With mq_inject removed, the thread blocks on `mq_receive`
-  and consumes zero CPU. Will need to be revisited if/when full ESPCP SPI
-  handshake emulation is re-enabled.
 
 ---
 
@@ -330,7 +330,7 @@ Last updated: 2026-03-10
 ### 5.3 Hook Addresses Are Binary-Specific
 - **Severity:** Medium
 - **Status:** KNOWN | Future automation
-- **Component:** All IronPython hooks
+- **Component:** All hooks (IronPython and C#)
 - **Description:** All hook addresses (SVC, GPIO version, QSPI, ESPCP, etc.)
   are hardcoded in `.resc` scripts. When the NuttX kernel is rebuilt, all
   addresses must be re-extracted:
@@ -390,12 +390,16 @@ Last updated: 2026-03-10
 
 ### 7.2 GetRegisterUnsafe API Deprecated
 - **Severity:** Low
-- **Status:** KNOWN
+- **Status:** MOSTLY MITIGATED
 - **Component:** IronPython hooks
 - **Description:** `cpu.GetRegisterUnsafe(N)` generates a deprecation warning
   pointing to `GetRegister`. All hooks still function correctly.
-- **Workaround:** Migrate to `GetRegister` API when convenient. Named properties
-  (`cpu.PC`, `cpu.LR`, `cpu.SP`, `cpu.PRIMASK`) work without warnings.
+- **Mitigation:** All hot-path hooks have been migrated from IronPython to compiled
+  C# (SvcPrimaskFix, QspiDmaBypass, MqReceiveIntercept, EspcpSpiBypass,
+  XtensaHotPathHooks). Only boot-time and rare IronPython hooks remain, where the
+  deprecation warnings have negligible performance impact.
+- **Note:** Named properties (`cpu.PC`, `cpu.LR`, `cpu.SP`, `cpu.PRIMASK`) work
+  without warnings in both IronPython and C#.
 
 ### 7.3 IronPython Type Constraints
 - **Severity:** Low
@@ -426,3 +430,89 @@ Last updated: 2026-03-10
 - **Note:** `cpu.LR` can also return `None` in certain hook contexts, so avoid
   patterns like `cpu.SetRegisterUnsafe(15, cpu.LR) if flag else None`. Instead,
   read LR explicitly: `lr = cpu.GetRegisterUnsafe(14).RawValue`.
+
+---
+
+## 8. Performance
+
+### 8.1 ESPCP Polling Overhead in Dual-Machine Mode
+- **Severity:** High
+- **Status:** FIXED (via usleep-based throttling)
+- **Component:** MqReceiveIntercept, EspcpSpiBypass, SpiBridge
+- **Description:** In dual-machine mode, `MqReceiveIntercept` was continuously
+  injecting `send_response` messages into the ESPCP thread's message queue,
+  driving ~3,300 SPI polls per second. Each poll triggered 32
+  `SpiBridge.Transmit()` calls — totaling ~75K managed method calls per second
+  when the ESP32 had nothing to send. This starved HCOM, causing Meadow.CLI
+  timeouts.
+- **Root cause:** The espcp_thread loop (mq_receive → process → loop) ran at
+  full instruction speed. Simple counter-based throttling (returning R0=-1 for
+  skipped calls) still caused ~16.7M hook invocations/sec as the thread spun
+  through 6-instruction loop iterations without blocking.
+- **Fix:** `MqReceiveIntercept` now redirects skipped poll calls to
+  `usleep(10ms)` instead of returning an error. The thread blocks in the NuttX
+  kernel, yielding CPU time to HCOM. Every 100th call (`pollDivisor=100`)
+  injects a real message for SPI polling.
+  ```
+  cpu InstallMqIntercept <mq_receive> <espcpLR> 0x2007C010 0x2007FFF0 100 <usleep> <loopTop> 10000
+  ```
+- **Result:** SPI polls dropped from ~3,300/sec to ~8/sec (400x reduction).
+  HCOM responds instantly. Both `device info` and `device name` verified via
+  hcom_test.py.
+
+### 8.2 IronPython Hook Overhead
+- **Severity:** High
+- **Status:** RESOLVED (via migration to C#)
+- **Component:** IronPython scripting engine
+- **Description:** IronPython hooks are 10-100x slower than compiled C# hooks.
+  The ESP32 initially had ~46 IronPython hooks, many on hot paths (every SPI
+  transaction, context switch, lock operation, list insertion). This dragged
+  dual-machine performance to ~0.001x real-time.
+- **Resolution:** All hot-path hooks migrated to compiled C# across four phases:
+  - Phase 1: Removed 35 diagnostic trace hooks (dead code)
+  - Phase 2: Removed `_idle_tick_direct` hack (native CCOMPARE0 timer works)
+  - Phase 3: Migrated 8 functional guards to `XtensaHotPathHooks.cs`
+  - Phase 4: Migrated `espcp_spi_bypass` to `EspcpSpiBypass.cs`, added idle halt
+  - Only 3 IronPython hooks remain: `ets_printf` + 2 exception traces (all rare)
+- **Result:** 570x speedup (0.001x → 0.57x). See [ESP_Emu_Perf.md](ESP_Emu_Perf.md).
+
+### 8.3 Renode Quantum and Block Size Tuning
+- **Severity:** Medium
+- **Status:** TUNED
+- **Component:** Renode time domain configuration
+- **Description:** Renode's default settings (100μs quantum, 2047 MaximumBlockSize)
+  impose high synchronization and translation overhead for dual-machine emulation.
+- **Tuning applied in `meadow-dual.resc`:**
+  ```
+  emulation SetGlobalQuantum "00:00:00.010000"   # 10ms (was 100μs default)
+  cpu MaximumBlockSize 10000                       # (was 2047 default)
+  cpu ChainingEnabled true                         # TB chaining for longer runs
+  ```
+- **Impact:** Quantum increase from 100μs → 10ms reduces sync boundary overhead
+  by ~100x. Larger block size improves translation block caching. Together these
+  contributed to the Phase 4a improvement (0.28x → 0.45x).
+
+### 8.4 SpiBridge Log Spam
+- **Severity:** Medium
+- **Status:** FIXED
+- **Component:** SpiBridge.cs logging
+- **Description:** `SpiBridge` logged every TX frame at `Warning` level, generating
+  52K+ log lines per minute. Each log call involved string formatting with 6
+  parameters. Renode's logging infrastructure serializes log calls even when
+  the output is suppressed by log level filters.
+- **Fix:** Downgraded TX frame logging from `LogLevel.Warning` to `LogLevel.Debug`.
+  Reduced log output from ~53K lines/min to ~170 lines/min.
+
+### 8.5 Fork Renode (.NET 8) Slower Than Installed (Mono)
+- **Severity:** Low
+- **Status:** IDENTIFIED | Not investigated
+- **Component:** Renode runtime
+- **Description:** The WildernessLabs Renode fork (built as .NET 8 native arm64
+  binary) shows ~3.2x host load vs ~2.2x for the installed Mono-based Renode
+  v1.16.1, for the same dual-machine workload. The .NET 8 build should
+  theoretically be faster.
+- **Possible causes:** Different tlib compilation flags, .NET 8 GC behavior,
+  missing AOT optimizations, or runtime overhead differences.
+- **Impact:** Using the installed Mono Renode is ~45% faster for now. The fork
+  is needed only for tlib fixes (WAITI halt, ENTRY TCG temp allocation) that
+  haven't been applied to the installed version.

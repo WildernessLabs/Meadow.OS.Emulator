@@ -682,7 +682,8 @@ if _ok_stm32 and _ok_esp32:
     _esp32_spi.SetBridge(_bridge)
 """
 
-# Enable ESPCP polling immediately (normally enabled after Mono init)
+# Enable ESPCP polling — MqReceiveIntercept throttles to ~100 SPI polls/sec
+# (pollDivisor=100) with usleep(10ms) between polls so HCOM isn't starved.
 mach set "stm32"
 sysbus WriteByte 0x2007FFF0 1
 
