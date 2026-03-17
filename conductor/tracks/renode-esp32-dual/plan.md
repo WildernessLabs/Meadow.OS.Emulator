@@ -174,7 +174,9 @@ Proper fix needs TCG-level change to skip unmodified globals in gen_exit_tb.
 ### Meadow ESP32 Firmware
 - ESP-IDF 4.2.4, SPI on VSPI_HOST (SPI3), Mode 3
 - ESPCP: 27-byte header + payload, max 4092 bytes per SPI frame
-- Source: `Meadow.OS/esp32/`, also `Meadow-ESP32/` (github.com/WildernessLabs/Meadow-ESP32)
+- Source: `Meadow-ESP32/` repo (github.com/WildernessLabs/Meadow-ESP32) — legacy standalone
+- Build: `cd Meadow-ESP32 && source ~/esp/esp-idf-v4.2.4/export.sh && ./build.sh`
+- Output: `Meadow-ESP32/build/MeadowComms.elf`
 
 ### Key Paths
 - Renode fork: `/Users/bryancostanich/Git_Repos/Wilderness_Labs/renode/`
