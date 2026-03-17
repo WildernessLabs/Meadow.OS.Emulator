@@ -23,6 +23,7 @@ include @peripherals/ESP32_TimerGroup.cs
 include @peripherals/ESP32_DPORT.cs
 include @peripherals/ESP32_SPI.cs
 include @peripherals/XtensaHotPathHooks.cs
+include @peripherals/EspcpSpiBypass.cs
 
 # =============================================================================
 # Machine 1: STM32 F7 — NuttX Meadow Legacy OS
@@ -79,12 +80,9 @@ connector Connect sysbus.uart5 esp32ctrl
 include @build/legacy/hooks.resc
 include @build/legacy/sdram-patches.resc
 
-# Override espcp_spi_bypass: use SpiBridge instead of EspcpStub.
-# AddHook stacks, so both hooks will fire. The EspcpStub one will crash but we catch it.
-# Better approach: use cpu RemoveHooksAt to clear the old hook, then add ours.
+# Override espcp_spi_bypass: use compiled C# hook targeting SpiBridge instead of EspcpStub.
 cpu RemoveHooksAt 0x081488A0
-set espcp_spi_bypass_dual "from System import Array, Byte; stub = machine['sysbus.spi2.spiBridge']; tx = cpu.GetRegisterUnsafe(0).RawValue; rx = cpu.GetRegisterUnsafe(1).RawValue; length = int(cpu.GetRegisterUnsafe(2).RawValue); txdata = machine.SystemBus.ReadBytes(tx, length) if tx else Array.CreateInstance(Byte, length); rxarr = Array.CreateInstance(Byte, length); [rxarr.__setitem__(i, stub.Transmit(txdata[i])) for i in range(length)]; stub.FinishTransmission(); machine.SystemBus.WriteBytes(rxarr, rx) if rx else None; cpu.PC = cpu.LR"
-cpu AddHook 0x081488A0 $espcp_spi_bypass_dual
+cpu InstallEspcpSpiBypass 0x081488A0
 
 # =============================================================================
 # Machine 2: ESP32 — Meadow ESP-IDF Firmware
@@ -92,11 +90,10 @@ cpu AddHook 0x081488A0 $espcp_spi_bypass_dual
 mach create "esp32"
 machine LoadPlatformDescription @platforms/meadow-esp32.repl
 
-# Reduce ESP32 MIPS relative to STM32 (100 MIPS) so the STM32 gets enough
-# virtual time to boot NuttX and run the HCOM handler. Without this ratio,
-# the ESP32's heavy Python hooks (window overflow workarounds, SPI fixups)
-# starve the STM32 of execution time.
-cpu PerformanceInMips 10
+# ESP32 MIPS — match STM32 (100 MIPS). The original 10 MIPS throttle was needed
+# when IronPython hooks were on hot paths; now that hooks are compiled C#, both
+# CPUs can run at equal budget without starvation.
+cpu PerformanceInMips 100
 
 using sysbus
 
@@ -684,6 +681,16 @@ if _ok_stm32 and _ok_esp32:
 # Enable ESPCP polling immediately (normally enabled after Mono init)
 mach set "stm32"
 sysbus WriteByte 0x2007FFF0 1
+
+# Performance tuning: increase quantum (10ms vs 100μs default) and max TB size
+# to reduce synchronization overhead and improve translation block caching.
+emulation SetGlobalQuantum "00:00:00.010000"
+mach set "stm32"
+cpu MaximumBlockSize 10000
+cpu ChainingEnabled true
+mach set "esp32"
+cpu MaximumBlockSize 10000
+cpu ChainingEnabled true
 
 log "Meadow dual-machine ready. STM32 (NuttX) + ESP32 (Meadow firmware)."
 

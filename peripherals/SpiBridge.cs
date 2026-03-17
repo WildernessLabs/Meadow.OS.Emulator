@@ -66,7 +66,7 @@ namespace Antmicro.Renode.Peripherals.SPI
                 uint func = (uint)(rxBuffer[11] | (rxBuffer[12] << 8) | (rxBuffer[13] << 16) | (rxBuffer[14] << 24));
                 uint msgId = (uint)(rxBuffer[19] | (rxBuffer[20] << 8) | (rxBuffer[21] << 16) | (rxBuffer[22] << 24));
                 uint payloadLen = (uint)(rxBuffer[23] | (rxBuffer[24] << 8) | (rxBuffer[25] << 16) | (rxBuffer[26] << 24));
-                this.Log(LogLevel.Warning,
+                this.Log(LogLevel.Debug,
                     "SpiBridge: STM32 TX frame ({0}B) type=0x{1:X2} iface={2} func={3} msgId=0x{4:X8} payloadLen={5}",
                     frameLength, msgType, iface, func, msgId, payloadLen);
             }
