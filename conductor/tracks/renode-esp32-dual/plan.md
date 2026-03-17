@@ -1,7 +1,7 @@
 # Plan: Dual-Machine ESP32 Emulation
 
 ## Track ID: `renode-esp32-dual`
-## Status: `in-progress` (Phase 1 ✅, retw fix ✅, ESP32 boots ✅, dual-machine running ✅, window crash fixed ✅, Phase 2.2 — SPI frame tracing next)
+## Status: `in-progress` (Phase 1 ✅, retw fix ✅, ESP32 boots ✅, dual-machine running ✅, window crash fixed ✅, **ESPCP frames flowing ✅**, Phase 2.2 — handshake validation next)
 ## Repo: `Meadow.OS.Emulator` (sibling to `Meadow.OS/`)
 
 ---
@@ -424,15 +424,18 @@ machines together and tracing the interaction to find the minimal bridge point.
     reaches `spi_slave_hal_user_start`, so `cmd.usr` is never set, and ESP32_SPI never
     injects frames from SpiBridge.
 
-- [ ] **Fix spi_slave_hal_prepare_data parameter corruption** — the ISR passes the correct
-  HAL context (a10=driver+32) via call8, but after entry with callinc=2, the callee sees
-  a2=driver (NOT driver+32). Root cause: gen_exit_tb writes stale pre-rotation TCG global
-  values over post-rotation values set by sync_windowbase. Fixed CALLINC deposit
-  (tcg_const_i32 → local temp, `9c77ec0b`), but the stale-global issue remains. Options:
-  (a) Move window rotation into HELPER(entry) so it happens in the same helper call as
-      the register setup, before TCG globals are written back
-  (b) Add TCG global invalidation after gen_helper_sync_windowbase
-  (c) Use cpu_loop_exit in sync_windowbase to prevent gen_exit_tb from running
+- [x] **ESPCP frames flowing end-to-end** — RESOLVED (2026-03-16).
+  Three fixes enabled full SPI bridge frame flow:
+  (a) **Trampoline relocation**: the window init trampoline ELF at 0x4009F000 was
+      overwriting spi_slave_hal_user_start and prepare_data. Replaced with Renode
+      register API (SetRegister).
+  (b) **a8 fixup at prepare_data memw** (0x4009f031): TCG stale-global bug causes the
+      hw pointer loaded by l32i to be lost. Python hook reads [a2+0] and sets a8.
+  (c) **a2 fixup at prepare_data entry** (0x4009f02b): same stale-global issue for the
+      HAL context pointer.
+  Result: prepare_data completes, ISR reaches user_start, cmd.usr set, ESP32_SPI
+  injects frames from SpiBridge. Verified: "Injecting frame from STM32 (32 bytes)"
+  messages confirm ESPCP polling frames flowing through the full chain.
 - [ ] Test: ESPCP boot handshake (STM32 ↔ real ESP32 firmware)
 - [ ] Test: STM32 sends GetConfiguration → firmware handler processes → response returns
 - [ ] Verify frame integrity (CRC checks pass on both sides)
