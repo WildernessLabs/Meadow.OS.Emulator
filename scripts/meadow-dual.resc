@@ -29,6 +29,11 @@ include @peripherals/ESP32_SPI.cs
 mach create "stm32"
 machine LoadPlatformDescription @platforms/meadow-f7-dual.repl
 
+# STM32 needs enough virtual time to boot NuttX and start the HCOM handler.
+# Without this, the ESP32 machine consumes all execution time (heavy Python
+# hooks for window overflow workarounds) and the STM32 barely advances.
+cpu PerformanceInMips 100
+
 using sysbus
 
 # RCC peripheral with proper clock ready bit handling
@@ -85,6 +90,12 @@ cpu AddHook 0x081488A0 $espcp_spi_bypass_dual
 # =============================================================================
 mach create "esp32"
 machine LoadPlatformDescription @platforms/meadow-esp32.repl
+
+# Reduce ESP32 MIPS relative to STM32 (100 MIPS) so the STM32 gets enough
+# virtual time to boot NuttX and run the HCOM handler. Without this ratio,
+# the ESP32's heavy Python hooks (window overflow workarounds, SPI fixups)
+# starve the STM32 of execution time.
+cpu PerformanceInMips 10
 
 using sysbus
 
