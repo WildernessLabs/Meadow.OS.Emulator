@@ -150,6 +150,7 @@ def main():
         "HCOM_HOST_WATCHDOG_TIMEOUT_EXPIRED": ("hcom_host_watchdog_timeout_expired", usyms),
         "HCOM_MONO_CTRL_START_MONO_MAIN": ("hcom_mono_ctrl_start_mono_main", usyms),
         "HCOM_MONO_CTRL_IS_MONO_ENABLED": ("hcom_mono_ctrl_is_mono_enabled", usyms),
+        "HCOM_HOST_RECV_PTHREAD": ("hcom_host_recv_pthread", usyms),
     }
 
     addrs: dict[str, int] = {}
@@ -288,6 +289,25 @@ def main():
                                 break
                         break
                 break
+
+    # -------------------------------------------------------------------------
+    # HCOM_RECV_READ — `bl read` call site in hcom_host_recv_pthread
+    # Pattern: ldr r1, [r4, #20]; bl read; subs r5, r0, #0
+    # Hook at bl, return to subs (instruction after bl)
+    # -------------------------------------------------------------------------
+    if "HCOM_HOST_RECV_PTHREAD" in addrs:
+        insns = objdump_function(user_elf, addrs["HCOM_HOST_RECV_PTHREAD"], 0x200)
+        read_addr = find_insn_at(insns, r'bl\s+[0-9a-f]+\s+<read>')
+        if read_addr:
+            addrs["HCOM_RECV_READ"] = read_addr
+            # Return address is the next instruction after the bl
+            for i, (iaddr, text) in enumerate(insns):
+                if iaddr == read_addr and i + 1 < len(insns):
+                    addrs["HCOM_RECV_READ_RETURN"] = insns[i + 1][0]
+                    break
+            print(f"  hcom_recv_read at 0x{read_addr:08X}")
+        else:
+            print("WARNING: Could not find read() call in hcom_host_recv_pthread", file=sys.stderr)
 
     # -------------------------------------------------------------------------
     # SDRAM string patches — find /usr/local/lib and /usr/local/etc in mono binary

@@ -128,3 +128,10 @@ cpu AddHook $hook_HCOM_HOST_WATCHDOG_TIMEOUT_EXPIRED $wdog_skip
 # Uncomment if loading littlefs.bin above:
 # set lfs_format_skip "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
 # cpu AddHook $hook_LFS_FORMAT $lfs_format_skip
+
+# UART RX Bypass — intercepts the HCOM receive thread's read() syscall and copies
+# data directly from the UART model's receive queue to the firmware's read buffer,
+# bypassing the per-byte interrupt-driven serial driver path. Critical for bulk
+# file transfers under emulation where the interrupt overhead makes transfers
+# ~100x slower than real hardware.
+cpu InstallUartRxBypass $hook_HCOM_RECV_READ $hook_HCOM_RECV_READ_RETURN
