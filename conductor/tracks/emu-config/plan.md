@@ -18,9 +18,12 @@
   PyYAML are already required for `extract-hook-addresses.py`. The helper
   script sources into `run.sh` and build scripts.
 - [ ] Create `emulator.config.yaml` with defaults (legacy, F7FeatherV2, stub, headless)
+      and commented-out alternatives for each setting
+- [ ] Create example profile `emulator.config.dual.yaml` (legacy, F7FeatherV2, dual-machine)
 - [ ] Create `scripts/read-config.sh` that exports `EMU_OS`, `EMU_BOARD`,
       `EMU_COPROCESSOR`, `EMU_HCOM_PORT`, `EMU_MONITOR_PORT`, etc.
-- [ ] Verify parser works with default config
+      Accepts optional config path arg: `source scripts/read-config.sh [path]`
+- [ ] Verify parser works with default config and with named profile
 
 ### E.2 — Update run.sh to read config
 - **What:** `run.sh` sources `read-config.sh`, uses config values for defaults,
@@ -34,8 +37,9 @@
   - `os=meadow-os, coprocessor=stub` → `meadow-os-headless`
   - `headless=false` → drop `-headless` suffix
 - [ ] CLI args (`--legacy`, `--esp32`, `--port=N`) override config values
-- [ ] `--config=path` arg to specify alternate config file
+- [ ] `--config=path` arg to specify alternate config file (e.g., `--config emulator.config.dual.yaml`)
 - [ ] Verify: `./run.sh` with default config matches current `./run.sh --legacy`
+- [ ] Verify: `./run.sh --config emulator.config.dual.yaml` selects dual-machine mode
 
 ### E.3 — Update build scripts to read config
 - **What:** Build scripts read `os` and `build.defconfig` from config instead
@@ -100,3 +104,5 @@
 | 2026-03-18 | YAML format (not TOML/JSON) | Matches Meadow ecosystem (meadow.config.yaml) and is human-editable with comments |
 | 2026-03-18 | Config at repo root | Easy to find, matches convention (like docker-compose.yaml) |
 | 2026-03-18 | Shell helper using python3 | python3 + PyYAML already required; avoids adding yq/jq dependency |
+| 2026-03-18 | Check in config, commented alternatives | Users get working defaults on clone; uncomment to switch settings |
+| 2026-03-18 | Multiple named profiles via `--config` | Quick switching between configs without editing the default file |

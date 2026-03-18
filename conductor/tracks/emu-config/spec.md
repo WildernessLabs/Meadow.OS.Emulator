@@ -84,9 +84,22 @@ debug:
 - [ ] Changing `coprocessor: dual-machine` selects the dual-machine `.resc` script
 - [ ] Changing `os: meadow-os` selects the new OS build + script
 
-## Open Questions
-- Should the config live at repo root (`emulator.config.yaml`) or in a config dir?
-- Should there be a `emulator.config.yaml.example` checked in, with the actual
-  config gitignored (like `.env` pattern)? Or check in the config as the default?
-- Do we need profile support (e.g., `emulator.config.legacy.yaml`,
-  `emulator.config.dual.yaml`) for quick switching?
+## Decisions
+- **Checked in, not gitignored.** The default config is committed to the repo so
+  cloning gives a working setup out of the box.
+- **Commented alternatives.** Each setting shows alternate values as commented
+  lines that users can uncomment to switch:
+  ```yaml
+  os: legacy
+  # os: meadow-os
+
+  board: F7FeatherV2
+  # board: F7CoreComputeV2
+  ```
+- **Multiple config profiles.** Named configs like `emulator.config.dual.yaml`
+  can be passed to build/run scripts:
+  ```bash
+  ./run.sh --config emulator.config.dual.yaml
+  ./build-meadow.os_legacy-emulated.sh --config emulator.config.dual.yaml
+  ```
+  Default: `emulator.config.yaml` (no arg needed).
