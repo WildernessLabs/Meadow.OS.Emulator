@@ -62,6 +62,10 @@ if [ -f ".config" ]; then
     $MAKE distclean 2>/dev/null || true
 fi
 
+# NuttX distclean doesn't clean board config subdirectory objects.
+# Force-remove them so stale .o files don't prevent version injection from taking effect.
+find "$NUTTX_DIR/configs/stm32f777zit6-meadow/src" -name "*.o" -delete 2>/dev/null || true
+
 # Legacy NuttX uses slash separator: stm32f777zit6-meadow/mono
 ./tools/configure.sh "stm32f777zit6-meadow/$CONFIG"
 
@@ -126,8 +130,9 @@ fi
 EMU_VERSION_BUILD=${EMU_VERSION_BUILD:-0}
 echo "--- Version: $EMU_VERSION_MAJOR.$EMU_VERSION_MINOR.$EMU_VERSION_REVISION.$EMU_VERSION_BUILD ---"
 
-# Compute git hash for version injection
-GIT_HASH=$(git -C "$MEADOW_DIR" rev-parse --short HEAD 2>/dev/null || echo "00000000")
+# Compute git hash for version injection (truncate to 8 hex chars for uint32_t)
+GIT_HASH=$(git -C "$MEADOW_DIR" rev-parse --short=8 HEAD 2>/dev/null || echo "00000000")
+GIT_HASH="${GIT_HASH:0:8}"
 
 # Inject version placeholders in hcom_nuttx_shared.h (same approach as Meadow/scripts/version_methods.sh)
 SHARED_HEADER="$NUTTX_DIR/include/meadow/hcom_nuttx_shared.h"
@@ -206,7 +211,10 @@ echo "--- Building (PROTECTED mode, pass 2) ---"
 $MAKE -j1 pass2
 
 echo "--- Building pass1 dependencies ---"
-$MAKE $JOBS pass1deps
+# pass1deps rebuilds user libs (including libapps.a with hcom_main).
+# Use -j1 to avoid ar race conditions — multiple apps archiving into libapps.a
+# concurrently can lose members (e.g., hcom_startup_manager.o defining hcom_main).
+$MAKE -j1 pass1deps
 
 echo "--- Building (PROTECTED mode, pass 1) ---"
 $MAKE $JOBS pass1

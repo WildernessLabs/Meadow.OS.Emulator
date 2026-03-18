@@ -91,10 +91,10 @@ def read_literal_pool(elf: str, pool_addr: int) -> int:
 def find_literal_pool_ref(insns: list[tuple[int, str]], elf: str, reg: str = "r5") -> int | None:
     """Find the address loaded via the first ldr rN, [pc, ...] and follow the literal pool."""
     for addr, text in insns:
-        m = re.match(rf'\s*[0-9a-f]+\s+ldr\s+{reg},\s+\[pc,\s+#\d+\]\s+@\s+\(([0-9a-f]+)\s+', text)
+        m = re.match(rf'\s*[0-9a-f]+\s+ldr\s+{reg},\s+\[pc,\s+#\d+\]\s+[@;]\s+\(?([0-9a-f]+)[\s<]', text)
         if not m:
             # Try matching just the instruction text (without leading address)
-            m = re.search(rf'ldr\s+{reg},\s+\[pc,\s+#\d+\]\s+@\s+\(?([0-9a-f]+)', text)
+            m = re.search(rf'ldr\s+{reg},\s+\[pc,\s+#\d+\]\s+[@;]\s+\(?([0-9a-f]+)', text)
         if m:
             pool_addr = int(m.group(1), 16)
             return read_literal_pool(elf, pool_addr)
@@ -231,7 +231,7 @@ def main():
             # Pattern: bl mq_receive; cmp r0, #4; bne.n <loop_top>
             # The bne target (with Thumb bit) is the loop top address.
             for i, (iaddr, text) in enumerate(insns):
-                if iaddr == lr:
+                if iaddr == (lr & ~1):  # strip Thumb bit for comparison
                     # LR points to `cmp r0, #4`, next insn is `bne <loop_top>`
                     if i + 1 < len(insns):
                         bne_text = insns[i + 1][1]

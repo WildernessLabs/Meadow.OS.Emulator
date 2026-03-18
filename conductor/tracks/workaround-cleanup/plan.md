@@ -66,12 +66,26 @@
 - **Why:** Current binary was built before version injection was added to the build
   script. `hcom_nx_config_init` zeroes the version fields, causing blank OSVersion
   and RuntimeVersion in `device info`.
-- **Blocker:** Build script was failing with exit code 2 — needs diagnosis.
-- [ ] Diagnose build failure (capture error output from `build-meadow.os_legacy-emulated.sh`)
-- [ ] Fix build issue
-- [ ] Rebuild successfully
-- [ ] Verify `device info` shows version 2.5.7.x via Meadow.CLI
-- [ ] Remove fw_ver_fix hook from `meadow-legacy-hooks.resc` if present (already reverted)
+- **Status:** COMPLETE
+- **Issues found and fixed:**
+  1. **ar race condition:** `pass1deps` ran with `-jN`, causing concurrent apps to
+     corrupt `libapps.a` (missing `hcom_startup_manager.o` → undefined `hcom_main`).
+     Fix: run `pass1deps` with `-j1`.
+  2. **Stale board .o files:** `make distclean` doesn't clean board config subdirectory
+     objects (`configs/.../src/hcom_nx/*.o`). Stale objects from a previous build (with
+     zeroed version defines) were reused. Fix: `find ... -name "*.o" -delete` before build.
+  3. **Git hash overflow:** `git rev-parse --short HEAD` returned 11 hex chars (44 bits),
+     exceeding `uint32_t`. Fix: truncate to 8 hex chars with `--short=8`.
+  4. **Extract script Thumb bit bug:** `espcp_thread_loop_top` wasn't found because
+     LR (with Thumb bit set) was compared against disassembly addresses (even). Fix:
+     `if iaddr == (lr & ~1)`.
+  5. **Extract script objdump comment format:** ARM GCC 10.3 uses `;` for literal pool
+     comments while GCC 15.2 uses `@`. Fix: match both `[@;]` in regex.
+- [x] Diagnose build failure
+- [x] Fix build issue (5 issues found)
+- [x] Rebuild successfully (3/3 consecutive builds pass)
+- [x] Verify `device info` shows version 2.5.7.0 via hcom_test.py
+- [x] No fw_ver_fix hook needed (version compiled in)
 
 ## W.6 — Verify/Deploy Mono Runtime Check Bypass
 - **KnownIssues ref:** §3.4
