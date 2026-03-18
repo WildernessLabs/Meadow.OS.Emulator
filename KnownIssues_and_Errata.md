@@ -25,7 +25,7 @@ Last updated: 2026-03-17
 
 ### 1.1 SVC-with-PRIMASK Silently Skipped
 - **Severity:** Critical
-- **Status:** FIXED (via C# hook `SvcPrimaskFix.cs`) | Upstream: `renode-upstream` U.2
+- **Status:** FIXED (in Renode fork) | Upstream: `renode-upstream` U.2
 - **Component:** Cortex-M7 CPU model
 - **Description:** Renode v1.16.1 silently skips `SVC` instruction execution when
   `PRIMASK=1`. Per ARMv7-M spec, this should escalate to HardFault (synchronous,
@@ -33,14 +33,16 @@ Last updated: 2026-03-17
   SVC calls (NuttX, FreeRTOS).
 - **Impact:** NuttX `arm_fullcontextrestore()` crashes — `enter_critical_section()`
   sets PRIMASK=1, SVC is skipped, execution falls through to `PANIC()`.
-- **Workaround:** Compiled C# hook (`peripherals/SvcPrimaskFix.cs`) clears PRIMASK
-  before all SVC instruction addresses. Originally IronPython but migrated to C#
-  for performance — SVC fires thousands of times per second during Mono JIT.
-  Legacy addresses: 0x08162f72, 0x081631be, 0x081631ce, 0x081631d8, 0x081631e4, 0x0817b148
+- **Fix:** Patched in WildernessLabs Renode fork (`bryancostanich/renode`,
+  branch `meadow-emulator-fixes`, commit `d18c1f6fe`). NVIC now correctly
+  handles SVC when PRIMASK=1.
+- **Cleanup:** `peripherals/SvcPrimaskFix.cs` is still included in `.resc` files
+  but `InstallSvcFix` is never called — the hook is dead code. The `include`
+  lines and `.cs` file can be removed.
 
 ### 1.2 FPU Exception Frame Mismatch
-- **Severity:** Low (legacy build unaffected; new OS build has runtime workaround)
-- **Status:** IDENTIFIED | Upstream: `renode-upstream` U.4
+- **Severity:** Low (legacy build unaffected; new OS build not yet impacted)
+- **Status:** IDENTIFIED, WORKAROUND NOT DEPLOYED | Upstream: `renode-upstream` U.4
 - **Component:** Cortex-M7 exception entry
 - **Description:** Renode exception entry always uses standard frames (32 bytes,
   `EXC_RETURN` bit4=1) even when FPU is active (`CONTROL.FPCA=1`). Should use
@@ -50,8 +52,8 @@ Last updated: 2026-03-17
   crashes because MSP restore uses the hardware frame.
 - **Legacy build:** Unaffected — legacy `exception_common` uses `add.w r2, r2, #32`
   (standard frame), matching Renode's behavior.
-- **Workaround:** `scripts/pydev/fix_fpu_frame.py` corrects REG_R13 at runtime for
-  the new OS build. Hook address: 0x080009B6 (right before `bl arm_doirq`).
+- **Workaround:** `scripts/pydev/fix_fpu_frame.py` exists but is **not loaded** in
+  any `.resc` script. The workaround was written but never deployed.
 - **Proper fix:** Requires modifying Renode's native tlib library (C code) to push
   extended frames when CONTROL.FPCA=1. Estimated 2-4 days effort. Changes the
   exception entry hot path — needs thorough testing across Cortex-M variants.
@@ -93,7 +95,7 @@ Last updated: 2026-03-17
 
 ### 2.1 RCC Clock Ready Bits Not Auto-Set
 - **Severity:** High
-- **Status:** FIXED (via Python peripheral) | Upstream: `renode-upstream` U.3
+- **Status:** FIXED (via Python peripheral — performance concern) | Upstream: `renode-upstream` U.3
 - **Component:** STM32F4_RCC
 - **Description:** Built-in `STM32F4_RCC` does not auto-set clock ready bits
   (HSIRDY, HSERDY, PLLRDY, PLLI2SRDY, PLLSAIRDY, LSIRDY, LSERDY) when the
@@ -103,7 +105,9 @@ Last updated: 2026-03-17
   forever. NuttX `pwrmgmt_lsi_init_timer_5_for_measuring()` polls LSIRDY
   indefinitely.
 - **Workaround:** Custom Python peripheral `scripts/pydev/rcc.py` that auto-sets
-  ready bits on enable writes and mirrors SW→SWS.
+  ready bits on enable writes and mirrors SW→SWS. Loaded in **all** `.resc`
+  scripts (legacy, dual-machine, new OS). Every RCC register access goes through
+  IronPython — should be migrated to a compiled C# peripheral or upstreamed.
 
 ### 2.2 QUADSPI Transfer Complete Flag (TCF) Never Set
 - **Severity:** High
@@ -122,7 +126,7 @@ Last updated: 2026-03-17
 
 ### 2.3 QUADSPI DMA Requests Not Generated
 - **Severity:** High
-- **Status:** FIXED (via C# hook `QspiDmaBypass.cs`)
+- **Status:** FIXED (via C# hook in legacy/dual-machine; IronPython in new OS)
 - **Component:** STM32H7_QuadSPI + DMA
 - **Description:** QUADSPI controller doesn't drive DMA request lines. DMA
   transfers to/from flash never start.
@@ -140,10 +144,13 @@ Last updated: 2026-03-17
     +16 buffer   (ptr)  — RAM buffer
   ```
   Legacy address: 0x0816136a
+- **Note:** The new OS build (`meadow-os.resc`) uses an **inline IronPython hook**
+  instead of the C# `InstallQspiBypass` — this is a performance regression on a
+  hot path (22K calls). Should be migrated to use the C# hook.
 
 ### 2.4 STM32SPI DMA Not Supported
 - **Severity:** High (for ESPCP)
-- **Status:** FIXED (via C# hook `EspcpSpiBypass.cs`)
+- **Status:** FIXED (via C# hook in dual-machine; IronPython in legacy)
 - **Component:** STM32SPI
 - **Description:** Renode's `STM32SPI` controller doesn't support DMA
   transactions (TXDMAEN unhandled). SPI DMA transfers never complete.
@@ -154,7 +161,10 @@ Last updated: 2026-03-17
   buffer from memory, feeds bytes through `SpiBridge.Transmit()`, writes RX
   bytes back to memory. Originally IronPython, migrated to C# for performance
   (15K+ calls/30s, each generating 3x GetRegisterUnsafe deprecation warnings).
-  Legacy address: 0x08147c94. Dual-machine address: 0x081488A0.
+  Dual-machine address: 0x081488A0.
+- **Note:** The legacy build uses an **inline IronPython hook** instead of the
+  C# `InstallEspcpSpiBypass` — this is a performance regression. Legacy
+  address: 0x08147c94.
 
 ### 2.5 QUADSPI Register Bits Unhandled
 - **Severity:** Low (cosmetic warnings)
@@ -233,11 +243,13 @@ Last updated: 2026-03-17
 
 ### 3.4 Mono Runtime Check Gates ESP32 Operations
 - **Severity:** Medium
-- **Status:** FIXED (via hook)
+- **Status:** NOT IMPLEMENTED (documented workaround was never deployed)
 - **Component:** HCOM runtime state
 - **Description:** Firmware gates ESP32 operations behind a Mono runtime state
   check. Since Mono isn't flashed in emulation, this blocks ESPCP HCOM commands.
-- **Workaround:** Hook at 0x08057bee returns 0 (not running) to bypass the check.
+- **Documented workaround:** Hook at 0x08057bee returns 0 (not running) to bypass
+  the check. However, **no such hook exists in any `.resc` script**. This may not
+  actually be needed if ESPCP operations work without it (needs verification).
 
 ---
 
@@ -329,18 +341,19 @@ Last updated: 2026-03-17
 
 ### 5.3 Hook Addresses Are Binary-Specific
 - **Severity:** Medium
-- **Status:** KNOWN | Future automation
+- **Status:** PARTIALLY AUTOMATED (legacy build only)
 - **Component:** All hooks (IronPython and C#)
 - **Description:** All hook addresses (SVC, GPIO version, QSPI, ESPCP, etc.)
   are hardcoded in `.resc` scripts. When the NuttX kernel is rebuilt, all
-  addresses must be re-extracted:
-  ```bash
-  arm-none-eabi-nm build/legacy/nuttx.elf | grep <symbol_name>
-  arm-none-eabi-objdump -d build/legacy/nuttx.elf | grep 'svc\s'
-  ```
+  addresses must be re-extracted.
 - **Impact:** Boot will fail or hang silently if hooks fire at wrong addresses
   after a kernel rebuild.
-- **Future fix:** Build script that auto-extracts addresses and generates `.resc`.
+- **Legacy build:** `tools/extract-hook-addresses.py` auto-extracts addresses
+  from the ELF and generates `build/legacy/addresses.resc` with `$hook_*`
+  variables. This runs automatically at the end of `build-meadow.os_legacy-emulated.sh`.
+  `scripts/meadow-legacy-hooks.resc` uses these variables instead of hardcoded addresses.
+- **New OS build:** `meadow-os.resc` still uses **hardcoded hex addresses**.
+  No automation exists for new OS builds.
 
 ---
 
@@ -394,10 +407,11 @@ Last updated: 2026-03-17
 - **Component:** IronPython hooks
 - **Description:** `cpu.GetRegisterUnsafe(N)` generates a deprecation warning
   pointing to `GetRegister`. All hooks still function correctly.
-- **Mitigation:** All hot-path hooks have been migrated from IronPython to compiled
-  C# (SvcPrimaskFix, QspiDmaBypass, MqReceiveIntercept, EspcpSpiBypass,
-  XtensaHotPathHooks). Only boot-time and rare IronPython hooks remain, where the
-  deprecation warnings have negligible performance impact.
+- **Mitigation:** Hot-path hooks migrated from IronPython to compiled C#
+  (QspiDmaBypass, MqReceiveIntercept, EspcpSpiBypass, XtensaHotPathHooks).
+  SvcPrimaskFix is no longer active (§1.1 fixed in fork). Only boot-time and
+  rare IronPython hooks remain, where the deprecation warnings have negligible
+  performance impact.
 - **Note:** Named properties (`cpu.PC`, `cpu.LR`, `cpu.SP`, `cpu.PRIMASK`) work
   without warnings in both IronPython and C#.
 
@@ -504,7 +518,7 @@ Last updated: 2026-03-17
   Reduced log output from ~53K lines/min to ~170 lines/min.
 
 ### 8.5 Fork Renode (.NET 8) Slower Than Installed (Mono)
-- **Severity:** Low
+- **Severity:** Medium (currently running the fork full-time)
 - **Status:** IDENTIFIED | Not investigated
 - **Component:** Renode runtime
 - **Description:** The WildernessLabs Renode fork (built as .NET 8 native arm64
@@ -513,6 +527,7 @@ Last updated: 2026-03-17
   theoretically be faster.
 - **Possible causes:** Different tlib compilation flags, .NET 8 GC behavior,
   missing AOT optimizations, or runtime overhead differences.
-- **Impact:** Using the installed Mono Renode is ~45% faster for now. The fork
-  is needed only for tlib fixes (WAITI halt, ENTRY TCG temp allocation) that
-  haven't been applied to the installed version.
+- **Impact:** The fork is now the primary runtime (needed for SVC/PRIMASK fix
+  §1.1, WAITI halt §1.4, RTC backup registers, Xtensa tlib fixes). The ~45%
+  performance penalty is being paid on every run. Investigating and resolving
+  this would benefit all workloads.
