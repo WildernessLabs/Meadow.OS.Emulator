@@ -1,0 +1,10 @@
+{
+  "track_id": "emu-config",
+  "title": "Emulator Configuration — YAML Config for Build & Launch",
+  "status": "planned",
+  "created": "2026-03-18",
+  "updated": "2026-03-18",
+  "repo": "Meadow.OS.Emulator",
+  "priority": "medium",
+  "tags": ["config", "ux", "build", "launch", "yaml"]
+}
