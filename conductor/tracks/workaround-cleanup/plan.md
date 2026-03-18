@@ -1,7 +1,7 @@
 # Plan: Workaround Cleanup
 
 ## Track ID: `workaround-cleanup`
-## Status: `planned`
+## Status: `in-progress` (7/11 complete, 3 deferred, 1 likely fixed)
 ## Priority: `high`
 
 ---
@@ -140,16 +140,17 @@
   session.
 - **Why:** Users will hit this as soon as they try configuration commands. Currently
   the only mitigation is "don't do that."
-- **Approach options:**
-  1. Hook the AIRCR write address to intercept SYSRESETREQ and perform a Renode
-     `machine Reset` instead
-  2. Fix in the Renode fork's Cortex-M model (proper but higher effort)
-  3. Hook the firmware functions that call `NVIC_SystemReset()` to skip the reset
-     and return an HCOM error response instead
-- [ ] Identify which HCOM commands trigger SYSRESETREQ
-- [ ] Choose approach (hook vs fork fix)
-- [ ] Implement and test
-- [ ] Update KnownIssues §1.3
+- **Status:** LIKELY FIXED (needs manual verification)
+- **Findings:** The Renode fork's NVIC.cs (line 836-861) already handles SYSRESETREQ
+  correctly: calls `machine.RequestReset()` which executes the `reset` macro defined
+  in the `.resc` script. The reset macro reloads binaries and resets peripherals.
+  The "PC=0, SP=0" symptom was likely from stock Renode (not the fork).
+- **HCOM commands that trigger reset:** 20 (HOST_RESTART), 21 (ONLY_RESTART), 28 (FLASH_OS_UPDATE)
+- **Call path:** HCOM → hcom_nx_common_utils → up_systemreset() at 0x081633A8
+- **Hooks survive reset:** Renode's `AddHook` persists across machine resets.
+- [x] Identified which HCOM commands trigger SYSRESETREQ
+- [x] Fork already handles SYSRESETREQ via NVIC.cs → machine.RequestReset()
+- [ ] Manual test: send HCOM restart command and verify emulator recovers
 
 ## W.10 — Flash Persistence via File-Backed Memory
 - **KnownIssues ref:** §4.4
@@ -188,19 +189,21 @@
 
 ---
 
-## Priority Order
+## Status Summary
 
-1. **W.5** — Rebuild firmware with version (user requirement, blocked on build diagnosis)
-2. **W.2** — RCC Python→C# (highest performance impact, affects all builds)
-3. **W.3** — New OS QSPI IronPython→C# (high call count, easy fix)
-4. **W.4** — Legacy ESPCP SPI IronPython→C# (medium call count, easy fix)
-5. **W.9** — Handle SYSRESETREQ (no workaround exists, users will hit this)
-6. **W.10** — Flash persistence (blocks reboot/update testing)
-7. **W.1** — Remove dead SvcPrimaskFix (trivial cleanup)
-8. **W.6** — Verify Mono runtime check (clarify documentation)
-9. **W.11** — Automate new OS hook addresses (prevent silent breakage)
-10. **W.8** — Fork performance investigation (medium effort, broad benefit)
-11. **W.7** — FPU frame file cleanup (low priority)
+| Item | Status |
+|------|--------|
+| W.1 | COMPLETE — dead SvcPrimaskFix includes removed |
+| W.2 | COMPLETE — RCC migrated from Python to C# |
+| W.3 | COMPLETE — New OS QSPI migrated to C# hook |
+| W.4 | COMPLETE — Legacy ESPCP SPI migrated to C# hook |
+| W.5 | COMPLETE — Firmware rebuilt with version 2.5.7.0 |
+| W.6 | COMPLETE — Mono bypass verified not needed |
+| W.7 | COMPLETE — Dead FPU frame file deleted |
+| W.8 | DEFERRED — Fork performance investigation (needs profiling) |
+| W.9 | LIKELY FIXED — Fork already handles SYSRESETREQ (needs manual test) |
+| W.10 | DEFERRED — Flash persistence (needs Renode file-backed memory API research) |
+| W.11 | DEFERRED — New OS address automation (blocked on new OS build) |
 
 ## Decision Log
 
@@ -208,3 +211,4 @@
 |------------|----------|-----------|
 | 2026-03-17 | Created track from KnownIssues audit | Cross-referenced KnownIssues_and_Errata.md with upstream_fixes.md and actual .resc files; found multiple discrepancies between documented and actual status |
 | 2026-03-17 | Added W.9 (SYSRESETREQ), W.10 (flash persistence), W.11 (new OS address automation) | These were gaps in KnownIssues with no existing workaround or no tracking |
+| 2026-03-18 | Completed W.1-W.7, deferred W.8/W.10/W.11 | W.8 requires profiling tools, W.10 requires Renode API research, W.11 blocked on new OS build. W.9 likely already fixed in fork. |
