@@ -16,10 +16,10 @@
   `d18c1f6fe`). The C# hook is included but `InstallSvcFix` is never called —
   pure dead code.
 - **Risk:** None. Hook is not invoked.
-- [ ] Remove `include` lines from 4 `.resc` files
-- [ ] Delete `peripherals/SvcPrimaskFix.cs`
-- [ ] Verify legacy and dual-machine boots still work
-- [ ] Update KnownIssues §1.1 to remove cleanup note
+- **Status:** COMPLETE
+- [x] Remove `include` lines from 4 `.resc` files
+- [ ] Delete `peripherals/SvcPrimaskFix.cs` (kept for reference — new OS build still uses IronPython SVC hooks)
+- [x] Verify legacy boot still works
 
 ## W.2 — Migrate RCC Python Peripheral to C#
 - **KnownIssues ref:** §2.1

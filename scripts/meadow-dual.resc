@@ -16,7 +16,6 @@
 include @peripherals/Winbond_W25QXXXJV.cs
 include @peripherals/SpiBridge.cs
 include @peripherals/QspiDmaBypass.cs
-include @peripherals/SvcPrimaskFix.cs
 include @peripherals/MqReceiveIntercept.cs
 include @peripherals/ESP32_RTC_CNTL.cs
 include @peripherals/ESP32_TimerGroup.cs

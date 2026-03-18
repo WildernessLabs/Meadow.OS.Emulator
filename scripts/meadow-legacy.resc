@@ -3,7 +3,6 @@ include @peripherals/Winbond_W25QXXXJV.cs
 include @peripherals/EspcpStub.cs
 include @peripherals/QspiDmaBypass.cs
 include @peripherals/EspcpSpiBypass.cs
-include @peripherals/SvcPrimaskFix.cs
 include @peripherals/MqReceiveIntercept.cs
 include @peripherals/STM32F7_RCC_Custom.cs
 mach create "meadow-legacy"
