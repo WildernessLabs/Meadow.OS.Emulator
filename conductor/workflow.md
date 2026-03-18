@@ -58,23 +58,45 @@ filesystem, and app lifecycle work end-to-end.
 - BlinkyCS project: `Source/Meadow F7/Blinky/BlinkyCS/`
 - App MUST declare the correct board matching the emulator config:
   - `F7FeatherV2` for the default emulator board
-  - The entry point class is selected by Meadow from the compiled App.dll
   - BlinkyCS has both `V1App : MeadowApp<F7FeatherV1>` and `V2App : MeadowApp<F7FeatherV2>`
+- CLI route must be configured: `meadow config route socket://localhost:4242`
 
 ```bash
-# Build the app
-dotnet build "../Meadow.Samples/Source/Meadow F7/Blinky/BlinkyCS/BlinkyCS.csproj"
+# Start emulator (if not already running)
+./run.sh --legacy &
 
-# Deploy to emulator via CLI
-dotnet run --project ../Meadow.CLI/Source/Meadow.CLI -- app deploy \
-    "../Meadow.Samples/Source/Meadow F7/Blinky/BlinkyCS/bin/Debug/netstandard2.1/"
+# From the BlinkyCS project directory:
+cd "../Meadow.Samples/Source/Meadow F7/Blinky/BlinkyCS"
 
-# Run (or reset emulator to auto-start the app)
-dotnet run --project ../Meadow.CLI/Source/Meadow.CLI -- app run
+# Build, trim, deploy, and run in one command:
+dotnet run --project /path/to/Meadow.CLI/Source/Meadow.CLI -- app run
+
+# This will:
+# 1. Build the project (Release config)
+# 2. Trim assemblies (removes unused BCL code — critical for deploy speed)
+# 3. Deploy trimmed binaries to emulator over HCOM
+# 4. Enable Mono runtime
+# 5. Listen for app console output
 ```
 
-**Pass criteria:** Mono runtime boots, loads App.dll, BlinkyCS initializes without crash.
-Console output shows LED initialization. No unhandled exceptions.
+**Pass criteria:** Deploy completes without errors. Mono runtime boots, loads
+App.dll, BlinkyCS initializes. Console output shows LED color cycling.
+
+**IMPORTANT:** Do NOT use `app deploy` with untrimmed binaries — the full BCL
+assemblies (mscorlib.dll = 2.3MB, System.dll = 1.9MB, etc.) are far too large
+for the emulated UART. Always use `app run` which trims first.
+
+**Current Blockers (as of 2026-03-18):**
+- **HCOM download timing:** Large file transfers can stall under emulation —
+  firmware's HCOM state machine gets "unexpected request" errors when the CLI
+  sends the next file header before the current write is fully acknowledged.
+  This is a timing mismatch between wall time (CLI) and virtual time (emulator).
+- **Mono JIT speed:** Emulation runs at ~0.00025x real-time for JIT workload.
+  Even after successful deploy, Mono boot takes ~16+ hours under emulation.
+  This makes Tier 3 impractical as a regular validation step until Mono
+  AOT compilation or JIT caching is implemented.
+- **Flash persistence (W.10):** QSPI flash is volatile — deployed files are
+  lost when the emulator restarts. Each boot reformats LittleFS.
 
 ### When to Run Each Tier
 
@@ -82,11 +104,17 @@ Console output shows LED initialization. No unhandled exceptions.
 |-------------|--------|--------|--------|
 | Hook address changes | Required | Required | - |
 | Peripheral migration (Python→C#) | Required | Required | - |
-| Firmware rebuild | Required | Required | Recommended |
-| Mono/SDRAM changes | Required | Required | Required |
+| Firmware rebuild | Required | Required | Blocked* |
+| Mono/SDRAM changes | Required | Required | Blocked* |
 | Script (.resc) changes | Required | - | - |
 | Build script changes | Required | Required | - |
-| Flash/LittleFS changes | Required | Required | Required |
+| Flash/LittleFS changes | Required | Required | Blocked* |
+
+*Tier 3 is currently blocked by Mono JIT speed and HCOM download timing issues.
+Deploy partially works (trimmed binaries transfer) but the full cycle
+(deploy → Mono boot → app run → console output) cannot complete in reasonable
+time. Tier 3 becomes viable when either: (a) Mono AOT/JIT caching is implemented,
+or (b) a pre-populated LittleFS image with BCL + app is loaded at boot.
 
 ## Commit Strategy
 
