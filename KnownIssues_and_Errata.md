@@ -545,7 +545,16 @@ Last updated: 2026-03-17
   This blocks Tier 3 validation (Blinky app deploy + run).
 - **Observed:** Smaller files (netstandard.dll, MQTTnet.dll ~100KB) transfer OK.
   Larger files (System.Web.dll, System.dll ~1-2MB) stall after partial transfer.
-- **Possible fixes:**
-  1. Add flow control or pacing in SocketConnection (CLI-side throttle)
-  2. Increase emulator quantum to process UART data faster
-  3. Pre-populate LittleFS image with trimmed assemblies at boot (bypass HCOM deploy)
+- **Partial fix (CLI-side):** Three changes to `SocketConnection.WriteFile`
+  on branch `feature/TCP_Socket_Connection_for_EMU`:
+  1. Per-packet `Task.Delay(1)` yield in data streaming loop
+  2. After `END_FILE_TRANSFER`, wait for firmware's `TEXT_INFORMATION` response
+  3. File operation timeout increased from 30s to 120s
+  Deploy now progresses file-by-file, but relies on timeout recovery (~120s per
+  file) because the `TEXT_INFORMATION` response timing needs further investigation.
+  The firmware sends `TEXT_INFORMATION` (not `TEXT_CONCLUDED`) after CRC check,
+  but the response isn't reaching the CLI's `InfoMessages` within the wait window.
+- **Remaining investigation:**
+  - Why firmware's `TEXT_INFORMATION` after download isn't received by CLI in time
+  - May be UART TX buffering issue (responses queued behind data processing)
+  - Alternative: pre-populate LittleFS image with trimmed assemblies at boot
