@@ -14,3 +14,4 @@
 | renode-ci         | CI Integration for Emulated Testing       | `planned` |
 | ux-improvements   | UX Improvements (setup.sh, README)        | `complete` (setup.sh checks/installs all prereqs, README updated with Quick Start) |
 | renode-upstream   | Upstream Contributions to Renode          | `planned` (U.1–U.9 identified; 15 Xtensa tlib fixes on WildernessLabs fork) |
+| workaround-cleanup | Workaround Cleanup — Remove Hacks, Fix Perf Regressions | `planned` (W.1–W.11: dead code removal, IronPython→C# migration, firmware rebuild, SYSRESETREQ fix, flash persistence, hook address automation) |

@@ -1,0 +1,10 @@
+{
+  "track_id": "workaround-cleanup",
+  "title": "Workaround Cleanup — Remove Hacks, Fix Performance Regressions",
+  "status": "planned",
+  "created": "2026-03-17",
+  "updated": "2026-03-17",
+  "repo": "Meadow.OS.Emulator",
+  "priority": "high",
+  "tags": ["cleanup", "performance", "hooks", "ironpython", "c-sharp", "renode"]
+}
