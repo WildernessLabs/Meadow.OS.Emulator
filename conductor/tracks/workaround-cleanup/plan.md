@@ -50,8 +50,10 @@
   instead of calling `cpu InstallQspiBypass` from the existing `QspiDmaBypass.cs`.
 - **Why:** The C# hook already exists and is used by the legacy build. The new OS
   build regressed to IronPython, paying 10-100x overhead on 22K+ calls.
-- [ ] Replace inline IronPython QSPI hook in `meadow-os.resc` with `cpu InstallQspiBypass`
-- [ ] Verify new OS build boots and mounts LittleFS
+- **Status:** COMPLETE
+- [x] Replace inline IronPython QSPI hook in `meadow-os.resc` with `cpu InstallQspiBypass`
+- [x] Added `include @peripherals/QspiDmaBypass.cs` to meadow-os.resc
+- [ ] Verify new OS build boots and mounts LittleFS (deferred — requires new OS build)
 
 ## W.4 — Migrate Legacy ESPCP SPI Bypass from IronPython to C#
 - **KnownIssues ref:** §2.4
@@ -59,9 +61,11 @@
 - **What:** Legacy build uses inline IronPython for `espcp_send_data_over_spi` bypass.
   The C# `EspcpSpiBypass.cs` exists and is used in dual-machine mode.
 - **Why:** 15K+ calls per 30s on the slow IronPython path.
-- [ ] Add `cpu InstallEspcpSpiBypass` call in legacy `.resc` (using `$hook_` variable)
-- [ ] Remove inline IronPython ESPCP SPI hook from legacy hooks
-- [ ] Verify legacy ESPCP boot and post-boot polling
+- **Status:** COMPLETE
+- [x] Modify `EspcpSpiBypass.cs` to find either SpiBridge or EspcpStub (was SpiBridge-only)
+- [x] Replace IronPython hook in `meadow-legacy-hooks.resc` with `cpu InstallEspcpSpiBypass`
+- [x] Add `include @peripherals/EspcpSpiBypass.cs` to legacy `.resc` files
+- [x] Verify legacy HCOM device info works with C# hook
 
 ## W.5 — Rebuild Firmware with Compiled-In Version
 - **KnownIssues ref:** §5.2 (related)

@@ -30,23 +30,24 @@ namespace Antmicro.Renode.Hooks
                     "EspcpSpiBypass: CPU must be an ARM core");
             }
 
-            // Find the SpiBridge peripheral
-            ISPIPeripheral spiBridge = null;
+            // Find the SPI peripheral (SpiBridge for dual-machine, EspcpStub for single-machine)
+            ISPIPeripheral spiPeripheral = null;
             foreach(var entry in machine.GetRegisteredPeripherals())
             {
-                if(entry.Peripheral.GetType().Name == "SpiBridge")
+                var name = entry.Peripheral.GetType().Name;
+                if(name == "SpiBridge" || name == "EspcpStub")
                 {
-                    spiBridge = entry.Peripheral as ISPIPeripheral;
+                    spiPeripheral = entry.Peripheral as ISPIPeripheral;
                     break;
                 }
             }
-            if(spiBridge == null)
+            if(spiPeripheral == null)
             {
                 throw new Antmicro.Renode.Exceptions.RecoverableException(
-                    "EspcpSpiBypass: SpiBridge peripheral not found");
+                    "EspcpSpiBypass: No SpiBridge or EspcpStub peripheral found");
             }
 
-            var bridge = spiBridge;
+            var bridge = spiPeripheral;
             var bus = machine.SystemBus;
             long callCount = 0;
 

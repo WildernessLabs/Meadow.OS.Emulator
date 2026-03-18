@@ -68,11 +68,10 @@ cpu AddHook $hook_MONO_STR_FIX_ADDR $mono_str_fix
 # cpu AddHook $hook_ASM_SCAN_BYPASS_ADDR $asm_scan_bypass
 
 # Workaround: STM32SPI doesn't drive DMA — bypass espcp_send_data_over_spi with direct
-# peripheral calls. Reads TX buffer from memory, feeds each byte through EspcpStub.Transmit(),
-# writes returned bytes to RX buffer, then calls FinishTransmission() to trigger message handling.
+# peripheral calls. Uses compiled C# hook (EspcpSpiBypass.cs) for 10-100x speedup.
+# Finds SpiBridge (dual-machine) or EspcpStub (single-machine) automatically.
 # R0 = tx buffer (0 for receive-only), R1 = rx buffer (0 for send-only), R2 = buffer length
-set espcp_spi_bypass "from System import Array, Byte; stub = [p.Peripheral for p in machine.GetRegisteredPeripherals() if type(p.Peripheral).__name__ == 'EspcpStub'][0]; tx = cpu.GetRegisterUnsafe(0).RawValue; rx = cpu.GetRegisterUnsafe(1).RawValue; length = int(cpu.GetRegisterUnsafe(2).RawValue); txdata = machine.SystemBus.ReadBytes(tx, length) if tx else Array.CreateInstance(Byte, length); rxarr = Array.CreateInstance(Byte, length); [rxarr.__setitem__(i, stub.Transmit(txdata[i])) for i in range(length)]; stub.FinishTransmission(); machine.SystemBus.WriteBytes(rxarr, rx) if rx else None; cpu.PC = cpu.LR"
-cpu AddHook $hook_ESPCP_SEND_DATA_OVER_SPI $espcp_spi_bypass
+cpu InstallEspcpSpiBypass $hook_ESPCP_SEND_DATA_OVER_SPI
 
 # Workaround: Force ESPCP initialization by setting selected network type to WiFi (1).
 # hcom_nx_setup_mgr gates espcp_late_init on config[8] & 0xFF — if 0, ESPCP is skipped.

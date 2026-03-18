@@ -1,6 +1,7 @@
 using sysbus
 include @peripherals/Winbond_W25QXXXJV.cs
 include @peripherals/STM32F7_RCC_Custom.cs
+include @peripherals/QspiDmaBypass.cs
 mach create "meadow"
 machine LoadPlatformDescription @platforms/meadow-f7.repl
 
@@ -49,10 +50,9 @@ cpu AddHook 0x08002c60 $gpio_ver_fix
 set qspi_wait_skip "cpu.PC = cpu.LR"
 cpu AddHook 0x08033f74 $qspi_wait_skip
 
-# Workaround: QUADSPI doesn't drive DMA requests, so DMA transfers never complete.
-# Hook qspi_memory_dma to copy data directly from flash backing memory (0x90000000).
-set qspi_dma_bypass "meminfo = cpu.GetRegisterUnsafe(1).RawValue; flags = machine.SystemBus.ReadDoubleWord(meminfo) & 0xFF; buflen = machine.SystemBus.ReadDoubleWord(meminfo + 8); faddr = machine.SystemBus.ReadDoubleWord(meminfo + 12); buf = machine.SystemBus.ReadDoubleWord(meminfo + 20); is_write = flags & 0x04; data = machine.SystemBus.ReadBytes(buf, int(buflen)) if is_write else machine.SystemBus.ReadBytes(0x90000000 + faddr, int(buflen)); machine.SystemBus.WriteBytes(data, 0x90000000 + faddr) if is_write else machine.SystemBus.WriteBytes(data, buf); cpu.PC = cpu.LR"
-cpu AddHook 0x0803415c $qspi_dma_bypass
+# Workaround: QUADSPI doesn't drive DMA requests — bypass with direct memcpy.
+# Uses compiled C# hook (QspiDmaBypass.cs) instead of IronPython for 10-100x speedup.
+cpu InstallQspiBypass 0x0803415c 0x90000000
 
 # Fix return value: qspi_memory_dma returns priv (non-zero) via R0.
 # Overwrite the stack slot where the caller stores R0 with 0 (success).
