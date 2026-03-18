@@ -329,10 +329,8 @@ Last updated: 2026-03-17
   string, causing `OSVersion|` and `MonoVersion|` to be blank in `device info`.
 - **Impact:** Meadow.CLI `device info` shows empty OS and Runtime version fields.
 - **Workaround:** Hook at the instruction after the zero-fill (hcom_nx_config_init+0xBA)
-  writes version numbers to config+0x30..0x3C. Version is read from `Meadow/version.txt`
-  by `extract-hook-addresses.py` (same source the build script uses). The existing
-  `mono_ver_copy` hook copies these to the Mono version fields (config+0x5C..0x68).
-  This hook is unnecessary when the firmware is rebuilt with version injection.
+  writes version numbers (2.0.0.0) to config+0x30..0x3C. The existing `mono_ver_copy`
+  hook copies these to the Mono version fields (config+0x5C..0x68).
 - **Note:** CoprocessorVersion is still absent — requires version fields in the
   EspcpStub's SystemGetConfiguration response (future work).
 

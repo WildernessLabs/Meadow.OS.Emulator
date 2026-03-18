@@ -18,59 +18,6 @@ import sys
 from pathlib import Path
 
 
-def read_firmware_version(repo_root: Path) -> dict[str, int]:
-    """Read firmware version from Meadow/version.txt (same source as build script).
-
-    Falls back to build/legacy/emulator-version.conf if Meadow repo not found,
-    then to 0.0.0.0.
-    """
-    versions = {
-        "FW_VERSION_MAJOR": 0,
-        "FW_VERSION_MINOR": 0,
-        "FW_VERSION_REVISION": 0,
-        "FW_VERSION_BUILD": 0,
-    }
-
-    # Primary source: Meadow/version.txt (sibling repo, same as build script)
-    meadow_version = repo_root / ".." / "Meadow" / "version.txt"
-    if meadow_version.exists():
-        text = meadow_version.read_text().strip()
-        parts = text.split(".")
-        if len(parts) >= 1:
-            versions["FW_VERSION_MAJOR"] = int(parts[0])
-        if len(parts) >= 2:
-            versions["FW_VERSION_MINOR"] = int(parts[1])
-        if len(parts) >= 3:
-            versions["FW_VERSION_REVISION"] = int(parts[2])
-        if len(parts) >= 4:
-            versions["FW_VERSION_BUILD"] = int(parts[3])
-        source = meadow_version.resolve()
-        print(f"  Firmware version: {text} (from {source})")
-        return versions
-
-    # Fallback: emulator-version.conf in build dir
-    conf_path = repo_root / "build" / "legacy" / "emulator-version.conf"
-    if conf_path.exists():
-        for line in conf_path.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" in line:
-                key, _, val = line.partition("=")
-                key, val = key.strip(), val.strip()
-                if key in versions:
-                    try:
-                        versions[key] = int(val)
-                    except ValueError:
-                        pass
-        ver_str = f"{versions['FW_VERSION_MAJOR']}.{versions['FW_VERSION_MINOR']}.{versions['FW_VERSION_REVISION']}.{versions['FW_VERSION_BUILD']}"
-        print(f"  Firmware version: {ver_str} (from {conf_path.name}, Meadow/version.txt not found)")
-        return versions
-
-    print(f"  NOTE: No version source found — defaulting to 0.0.0.0")
-    return versions
-
-
 def run(cmd: list[str], **kwargs) -> str:
     result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
     if result.returncode != 0:
@@ -173,10 +120,6 @@ def main():
     print(f"Extracting hook addresses from:")
     print(f"  Kernel: {kernel_elf}")
     print(f"  User:   {user_elf}")
-
-    # Read firmware version (from Meadow/version.txt or fallback)
-    repo_root = Path(__file__).parent.parent
-    fw_version = read_firmware_version(repo_root)
 
     ksyms = nm_symbols(kernel_elf)
     usyms = nm_symbols(user_elf)
@@ -302,11 +245,12 @@ def main():
             # Pattern: bl mq_receive; cmp r0, #4; bne.n <loop_top>
             # The bne target (with Thumb bit) is the loop top address.
             for i, (iaddr, text) in enumerate(insns):
-                if iaddr == (lr & ~1):  # mask Thumb bit for objdump address comparison
+                if iaddr == lr:
                     # LR points to `cmp r0, #4`, next insn is `bne <loop_top>`
                     if i + 1 < len(insns):
                         bne_text = insns[i + 1][1]
-                        m = re.search(r'bne(?:\.n)?\s+([0-9a-f]+)', bne_text)
+                        import re as _re
+                        m = _re.search(r'bne(?:\.n)?\s+([0-9a-f]+)', bne_text)
                         if m:
                             loop_top = int(m.group(1), 16) | 1  # add Thumb bit
                             addrs["ESPCP_THREAD_LOOP_TOP"] = loop_top
@@ -414,18 +358,11 @@ def main():
 
     if hooks_template.exists():
         template_text = hooks_template.read_text()
-
-        # Build combined substitution map: $hook_* → hex addresses, $fw_ver_* → version numbers
-        template_vars: dict[str, str] = {}
-        for var_name, addr in addrs.items():
-            template_vars[f"hook_{var_name}"] = f"0x{addr:08X}"
-        for key, val in fw_version.items():
-            template_vars[f"fw_ver_{key}"] = str(val)
-
-        def replace_template_var(m):
+        # Replace $hook_VARNAME with literal hex addresses, skipping comment lines
+        def replace_hook_var(m):
             var_name = m.group(1)
-            if var_name in template_vars:
-                return template_vars[var_name]
+            if var_name in addrs:
+                return f"0x{addrs[var_name]:08X}"
             return m.group(0)  # leave as-is (comments, disabled hooks, etc.)
 
         result_lines = []
@@ -433,7 +370,7 @@ def main():
             if line.lstrip().startswith("#"):
                 result_lines.append(line)  # preserve comment lines unchanged
             else:
-                result_lines.append(re.sub(r'\$(\w+)', replace_template_var, line))
+                result_lines.append(re.sub(r'\$hook_(\w+)', replace_hook_var, line))
         processed = "\n".join(result_lines) + "\n"
         # Add auto-generated header
         header = (

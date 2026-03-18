@@ -15,9 +15,8 @@
 # hcom_nx_config_init (normally populated from /meadow0/meadow.config.yaml
 # which doesn't exist in emulation). Write version numbers so OSVersion and
 # RuntimeVersion appear in `device info`. R4 = config pointer at this hook.
-# Version read from Meadow/version.txt by extract-hook-addresses.py.
-# This hook is unnecessary if the firmware is rebuilt with version injection.
-set fw_ver_fix "r4 = cpu.GetRegisterUnsafe(4).RawValue; machine.SystemBus.WriteDoubleWord(r4 + 0x30, $fw_ver_FW_VERSION_MAJOR); machine.SystemBus.WriteDoubleWord(r4 + 0x34, $fw_ver_FW_VERSION_MINOR); machine.SystemBus.WriteDoubleWord(r4 + 0x38, $fw_ver_FW_VERSION_REVISION); machine.SystemBus.WriteDoubleWord(r4 + 0x3C, $fw_ver_FW_VERSION_BUILD)"
+# Format: major.minor.revision.build → "2.0.0.0"
+set fw_ver_fix "r4 = cpu.GetRegisterUnsafe(4).RawValue; machine.SystemBus.WriteDoubleWord(r4 + 0x30, 2); machine.SystemBus.WriteDoubleWord(r4 + 0x34, 0); machine.SystemBus.WriteDoubleWord(r4 + 0x38, 0); machine.SystemBus.WriteDoubleWord(r4 + 0x3C, 0)"
 cpu AddHook $hook_FW_VER_FIX_ADDR $fw_ver_fix
 
 # Workaround: Force GPIO board version to F7FeatherV2 (2).
