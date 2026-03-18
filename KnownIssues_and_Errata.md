@@ -531,3 +531,21 @@ Last updated: 2026-03-17
   §1.1, WAITI halt §1.4, RTC backup registers, Xtensa tlib fixes). The ~45%
   performance penalty is being paid on every run. Investigating and resolving
   this would benefit all workloads.
+
+### 8.6 HCOM File Download Timing Mismatch
+- **Severity:** High (blocks app deployment)
+- **Status:** IDENTIFIED | No fix yet
+- **Component:** HCOM file download protocol, emulated UART timing
+- **Description:** When deploying app binaries via `meadow app run`, the Meadow.CLI
+  sends HCOM file download packets at wall-clock speed, but the emulated firmware
+  processes them at virtual-time speed. For large files, the CLI sends the next
+  file's header before the firmware has fully acknowledged the previous write.
+- **Impact:** File transfers stall mid-deploy. Firmware logs:
+  `ERROR:F7 Dnld active, unexpected rqst type:0x0201, dnld state:3`
+  This blocks Tier 3 validation (Blinky app deploy + run).
+- **Observed:** Smaller files (netstandard.dll, MQTTnet.dll ~100KB) transfer OK.
+  Larger files (System.Web.dll, System.dll ~1-2MB) stall after partial transfer.
+- **Possible fixes:**
+  1. Add flow control or pacing in SocketConnection (CLI-side throttle)
+  2. Increase emulator quantum to process UART data faster
+  3. Pre-populate LittleFS image with trimmed assemblies at boot (bypass HCOM deploy)

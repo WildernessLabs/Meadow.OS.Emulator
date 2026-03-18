@@ -91,12 +91,13 @@ for the emulated UART. Always use `app run` which trims first.
   firmware's HCOM state machine gets "unexpected request" errors when the CLI
   sends the next file header before the current write is fully acknowledged.
   This is a timing mismatch between wall time (CLI) and virtual time (emulator).
-- **Mono JIT speed:** Emulation runs at ~0.00025x real-time for JIT workload.
-  Even after successful deploy, Mono boot takes ~16+ hours under emulation.
-  This makes Tier 3 impractical as a regular validation step until Mono
-  AOT compilation or JIT caching is implemented.
 - **Flash persistence (W.10):** QSPI flash is volatile — deployed files are
   lost when the emulator restarts. Each boot reformats LittleFS.
+
+**Resolved:**
+- ~~Mono JIT speed~~ — Fixed via SVC/PRIMASK patch in Renode fork (12,000x
+  speedup). Mono now boots in ~2-3 minutes at near real-time. The old
+  "0.00025x / 16+ hours" figure was from before the fork fix.
 
 ### When to Run Each Tier
 
@@ -110,11 +111,12 @@ for the emulated UART. Always use `app run` which trims first.
 | Build script changes | Required | Required | - |
 | Flash/LittleFS changes | Required | Required | Blocked* |
 
-*Tier 3 is currently blocked by Mono JIT speed and HCOM download timing issues.
-Deploy partially works (trimmed binaries transfer) but the full cycle
-(deploy → Mono boot → app run → console output) cannot complete in reasonable
-time. Tier 3 becomes viable when either: (a) Mono AOT/JIT caching is implemented,
-or (b) a pre-populated LittleFS image with BCL + app is loaded at boot.
+*Tier 3 is currently blocked by HCOM download timing and flash persistence issues.
+Mono JIT speed is resolved (boots in ~2-3 min with fork). Deploy partially works
+(trimmed binaries transfer) but can stall on large files due to HCOM timing
+mismatch. Deployed files are also lost on restart (no flash persistence).
+Tier 3 becomes fully viable when HCOM download timing is fixed and flash
+persistence (W.10) is implemented.
 
 ## Commit Strategy
 
