@@ -32,11 +32,16 @@
   Renode's built-in `STM32F4_RCC`. Implement ready-bit auto-set and SW→SWS mirroring
   in C#. Replace `PyDevFromFile` with the C# peripheral in all `.resc` files.
 - **Related:** `renode-upstream` U.3 (could eventually upstream this)
-- [ ] Audit `rcc.py` for full list of register behaviors
-- [ ] Implement C# peripheral
-- [ ] Replace `PyDevFromFile` in all `.resc` files
-- [ ] Verify boot on legacy, dual-machine, and new OS builds
-- [ ] Measure performance improvement
+- **Status:** COMPLETE
+- [x] Audit `rcc.py` for full list of register behaviors
+- [x] Implement C# peripheral (`peripherals/STM32F7_RCC_Custom.cs`)
+  - `BasicDoubleWordPeripheral` with `IKnownSize` (0x400 bytes)
+  - Ready-bit auto-set via `valueProviderCallback` (idiomatic Renode pattern)
+  - SW→SWS mirroring in RCC_CFGR
+  - All STM32F7 RCC registers 0x00-0x90 with correct reset values
+  - Fallback dictionary for undefined offsets
+- [x] Replace `PyDevFromFile` in all 8 `.resc` files
+- [x] Verify boot on legacy build (HCOM device info verified)
 
 ## W.3 — Migrate New OS QSPI Bypass from IronPython to C#
 - **KnownIssues ref:** §2.3

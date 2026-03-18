@@ -4,11 +4,12 @@ include @peripherals/EspcpStub.cs
 include @peripherals/QspiDmaBypass.cs
 include @peripherals/SvcPrimaskFix.cs
 include @peripherals/MqReceiveIntercept.cs
+include @peripherals/STM32F7_RCC_Custom.cs
 mach create "meadow-legacy"
 machine LoadPlatformDescription @platforms/meadow-f7.repl
 
 # RCC peripheral with proper clock ready bit handling
-machine PyDevFromFile @scripts/pydev/rcc.py 0x40023800 0x400 true "rcc"
+machine LoadPlatformDescriptionFromString "rcc: Miscellaneous.STM32F7_RCC_Custom @ sysbus 0x40023800"
 
 # USB OTG FS stub — handles GRSTCTL polling (AHBIDL bit)
 machine PyDevFromFile @scripts/pydev/otg_fs.py 0x50000000 0x40000 true "otg_fs"
