@@ -104,17 +104,20 @@
   `.resc` file.
 - **Why:** Either the check doesn't actually block operations (in which case remove
   the doc), or it does and the hook needs to be added.
-- [ ] Test whether ESPCP HCOM commands work without this hook
-- [ ] If needed: add hook to legacy hooks template and `extract-hook-addresses.py`
-- [ ] If not needed: update KnownIssues §3.4 to reflect this
+- **Status:** COMPLETE (not needed)
+- [x] Tested: ESPCP HCOM commands work without this hook
+  - `hcom_mono_ctrl_is_mono_enabled` checks BBR bit 0x800; BBR defaults to 0 → returns 1 (enabled)
+  - No bypass needed; ESPCP boot + post-boot polling + HCOM all verified
+- [x] KnownIssues §3.4 already updated to reflect this
 
 ## W.7 — Clean Up Undeployed FPU Frame Workaround
 - **KnownIssues ref:** §1.2
 - **Priority:** Low (legacy unaffected, new OS not yet in active use)
 - **What:** `scripts/pydev/fix_fpu_frame.py` exists but is never loaded.
 - **Why:** Dead file creates confusion — documented as a workaround but not deployed.
-- [ ] Decide: deploy the workaround in `meadow-os.resc`, or delete the file
-- [ ] Update KnownIssues §1.2 accordingly
+- **Status:** COMPLETE (deleted)
+- [x] Decision: delete the file — legacy unaffected, new OS not in active use
+- [x] Deleted `scripts/pydev/fix_fpu_frame.py`
 
 ## W.8 — Investigate Fork Performance Penalty
 - **KnownIssues ref:** §8.5
