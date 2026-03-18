@@ -87,17 +87,17 @@ assemblies (mscorlib.dll = 2.3MB, System.dll = 1.9MB, etc.) are far too large
 for the emulated UART. Always use `app run` which trims first.
 
 **Current Blockers (as of 2026-03-18):**
-- **HCOM download timing:** Large file transfers can stall under emulation —
-  firmware's HCOM state machine gets "unexpected request" errors when the CLI
-  sends the next file header before the current write is fully acknowledged.
-  This is a timing mismatch between wall time (CLI) and virtual time (emulator).
+- **Mono BCL path mismatch:** CLI deploys assemblies to `/meadow0/` but Mono
+  expects `/meadow0/mono/4.5/mscorlib.dll`. Need CLI or SDRAM patch fix.
 - **Flash persistence (W.10):** QSPI flash is volatile — deployed files are
   lost when the emulator restarts. Each boot reformats LittleFS.
 
 **Resolved:**
+- ~~HCOM download timing~~ — Fixed via UART RX bypass hook (UartRxBypass.cs).
+  Bypasses per-byte interrupt-driven UART path. 30x speedup. Full BlinkyCS
+  deploy (36 files) completes in ~140s.
 - ~~Mono JIT speed~~ — Fixed via SVC/PRIMASK patch in Renode fork (12,000x
-  speedup). Mono now boots in ~2-3 minutes at near real-time. The old
-  "0.00025x / 16+ hours" figure was from before the fork fix.
+  speedup). Mono now boots in ~2-3 minutes at near real-time.
 
 ### When to Run Each Tier
 
@@ -111,12 +111,10 @@ for the emulated UART. Always use `app run` which trims first.
 | Build script changes | Required | Required | - |
 | Flash/LittleFS changes | Required | Required | Blocked* |
 
-*Tier 3 is currently blocked by HCOM download timing and flash persistence issues.
-Mono JIT speed is resolved (boots in ~2-3 min with fork). Deploy partially works
-(trimmed binaries transfer) but can stall on large files due to HCOM timing
-mismatch. Deployed files are also lost on restart (no flash persistence).
-Tier 3 becomes fully viable when HCOM download timing is fixed and flash
-persistence (W.10) is implemented.
+*Tier 3 deploy works (36 files in ~140s via UART RX bypass). Mono starts but
+can't find BCL assemblies (path mismatch: CLI deploys to `/meadow0/`, Mono
+expects `/meadow0/mono/4.5/`). Deployed files lost on restart (no flash
+persistence, W.10). Tier 3 becomes fully viable when BCL path is fixed.
 
 ## Commit Strategy
 
