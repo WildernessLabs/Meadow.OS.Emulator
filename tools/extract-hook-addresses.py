@@ -194,20 +194,6 @@ def main():
             print("WARNING: Could not find hw_version struct address", file=sys.stderr)
 
     # -------------------------------------------------------------------------
-    # fw_ver_fix — instruction after the second strd that zeroes config+0x38..0x3C
-    # Pattern: strd r3, r3, [r4, #48]; strd r3, r3, [r4, #56]; movw r3, #NNN
-    # At this point R4 = config pointer, config+0x30..0x3F are all zero.
-    # -------------------------------------------------------------------------
-    if "HCOM_NX_CONFIG_INIT" in addrs:
-        insns = objdump_function(kernel_elf, addrs["HCOM_NX_CONFIG_INIT"], 0x400)
-        addr = find_insn_after(insns, r'strd\s+r3,\s+r3,\s+\[r4,\s+#56\]')
-        if addr:
-            addrs["FW_VER_FIX_ADDR"] = addr
-            print(f"  fw_ver_fix at 0x{addr:08X} (hcom_nx_config_init+0x{addr - addrs['HCOM_NX_CONFIG_INIT']:x})")
-        else:
-            print("WARNING: Could not find fw_ver_fix offset in hcom_nx_config_init", file=sys.stderr)
-
-    # -------------------------------------------------------------------------
     # mono_ver_copy — instruction after "str r0, [r4, #88]" in hcom_nx_config_init
     # This is where get_long_version_string result is stored to config+0x58
     # -------------------------------------------------------------------------
