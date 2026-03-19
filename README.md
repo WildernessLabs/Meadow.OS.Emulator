@@ -104,17 +104,40 @@ cd Source
 dotnet build Meadow.CLI.sln
 
 # Configure the socket route (persists across sessions):
-dotnet Meadow.CLI/bin/Debug/meadow.dll config route socket://localhost:4242
+dotnet run --project Meadow.CLI -- config route socket://localhost:4242
 ```
 
 Then with the emulator running:
 ```bash
-dotnet Meadow.CLI/bin/Debug/meadow.dll device info
-dotnet Meadow.CLI/bin/Debug/meadow.dll app deploy
-dotnet Meadow.CLI/bin/Debug/meadow.dll listen     # Live output
+# Device info
+dotnet run --project ../Meadow.CLI/Source/Meadow.CLI -- device info
+
+# Deploy and run an app (builds, trims, deploys, enables Mono)
+cd "../Meadow.Samples/Source/Meadow F7/Blinky/BlinkyCS"
+dotnet run --project /path/to/Meadow.CLI/Source/Meadow.CLI -- app run
+
+# Deploy a single file
+dotnet run --project ../Meadow.CLI/Source/Meadow.CLI -- file write -f path/to/file.dll
 ```
 
 > **Important:** The globally-installed `meadow` CLI tool (`dotnet tool install`) does NOT support socket connections. You must build from the branch above. The `SocketConnection` class handles raw HCOM/COBS over TCP, which is how Renode exposes the UART.
+
+### App Deployment
+
+The `app run` command builds, trims, deploys, and starts a Meadow app:
+
+1. Builds the project (Release config)
+2. Trims assemblies using the Meadow linker (removes unused BCL code)
+3. Deploys trimmed binaries to the emulator via HCOM file transfer
+4. Enables Mono runtime and listens for app output
+
+A full BlinkyCS deploy (36 trimmed files) takes ~2.5 minutes under emulation.
+File transfers use a UART RX bypass hook that gives ~30x speedup over the
+raw emulated UART path (see [KnownIssues §8.6](KnownIssues_and_Errata.md#86-hcom-file-download--uart-rx-bypass-hack)).
+
+The BlinkyCS sample requires `F7FeatherV2` board declaration (the emulator's
+default). The sample has both `V1App` and `V2App` classes — Meadow selects
+the correct one based on the device's reported hardware version.
 
 ## Prerequisites
 
@@ -169,8 +192,11 @@ Meadow.OS.Emulator/
 │   ├── ESP32_RTC_CNTL.cs     # RTC control with reactive status bits
 │   ├── ESP32_TimerGroup.cs   # Timer group with calibration ready bit
 │   ├── Winbond_W25QXXXJV.cs  # 64MB QSPI NOR flash
-│   ├── QspiDmaBypass.cs      # QSPI DMA bypass
-│   └── MqReceiveIntercept.cs # ESPCP mq_receive interception
+│   ├── STM32F7_RCC_Custom.cs # RCC with clock ready bit auto-set (replaces Python)
+│   ├── QspiDmaBypass.cs      # QSPI DMA bypass (C# hook)
+│   ├── EspcpSpiBypass.cs     # ESPCP SPI DMA bypass (C# hook)
+│   ├── MqReceiveIntercept.cs # ESPCP mq_receive interception
+│   └── UartRxBypass.cs       # UART RX bypass for fast file deploy (HACK — see §8.6)
 ├── scripts/
 │   ├── meadow-dual.resc            # Dual-machine: STM32 + ESP32
 │   ├── meadow-legacy-headless.resc # Legacy OS — headless (recommended)
@@ -229,10 +255,24 @@ The WildernessLabs/renode fork (`meadow-emulator-fixes` branch) contains fixes a
 
 Fixes for TCG code generation (`tcg_const_i32` → local temps in retw, rfw, callw, entry), window overflow handling (rfwo no-phys-sync, window_check n>w early exit, test_ill_retw a0 fixup), interrupt delivery, and CCOUNT/WAITI timing. See the [plan](conductor/tracks/renode-esp32-dual/plan.md) for the full fix table.
 
+## Verification Protocol
+
+Three tiers of testing, run in order (see [workflow.md](conductor/workflow.md)):
+
+| Tier | What | How | Time |
+|------|------|-----|------|
+| 1 | Smoke test | `python3 tools/hcom_test.py` | 5 seconds |
+| 2 | CLI device info | `meadow device info` | 10 seconds |
+| 3 | Blinky deploy + run | `meadow app run` from BlinkyCS | ~2.5 minutes |
+
 ## Known Issues
 
 See [KnownIssues_and_Errata.md](KnownIssues_and_Errata.md) for a full list. Key items:
 
-- **TCG stale-global bug** — `gen_exit_tb` writes pre-rotation register values over post-rotation values set by entry's window rotation. Workaround: Python hooks fix a2/a8 at prepare_data entry. Non-blocking for ESPCP operation.
-- **ESPCP polling disabled by default** — needed for WiFi/BLE. The dual-machine script enables it.
-- **Deploy throughput** — HCOM over UART is byte-by-byte. Pre-populated LFS image is the fast path.
+- **UART RX bypass (§8.6)** — File deploy uses a hack to bypass per-byte UART
+  interrupt overhead. Works but ~4/36 files need CLI retry due to edge cases.
+  See KnownIssues for full details and proper fix paths.
+- **Flash persistence (§4.4)** — QSPI flash is volatile. Deployed files are
+  lost when the emulator restarts.
+- **ESPCP polling disabled by default** — needed for WiFi/BLE. The dual-machine
+  script enables it.
