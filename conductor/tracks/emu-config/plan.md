@@ -64,22 +64,21 @@
 - **Current mapping:**
   - Legacy: 1=F7FeatherV1, 2=F7FeatherV2, 3=F7CoreComputeV2
   - New OS: 0x01=CCMv2 (single value, different scheme)
-- **Approach:** `extract-hook-addresses.py` reads config and injects the board
-  version into the generated `hooks.resc`. Or: `run.sh` passes a Renode variable
-  (`set board_version N`) before including the script.
-- [x] Add board version mapping to `read-config.sh`
-- [x] Pass board version to Renode via `--execute "set emu_board_version N"`
-- [x] Update `meadow-legacy-hooks.resc` to use `$emu_board_version` in gpio_ver_fix
-- [x] Update `extract-hook-addresses.py` to emit the variable reference
-- [x] Verify: F7FeatherV2 config boots with version=2 in device info
-- [x] Verify: F7CoreComputeV2 config boots with version=3
+- **Approach:** `extract-hook-addresses.py` reads `emulator.config.yaml` and
+  injects the board version as a literal into the generated `hooks.resc`.
+  (Renode `set` variables don't work inside IronPython strings — see memory.)
+- [x] Add board version mapping to `read-config.sh` (EMU_BOARD_VERSION)
+- [x] `extract-hook-addresses.py` reads board from config, adds BOARD_VERSION to addrs dict
+- [x] `meadow-legacy-hooks.resc` template uses `$hook_BOARD_VERSION` (substituted by extract script)
+- [x] Verify: F7FeatherV2 config boots with Hardware|F7FeatherV2 in device info
+- [ ] Verify: F7CoreComputeV2 config boots with version=3 (deferred — no CoreCompute firmware to test)
 
 ### E.5 — Board-specific platform differences (if any)
 - **What:** Determine if F7CoreComputeV2 needs different `.repl` or peripherals.
 - **Why:** Different boards may have different pin mappings, memory sizes, etc.
-- [x] Audit F7FeatherV2 vs F7CoreComputeV2 hardware differences
-- [x] Document which platform aspects differ (if any)
-- [x] Create board-specific `.repl` overlays if needed
+- [ ] Audit F7FeatherV2 vs F7CoreComputeV2 hardware differences (deferred — needs hardware docs)
+- [ ] Document which platform aspects differ (if any)
+- [ ] Create board-specific `.repl` overlays if needed
 
 ## Phase 3 — Polish
 
