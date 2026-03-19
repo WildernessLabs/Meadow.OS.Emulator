@@ -14,26 +14,57 @@ The legacy Meadow firmware boots with Mono JIT, loads .NET assemblies from Littl
 ## Quick Start
 
 ```bash
-./setup.sh --legacy                        # Check & install all prerequisites
+./setup.sh                                 # Check & install all prerequisites
 ./build-meadow.os_legacy-emulated.sh       # Build NuttX firmware
-./run.sh --legacy                          # Start emulator (ESP32 stubbed)
-./run.sh --legacy --esp32                  # Start emulator (real ESP32 coprocessor)
+./run.sh                                   # Start emulator (uses emulator.config.yaml)
 ```
 
 Connect Meadow.CLI (requires building from source — see [Using Meadow.CLI](#using-meadowcli)):
 ```bash
-dotnet ../Meadow.CLI/Source/Meadow.CLI/bin/Debug/meadow.dll config route socket://localhost:4242
-dotnet ../Meadow.CLI/Source/Meadow.CLI/bin/Debug/meadow.dll device info
+dotnet run --project ../Meadow.CLI/Source/Meadow.CLI -- config route socket://localhost:4242
+dotnet run --project ../Meadow.CLI/Source/Meadow.CLI -- device info
 ```
+
+## Configuration
+
+The emulator reads settings from `emulator.config.yaml` at the repo root. Pre-built
+configs for common setups are in `configs/`:
+
+| Config | OS | Board | Coprocessor |
+|--------|----|-------|-------------|
+| `configs/legacy.yaml` | Legacy NuttX | F7FeatherV2 | Stub (EspcpStub) |
+| `configs/meadow-os.yaml` | Meadow.OS rebase | F7FeatherV2 | Stub |
+
+Switch configurations:
+```bash
+cp configs/meadow-os.yaml emulator.config.yaml    # Switch to Meadow.OS rebase
+./run.sh                                            # Uses new config
+
+./run.sh --config configs/legacy.yaml              # One-off override
+```
+
+Each config has commented-out alternatives for every setting:
+```yaml
+os: legacy
+# os: meadow-os
+
+board: F7FeatherV2
+# board: F7CoreComputeV2
+
+coprocessor: stub
+# coprocessor: dual-machine
+```
+
+CLI args override config values: `--legacy`, `--esp32`, `--port=N`.
 
 ## Running
 
 ```bash
-./run.sh --legacy                          # NuttX + EspcpStub (no ESP32)
-./run.sh --legacy --esp32                  # NuttX + real ESP32 firmware (dual-machine)
-./run.sh --legacy meadow-legacy            # Interactive mode
-./run.sh --legacy meadow-legacy-debug      # GDB mode (port 3333)
-./run.sh --legacy --port=5555              # Custom monitor port
+./run.sh                                   # Uses emulator.config.yaml
+./run.sh --config configs/meadow-os.yaml   # One-off config override
+./run.sh --legacy --esp32                  # CLI overrides (dual-machine mode)
+./run.sh --port=5555                       # Custom monitor port
+./run.sh meadow-legacy-debug              # Specific script (GDB mode, port 3333)
 ./run.sh --help                            # Show all options
 ```
 

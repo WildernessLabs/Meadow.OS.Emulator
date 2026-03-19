@@ -92,3 +92,24 @@ if [ $? -ne 0 ]; then
     echo "ERROR: Failed to parse config file: $EMU_CONFIG_FILE"
     return 1 2>/dev/null || exit 1
 fi
+
+# Validate config values
+_RC_VALID=true
+case "$EMU_OS" in
+    legacy|meadow-os) ;;
+    *) echo "ERROR: Invalid os '$EMU_OS' in $EMU_CONFIG_FILE (valid: legacy, meadow-os)"; _RC_VALID=false ;;
+esac
+case "$EMU_BOARD" in
+    F7FeatherV1|F7FeatherV2|F7CoreComputeV2) ;;
+    *) echo "ERROR: Invalid board '$EMU_BOARD' in $EMU_CONFIG_FILE (valid: F7FeatherV1, F7FeatherV2, F7CoreComputeV2)"; _RC_VALID=false ;;
+esac
+case "$EMU_COPROCESSOR" in
+    stub|dual-machine) ;;
+    *) echo "ERROR: Invalid coprocessor '$EMU_COPROCESSOR' in $EMU_CONFIG_FILE (valid: stub, dual-machine)"; _RC_VALID=false ;;
+esac
+if ! [[ "$EMU_HCOM_PORT" =~ ^[0-9]+$ ]] || [ "$EMU_HCOM_PORT" -lt 1 ] || [ "$EMU_HCOM_PORT" -gt 65535 ]; then
+    echo "ERROR: Invalid ports.hcom '$EMU_HCOM_PORT' (must be 1-65535)"; _RC_VALID=false
+fi
+if [ "$_RC_VALID" = false ]; then
+    return 1 2>/dev/null || exit 1
+fi

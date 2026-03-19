@@ -1,7 +1,7 @@
 # Plan: Emulator Configuration
 
 ## Track ID: `emu-config`
-## Status: `planned`
+## Status: `complete`
 ## Priority: `medium`
 
 ---
@@ -17,42 +17,42 @@
 - **Approach:** Use `python3 -c "import yaml; ..."` for parsing — python3 and
   PyYAML are already required for `extract-hook-addresses.py`. The helper
   script sources into `run.sh` and build scripts.
-- [ ] Create `configs/` directory with pre-built config files:
+- [x] Create `configs/` directory with pre-built config files:
   - `configs/legacy.yaml` — Legacy OS, F7FeatherV2, dual proc machine
   - `configs/meadow-os.yaml` — New rebase OS, F7FeatherV2, dua proc machine
   Each has commented-out alternatives for every setting.
-- [ ] Copy `configs/legacy.yaml` to `emulator.config.yaml` at repo root as the
+- [x] Copy `configs/legacy.yaml` to `emulator.config.yaml` at repo root as the
       active default
-- [ ] Create `scripts/read-config.sh` that exports `EMU_OS`, `EMU_BOARD`,
+- [x] Create `scripts/read-config.sh` that exports `EMU_OS`, `EMU_BOARD`,
       `EMU_COPROCESSOR`, `EMU_HCOM_PORT`, `EMU_MONITOR_PORT`, etc.
       Accepts optional config path arg: `source scripts/read-config.sh [path]`
-- [ ] Verify parser works with each pre-built config
+- [x] Verify parser works with each pre-built config
 
 ### E.2 — Update run.sh to read config
 - **What:** `run.sh` sources `read-config.sh`, uses config values for defaults,
   and lets CLI args override them. Remove hardcoded script selection logic.
 - **Why:** `run.sh` currently has `if legacy && esp32 then dual; elif legacy then
   headless; else meadow-os` — this should come from config.
-- [ ] Source `read-config.sh` at top of `run.sh`
-- [ ] Map config values to script selection:
+- [x] Source `read-config.sh` at top of `run.sh`
+- [x] Map config values to script selection:
   - `os=legacy, coprocessor=stub` → `meadow-legacy-headless`
   - `os=legacy, coprocessor=dual-machine` → `meadow-dual`
   - `os=meadow-os, coprocessor=stub` → `meadow-os-headless`
   - `headless=false` → drop `-headless` suffix
-- [ ] CLI args (`--legacy`, `--esp32`, `--port=N`) override config values
-- [ ] `--config=path` arg to specify alternate config file (e.g., `--config emulator.config.dual.yaml`)
-- [ ] Verify: `./run.sh` with default config matches current `./run.sh --legacy`
-- [ ] Verify: `./run.sh --config emulator.config.dual.yaml` selects dual-machine mode
+- [x] CLI args (`--legacy`, `--esp32`, `--port=N`) override config values
+- [x] `--config=path` arg to specify alternate config file (e.g., `--config emulator.config.dual.yaml`)
+- [x] Verify: `./run.sh` with default config matches current `./run.sh --legacy`
+- [x] Verify: `./run.sh --config emulator.config.dual.yaml` selects dual-machine mode
 
 ### E.3 — Update build scripts to read config
 - **What:** Build scripts read `os` and `build.defconfig` from config instead
   of positional args.
 - **Why:** Currently `build-meadow.os_legacy-emulated.sh mono` takes defconfig
   as arg. Config file should be the default, with arg as override.
-- [ ] `build-meadow.os_legacy-emulated.sh` reads config for defconfig name
-- [ ] `build-meadow.os-emulated.sh` reads config for defconfig name
-- [ ] CLI arg still overrides config value
-- [ ] Verify: build with default config produces same output
+- [x] `build-meadow.os_legacy-emulated.sh` reads config for defconfig name
+- [x] `build-meadow.os-emulated.sh` reads config for defconfig name
+- [x] CLI arg still overrides config value
+- [x] Verify: build with default config produces same output
 
 ## Phase 2 — Board Selection
 
@@ -67,35 +67,35 @@
 - **Approach:** `extract-hook-addresses.py` reads config and injects the board
   version into the generated `hooks.resc`. Or: `run.sh` passes a Renode variable
   (`set board_version N`) before including the script.
-- [ ] Add board version mapping to `read-config.sh`
-- [ ] Pass board version to Renode via `--execute "set emu_board_version N"`
-- [ ] Update `meadow-legacy-hooks.resc` to use `$emu_board_version` in gpio_ver_fix
-- [ ] Update `extract-hook-addresses.py` to emit the variable reference
-- [ ] Verify: F7FeatherV2 config boots with version=2 in device info
-- [ ] Verify: F7CoreComputeV2 config boots with version=3
+- [x] Add board version mapping to `read-config.sh`
+- [x] Pass board version to Renode via `--execute "set emu_board_version N"`
+- [x] Update `meadow-legacy-hooks.resc` to use `$emu_board_version` in gpio_ver_fix
+- [x] Update `extract-hook-addresses.py` to emit the variable reference
+- [x] Verify: F7FeatherV2 config boots with version=2 in device info
+- [x] Verify: F7CoreComputeV2 config boots with version=3
 
 ### E.5 — Board-specific platform differences (if any)
 - **What:** Determine if F7CoreComputeV2 needs different `.repl` or peripherals.
 - **Why:** Different boards may have different pin mappings, memory sizes, etc.
-- [ ] Audit F7FeatherV2 vs F7CoreComputeV2 hardware differences
-- [ ] Document which platform aspects differ (if any)
-- [ ] Create board-specific `.repl` overlays if needed
+- [x] Audit F7FeatherV2 vs F7CoreComputeV2 hardware differences
+- [x] Document which platform aspects differ (if any)
+- [x] Create board-specific `.repl` overlays if needed
 
 ## Phase 3 — Polish
 
 ### E.6 — Config validation and error messages
 - **What:** `read-config.sh` validates config values and prints clear errors.
-- [ ] Validate `os` is `legacy` or `meadow-os`
-- [ ] Validate `board` is a known board type
-- [ ] Validate `coprocessor` is `stub` or `dual-machine`
-- [ ] Validate ports are numeric and in range
-- [ ] Print human-readable errors with valid options
+- [x] Validate `os` is `legacy` or `meadow-os`
+- [x] Validate `board` is a known board type
+- [x] Validate `coprocessor` is `stub` or `dual-machine`
+- [x] Validate ports are numeric and in range
+- [x] Print human-readable errors with valid options
 
 ### E.7 — Documentation
 - **What:** Update README.md with config file usage.
-- [ ] Document config file location and format
-- [ ] Document CLI override behavior
-- [ ] Add examples for common configurations
+- [x] Document config file location and format
+- [x] Document CLI override behavior
+- [x] Add examples for common configurations
 
 ---
 
