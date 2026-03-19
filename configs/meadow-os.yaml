@@ -1,0 +1,35 @@
+# Meadow.OS Emulator Configuration — Meadow.OS (Rebase)
+#
+# This config targets the new Meadow.OS rebase (updated NuttX).
+# Copy to emulator.config.yaml at repo root, or pass via: ./run.sh --config configs/meadow-os.yaml
+
+# Which OS variant to build and run
+# os: legacy
+os: meadow-os
+
+# Board to emulate
+board: F7FeatherV2
+# board: F7CoreComputeV2
+
+# ESP32 coprocessor mode
+#   stub         — EspcpStub (fast, no real ESP32 needed)
+#   dual-machine — Real ESP32 firmware on emulated Xtensa (requires Meadow-ESP32 build)
+coprocessor: stub
+# coprocessor: dual-machine
+
+# Build configuration
+build:
+  # NuttX defconfig name (subdirectory under stm32f777zit6-meadow/)
+  defconfig: meadow
+
+# Network ports
+ports:
+  hcom: 4242        # HCOM TCP socket (Meadow.CLI connects here)
+  monitor: 1234     # Renode monitor telnet
+  esp32ctrl: 4243   # ESP32 UART control channel
+  gdb: 0            # GDB server port (0 = disabled)
+
+# Debug options
+debug:
+  console_log: /tmp/renode-uart-meadow.txt
+  headless: true    # true = no GUI analyzer windows

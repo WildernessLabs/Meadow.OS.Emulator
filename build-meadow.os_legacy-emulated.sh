@@ -5,7 +5,10 @@ SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
 MEADOW_DIR="$SCRIPT_DIR/../Meadow"
 NUTTX_DIR="$MEADOW_DIR/nuttx"
 BUILD_DIR="$SCRIPT_DIR/build/legacy"
-CONFIG="${1:-mono}"
+
+# Load config for defconfig name (CLI arg overrides config)
+source "$SCRIPT_DIR/scripts/read-config.sh" "$@" 2>/dev/null || true
+CONFIG="${1:-${EMU_DEFCONFIG:-mono}}"
 
 # Validate Meadow sibling directory exists
 if [ ! -d "$NUTTX_DIR" ]; then

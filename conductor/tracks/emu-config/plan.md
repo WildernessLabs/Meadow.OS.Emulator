@@ -18,11 +18,8 @@
   PyYAML are already required for `extract-hook-addresses.py`. The helper
   script sources into `run.sh` and build scripts.
 - [ ] Create `configs/` directory with pre-built config files:
-  - `configs/legacy.yaml` — Legacy OS, F7FeatherV2, stub ESP32 (default)
-  - `configs/legacy-dual.yaml` — Legacy OS, F7FeatherV2, real ESP32
-  - `configs/legacy-corecompute.yaml` — Legacy OS, F7CoreComputeV2, stub ESP32
-  - `configs/meadow-os.yaml` — New rebase OS, F7FeatherV2, stub ESP32
-  - `configs/meadow-os-dual.yaml` — New rebase OS, F7FeatherV2, real ESP32
+  - `configs/legacy.yaml` — Legacy OS, F7FeatherV2, dual proc machine
+  - `configs/meadow-os.yaml` — New rebase OS, F7FeatherV2, dua proc machine
   Each has commented-out alternatives for every setting.
 - [ ] Copy `configs/legacy.yaml` to `emulator.config.yaml` at repo root as the
       active default

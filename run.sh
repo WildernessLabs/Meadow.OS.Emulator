@@ -53,10 +53,28 @@ else
 fi
 
 # Parse arguments
-LEGACY=false
-ESP32=false
+# Load config — sets EMU_OS, EMU_BOARD, EMU_COPROCESSOR, EMU_MONITOR_PORT, etc.
+CONFIG_ARG=""
 SCRIPT=""
-MONITOR_PORT=1234
+CLI_OVERRIDES=""
+
+# Pre-scan for --config to pass to read-config.sh
+for arg in "$@"; do
+    case "$arg" in
+        --config=*) CONFIG_ARG="${arg#--config=}" ;;
+    esac
+done
+
+if [ -n "$CONFIG_ARG" ]; then
+    source "$SCRIPT_DIR/scripts/read-config.sh" "$CONFIG_ARG"
+else
+    source "$SCRIPT_DIR/scripts/read-config.sh"
+fi
+
+# Apply CLI overrides on top of config values
+LEGACY=$( [ "$EMU_OS" = "legacy" ] && echo true || echo false )
+ESP32=$( [ "$EMU_COPROCESSOR" = "dual-machine" ] && echo true || echo false )
+MONITOR_PORT="$EMU_MONITOR_PORT"
 
 for arg in "$@"; do
     case "$arg" in
@@ -69,19 +87,25 @@ for arg in "$@"; do
         --port=*)
             MONITOR_PORT="${arg#--port=}"
             ;;
+        --config=*)
+            ;; # already handled above
         --help|-h)
             echo "Usage: ./run.sh [options] [script-name]"
             echo ""
             echo "Options:"
-            echo "  --legacy        Run NuttX Legacy OS (default: Meadow.OS)"
-            echo "  --esp32         Run with real ESP32 coprocessor (dual-machine emulation)"
-            echo "                  Without --esp32, the ESP32 is stubbed via EspcpStub"
-            echo "  --port=N        Renode monitor port (default: 1234)"
+            echo "  --config=FILE   Use a specific config file (default: emulator.config.yaml)"
+            echo "  --legacy        Override OS to legacy (same as os: legacy in config)"
+            echo "  --esp32         Override coprocessor to dual-machine"
+            echo "  --port=N        Override Renode monitor port"
+            echo ""
+            echo "Config files:"
+            echo "  configs/legacy.yaml       Legacy OS, F7FeatherV2, stub ESP32"
+            echo "  configs/meadow-os.yaml    New Meadow.OS rebase, F7FeatherV2"
             echo ""
             echo "Examples:"
-            echo "  ./run.sh --legacy              # NuttX + EspcpStub (no ESP32)"
-            echo "  ./run.sh --legacy --esp32      # NuttX + real ESP32 firmware"
-            echo "  ./run.sh                       # Meadow.OS (default)"
+            echo "  ./run.sh                                        # Uses emulator.config.yaml"
+            echo "  ./run.sh --config configs/meadow-os.yaml        # Use specific config"
+            echo "  ./run.sh --legacy --esp32                       # Override config"
             exit 0
             ;;
         *)
@@ -90,7 +114,7 @@ for arg in "$@"; do
     esac
 done
 
-# Select default script based on OS variant and ESP32 flag
+# Select default script based on config + overrides
 if [ -z "$SCRIPT" ]; then
     if [ "$LEGACY" = true ] && [ "$ESP32" = true ]; then
         SCRIPT="meadow-dual"
