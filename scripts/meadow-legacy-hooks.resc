@@ -126,8 +126,8 @@ cpu AddHook $hook_HCOM_HOST_WATCHDOG_TIMEOUT_EXPIRED $wdog_skip
 # LFS format skip — prevents firmware from reformatting the pre-populated LittleFS
 # image that contains BCL assemblies in /mono/4.5/. The hook makes lfs_format return 0
 # (success) without actually formatting, preserving the pre-loaded filesystem.
-set lfs_format_skip "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
-cpu AddHook $hook_LFS_FORMAT $lfs_format_skip
+# set lfs_format_skip "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
+# cpu AddHook $hook_LFS_FORMAT $lfs_format_skip
 
 # UART RX Bypass — intercepts the HCOM receive thread's read() syscall and copies
 # data directly from the UART model's receive queue to the firmware's read buffer,

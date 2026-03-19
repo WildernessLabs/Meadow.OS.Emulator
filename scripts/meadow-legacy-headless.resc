@@ -42,7 +42,7 @@ sysbus LoadBinary @build/legacy/nuttx_mono.bin 0xC0000000
 # Built by: tools/build_lfs_v1_image (LFS v1.7.2 format, compatible with legacy firmware)
 # BCL assemblies go to /mono/4.5/ (where Mono's corlib loader expects them).
 # App assemblies are deployed on top via Meadow CLI.
-sysbus LoadBinary @build/legacy/littlefs.bin 0x90500000
+# sysbus LoadBinary @build/legacy/littlefs.bin 0x90500000
 
 sysbus.cpu VectorTableOffset 0x08040000
 
