@@ -17,13 +17,19 @@
 - **Approach:** Use `python3 -c "import yaml; ..."` for parsing — python3 and
   PyYAML are already required for `extract-hook-addresses.py`. The helper
   script sources into `run.sh` and build scripts.
-- [ ] Create `emulator.config.yaml` with defaults (legacy, F7FeatherV2, stub, headless)
-      and commented-out alternatives for each setting
-- [ ] Create example profile `emulator.config.dual.yaml` (legacy, F7FeatherV2, dual-machine)
+- [ ] Create `configs/` directory with pre-built config files:
+  - `configs/legacy.yaml` — Legacy OS, F7FeatherV2, stub ESP32 (default)
+  - `configs/legacy-dual.yaml` — Legacy OS, F7FeatherV2, real ESP32
+  - `configs/legacy-corecompute.yaml` — Legacy OS, F7CoreComputeV2, stub ESP32
+  - `configs/meadow-os.yaml` — New rebase OS, F7FeatherV2, stub ESP32
+  - `configs/meadow-os-dual.yaml` — New rebase OS, F7FeatherV2, real ESP32
+  Each has commented-out alternatives for every setting.
+- [ ] Copy `configs/legacy.yaml` to `emulator.config.yaml` at repo root as the
+      active default
 - [ ] Create `scripts/read-config.sh` that exports `EMU_OS`, `EMU_BOARD`,
       `EMU_COPROCESSOR`, `EMU_HCOM_PORT`, `EMU_MONITOR_PORT`, etc.
       Accepts optional config path arg: `source scripts/read-config.sh [path]`
-- [ ] Verify parser works with default config and with named profile
+- [ ] Verify parser works with each pre-built config
 
 ### E.2 — Update run.sh to read config
 - **What:** `run.sh` sources `read-config.sh`, uses config values for defaults,
@@ -106,3 +112,4 @@
 | 2026-03-18 | Shell helper using python3 | python3 + PyYAML already required; avoids adding yq/jq dependency |
 | 2026-03-18 | Check in config, commented alternatives | Users get working defaults on clone; uncomment to switch settings |
 | 2026-03-18 | Multiple named profiles via `--config` | Quick switching between configs without editing the default file |
+| 2026-03-19 | Pre-built config files in `configs/` dir | Common setups (legacy, legacy-dual, meadow-os, etc.) should be one `cp` away, not manual editing |

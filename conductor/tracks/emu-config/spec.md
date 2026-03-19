@@ -85,7 +85,7 @@ debug:
 - [ ] Changing `os: meadow-os` selects the new OS build + script
 
 ## Decisions
-- **Checked in, not gitignored.** The default config is committed to the repo so
+- **Checked in, not gitignored.** All config files are committed to the repo so
   cloning gives a working setup out of the box.
 - **Commented alternatives.** Each setting shows alternate values as commented
   lines that users can uncomment to switch:
@@ -96,10 +96,22 @@ debug:
   board: F7FeatherV2
   # board: F7CoreComputeV2
   ```
-- **Multiple config profiles.** Named configs like `emulator.config.dual.yaml`
-  can be passed to build/run scripts:
-  ```bash
-  ./run.sh --config emulator.config.dual.yaml
-  ./build-meadow.os_legacy-emulated.sh --config emulator.config.dual.yaml
+- **Pre-built config files for common setups.** Each represents a real use case:
   ```
-  Default: `emulator.config.yaml` (no arg needed).
+  configs/
+  ├── legacy.yaml              # Legacy OS, F7FeatherV2, stub ESP32 (default)
+  ├── legacy-dual.yaml         # Legacy OS, F7FeatherV2, real ESP32 coprocessor
+  ├── legacy-corecompute.yaml  # Legacy OS, F7CoreComputeV2, stub ESP32
+  ├── meadow-os.yaml           # New rebase OS, F7FeatherV2, stub ESP32
+  └── meadow-os-dual.yaml      # New rebase OS, F7FeatherV2, real ESP32
+  ```
+- **Default config via symlink or convention.** `emulator.config.yaml` at the
+  repo root is the active config. Users can either edit it directly or copy
+  one of the pre-built configs:
+  ```bash
+  cp configs/legacy-dual.yaml emulator.config.yaml
+  ./run.sh                                            # uses emulator.config.yaml
+  ./run.sh --config configs/meadow-os.yaml            # one-off override
+  ```
+- **CLI args still override.** `--legacy`, `--esp32`, `--port=N` override
+  whatever the config file says.
