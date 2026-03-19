@@ -532,29 +532,66 @@ Last updated: 2026-03-17
   performance penalty is being paid on every run. Investigating and resolving
   this would benefit all workloads.
 
-### 8.6 HCOM File Download Timing Mismatch
-- **Severity:** High (blocks app deployment)
-- **Status:** IDENTIFIED | No fix yet
-- **Component:** HCOM file download protocol, emulated UART timing
-- **Description:** When deploying app binaries via `meadow app run`, the Meadow.CLI
-  sends HCOM file download packets at wall-clock speed, but the emulated firmware
-  processes them at virtual-time speed. For large files, the CLI sends the next
-  file's header before the firmware has fully acknowledged the previous write.
-- **Impact:** File transfers stall mid-deploy. Firmware logs:
-  `ERROR:F7 Dnld active, unexpected rqst type:0x0201, dnld state:3`
-  This blocks Tier 3 validation (Blinky app deploy + run).
-- **Observed:** Smaller files (netstandard.dll, MQTTnet.dll ~100KB) transfer OK.
-  Larger files (System.Web.dll, System.dll ~1-2MB) stall after partial transfer.
-- **Partial fix (CLI-side):** Three changes to `SocketConnection.WriteFile`
-  on branch `feature/TCP_Socket_Connection_for_EMU`:
-  1. Per-packet `Task.Delay(1)` yield in data streaming loop
-  2. After `END_FILE_TRANSFER`, wait for firmware's `TEXT_INFORMATION` response
-  3. File operation timeout increased from 30s to 120s
-  Deploy now progresses file-by-file, but relies on timeout recovery (~120s per
-  file) because the `TEXT_INFORMATION` response timing needs further investigation.
-  The firmware sends `TEXT_INFORMATION` (not `TEXT_CONCLUDED`) after CRC check,
-  but the response isn't reaching the CLI's `InfoMessages` within the wait window.
-- **Remaining investigation:**
-  - Why firmware's `TEXT_INFORMATION` after download isn't received by CLI in time
-  - May be UART TX buffering issue (responses queued behind data processing)
-  - Alternative: pre-populate LittleFS image with trimmed assemblies at boot
+### 8.6 HCOM File Download — UART RX Bypass (HACK)
+- **Severity:** High
+- **Status:** WORKING HACK | Needs proper fix
+- **Component:** UartRxBypass.cs, BackendTerminal.cs (Renode fork)
+- **Root cause:** Renode's emulated ARM CPU processes UART bytes through an
+  interrupt-driven serial driver. Each byte requires: RXNE interrupt → ISR entry →
+  USART_ISR register read → USART_RDR register read → ISR exit. At emulated CPU
+  speed, this gives ~300 bytes/second throughput — a 100KB file takes ~335 seconds.
+  On real hardware at 216MHz, this is near-instant.
+- **Why this is a hack:** The proper fix is to make Renode's emulation fast enough
+  that interrupt-driven UART works at acceptable speed, or to implement DMA-based
+  UART RX in the Renode UART model (batching bytes into memory without per-byte
+  interrupts). Instead, we bypass the entire UART interrupt path with a fragile
+  multi-component workaround that has several sharp edges.
+- **The hack (3 components):**
+  1. **UartRxBypass.cs** — C# hook at the firmware's `read()` syscall in
+     `hcom_host_recv_pthread`. Adds a second `DataReceived` handler on
+     `SocketServerProvider` that enqueues TCP bytes into a `ConcurrentQueue`.
+     The hook drains the queue directly into the firmware's read buffer via
+     `SystemBus.WriteBytes`, bypassing the per-byte UART interrupt path entirely.
+  2. **BackendTerminal.SuppressIncomingData** — Boolean property on
+     `BackendTerminal` (Renode fork change). When true, `EnqueueWriteToUART`,
+     `WriteToUART`, and `WriteBufferToUART` are no-ops — incoming bytes are
+     silently dropped instead of being written to the UART model. This prevents
+     data duplication (the same bytes arriving via both the queue AND the UART).
+  3. **Wake byte mechanism** — When `read()` blocks on the NuttX serial driver's
+     semaphore (queue empty, UART suppressed), the `DataReceived` handler writes
+     a `0x00` byte directly to `uart4.WriteChar()` to wake the semaphore. The
+     `0x00` is a COBS delimiter that produces an empty HCOM frame, harmlessly
+     discarded by the firmware's protocol parser.
+- **Deferred activation:** The bypass only activates after the first successful
+  queue data read (not at boot). This allows boot/init traffic to flow through
+  the normal UART path. Once a file transfer starts, suppression activates
+  permanently for the session.
+- **Known issues with this hack:**
+  - ~4 out of 36 files get CRC errors during `app run` (CLI retries handle them).
+    Caused by edge cases in the suppress/wake transition during the `app run`
+    flow's additional HCOM commands (file listing, CRC comparison, deletes)
+    between file transfers.
+  - The `0x00` wake byte occasionally injects an empty COBS frame into the
+    protocol stream. The firmware discards it, but it's technically protocol
+    pollution.
+  - The `SuppressIncomingData` flag on BackendTerminal is a Renode fork change
+    that affects the generic terminal infrastructure. It's not specific to
+    UART4 or HCOM — any code that sets it affects all incoming data for that
+    terminal connection.
+  - The `DataReceived` handler runs on the SocketServerProvider's reader thread
+    (a host OS thread), while the hook runs on the emulated CPU thread. The
+    `ConcurrentQueue` handles thread safety, but the wake byte write to
+    `uart4.WriteChar()` from the reader thread is a cross-thread call into
+    the Renode peripheral model that may have subtle timing implications.
+- **Result:** 36-file BlinkyCS deploy completes in ~150 seconds (2.5 minutes).
+  Without the hack, it would take ~6+ hours. Mono starts successfully.
+- **Proper fix (future):** Either:
+  1. Implement DMA-based UART RX in Renode's STM32F7_USART model — the DMA
+     controller transfers N bytes from UART to memory buffer, fires ONE
+     interrupt. No per-byte ISR overhead. Requires Renode DMA controller
+     support for UART peripherals.
+  2. Optimize Renode's core emulation speed for register-access-heavy workloads
+     (each USART_ISR/USART_RDR read goes through C# method dispatch from
+     translated native code).
+  3. Enable CONFIG_UART4_RXDMA in the NuttX firmware defconfig (changes
+     firmware behavior from real hardware — currently uses interrupt-driven RX).
