@@ -81,6 +81,11 @@ print(f'export EMU_GDB_PORT=\"{val(\"ports.gdb\", \"0\")}\"')
 print(f'export EMU_CONSOLE_LOG=\"{val(\"debug.console_log\", \"/tmp/renode-uart.txt\")}\"')
 print(f'export EMU_HEADLESS=\"{val(\"debug.headless\", \"true\")}\"')
 print(f'export EMU_CONFIG_FILE=\"$EMU_CONFIG_FILE\"')
+
+# Map board name to GPIO version number for the firmware hook
+board = val('board', 'F7FeatherV2')
+board_ver = dict(F7FeatherV1=1, F7FeatherV2=2, F7CoreComputeV2=3).get(board, 2)
+print(f'export EMU_BOARD_VERSION=\"' + str(board_ver) + '\"')
 " 2>&1)"
 
 if [ $? -ne 0 ]; then

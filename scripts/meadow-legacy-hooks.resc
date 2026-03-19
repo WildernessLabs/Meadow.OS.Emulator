@@ -15,7 +15,7 @@
 # Hook meadow_hw_version_find_device_ver at entry.
 # Write initialized=1 and version=2 to hw_version struct.
 # Values: 1=F7FeatherV1, 2=F7FeatherV2, 3=F7CoreComputeV2
-set gpio_ver_fix "machine.SystemBus.WriteByte($hook_HW_VERSION_INITIALIZED, 1); machine.SystemBus.WriteDoubleWord($hook_HW_VERSION_VALUE, 2); cpu.PC = cpu.LR"
+set gpio_ver_fix "machine.SystemBus.WriteByte($hook_HW_VERSION_INITIALIZED, 1); machine.SystemBus.WriteDoubleWord($hook_HW_VERSION_VALUE, $hook_BOARD_VERSION); cpu.PC = cpu.LR"
 cpu AddHook $hook_MEADOW_HW_VERSION_FIND_DEVICE_VER $gpio_ver_fix
 
 # Workaround: Renode's STM32H7_QuadSPI doesn't set TCF in SR.

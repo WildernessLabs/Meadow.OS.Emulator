@@ -117,6 +117,20 @@ def main():
     user_elf = sys.argv[2]
     out_dir = Path(kernel_elf).parent
 
+    # Read board version from emulator config
+    board_version = 2  # default: F7FeatherV2
+    config_file = Path(__file__).parent.parent / "emulator.config.yaml"
+    if config_file.exists():
+        try:
+            import yaml
+            with open(config_file) as f:
+                cfg = yaml.safe_load(f)
+            board = cfg.get("board", "F7FeatherV2")
+            board_map = {"F7FeatherV1": 1, "F7FeatherV2": 2, "F7CoreComputeV2": 3}
+            board_version = board_map.get(board, 2)
+        except Exception:
+            pass
+
     print(f"Extracting hook addresses from:")
     print(f"  Kernel: {kernel_elf}")
     print(f"  User:   {user_elf}")
@@ -153,7 +167,7 @@ def main():
         "HCOM_HOST_RECV_PTHREAD": ("hcom_host_recv_pthread", usyms),
     }
 
-    addrs: dict[str, int] = {}
+    addrs: dict[str, int] = {"BOARD_VERSION": board_version}
     missing = []
     for var_name, (sym_name, sym_table) in simple.items():
         addr = sym_table.get(sym_name)
