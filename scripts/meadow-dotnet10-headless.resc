@@ -36,6 +36,9 @@ sysbus LoadBinary @build/dotnet10/nuttx_kernel.bin 0x08140000
 # Load into QSPI for kernel flash reads, and into SDRAM at the ELF base address.
 sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0x90000000
 sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0xC0000000
+# Zero .mono_bss (Mono static globals) — not covered by nuttx_mono.bin (NOBITS section)
+# Range: _s_mono_bss (0xC025EC00) to _e_mono_bss (0xC0300000) = 660480 bytes
+sysbus LoadBinary @build/dotnet10/mono_bss_zero.bin 0xC025EC00
 
 # LittleFS filesystem image — pre-populated with .NET 10 assemblies
 # File System partition starts at QSPI offset 0x500000 (see UART: "File System - Offset:0x00500000")
@@ -54,6 +57,7 @@ macro reset
     sysbus LoadBinary @build/dotnet10/nuttx_kernel.bin 0x08140000
     sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0x90000000
     sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0xC0000000
+    sysbus LoadBinary @build/dotnet10/mono_bss_zero.bin 0xC025EC00
     # NOTE: Do NOT reload littlefs.bin here — it would overwrite deployed app files.
     # The LFS image is loaded once at initial boot; the firmware manages QSPI flash after that.
     sysbus.cpu VectorTableOffset 0x08040000
