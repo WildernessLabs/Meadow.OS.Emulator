@@ -5,6 +5,7 @@ include @peripherals/QspiDmaBypass.cs
 include @peripherals/EspcpSpiBypass.cs
 include @peripherals/MqReceiveIntercept.cs
 # include @peripherals/UartRxBypass.cs  # Disabled: API incompatibility with Renode 1.16.1
+include @peripherals/FileReadBypass.cs
 include @peripherals/STM32F7_RCC_Custom.cs
 mach create "meadow-dotnet10"
 machine LoadPlatformDescription @platforms/meadow-f7.repl
@@ -92,5 +93,15 @@ connector Connect sysbus.uart5 esp32ctrl
 include @build/dotnet10/hooks.resc
 include @build/dotnet10/sdram-patches.resc
 
+# =============================================================================
+# Turbo I/O: bypass LFS/QSPI for assembly file reads (~50x speedup)
+# Serves pre-loaded DLL files directly from memory, skipping the full
+# NuttX VFS → LittleFS → QSPI driver path.
+# Comment out for hardware-accurate I/O timing validation.
+# =============================================================================
+# Pre-load raw SPCL DLL at a scratch SDRAM address (after .mono_bss, before heap)
+sysbus LoadBinary @build/dotnet10/assemblies/System.Private.CoreLib.dll 0xC0400000
+# Hook mono_file_map_fileio's read() call to serve from pre-loaded memory
+cpu InstallFileMapBypass 0xC015A460 "System.Private.CoreLib.dll" 0xC0400000 6044160
 
 start
