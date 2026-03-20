@@ -85,6 +85,12 @@ set spi_lock_skip "cpu.PC = cpu.LR"
 cpu AddHook $hook_ESPCP_SPI_INTERFACE_LOCK $spi_lock_skip
 cpu AddHook $hook_ESPCP_SPI_INTERFACE_UNLOCK $spi_lock_skip
 
+# Workaround: Renode's STM32F4_RTC crashes when firmware writes an RTC date register
+# with partially-populated BCD fields (intermediate zero month/day creates invalid DateTime).
+# Skip the function that sets RTC time to build time — emulator doesn't need a real clock.
+set rtc_time_skip "cpu.PC = cpu.LR"
+cpu AddHook $hook_HCOM_NX_CONFIG_SET_TIME $rtc_time_skip
+
 # Workaround: LSI clock calibration thread polls Timer 5 capture/compare which
 # Renode doesn't emulate. Skip the thread function to avoid burning CPU.
 set lsi_skip "cpu.PC = cpu.LR"

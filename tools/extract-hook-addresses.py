@@ -149,6 +149,7 @@ def main():
         "QSPI_MEMORY": ("qspi_memory", ksyms),
         "HCOM_NX_CONFIG_REFRESH_MONO_VERSION": ("hcom_nx_config_refresh_mono_version", ksyms),
         "HCOM_NX_CONFIG_INIT": ("hcom_nx_config_init", ksyms),
+        "HCOM_NX_CONFIG_SET_TIME": ("hcom_nx_config_set_time_to_os_build_time", ksyms),
         "HCOM_NX_SETUP_MGR": ("hcom_nx_setup_mgr", ksyms),
         "ESPCP_SEND_DATA_OVER_SPI": ("espcp_send_data_over_spi", ksyms),
         "ESPCP_SPI_INTERFACE_LOCK": ("espcp_spi_interface_lock", ksyms),

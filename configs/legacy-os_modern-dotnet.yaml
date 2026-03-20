@@ -3,7 +3,7 @@
 # This config targets the legacy NuttX-based Meadow OS firmware linked with
 # the new .NET 10 Mono runtime (interpreter-only, CMake-built from runtime/).
 #
-# The NuttX firmware comes from Meadow.OS/ (newer NuttX codebase), while the
+# The NuttX firmware comes from Meadow/ (legacy NuttX codebase), while the
 # Mono runtime is the .NET 10 fork built via runtime/src/mono/build-nuttx.sh.
 #
 # Copy to emulator.config.yaml at repo root, or pass via:
@@ -23,7 +23,7 @@ coprocessor: stub
 # Build configuration
 build:
   # NuttX defconfig name (subdirectory under stm32f777zit6-meadow/)
-  defconfig: meadow_os_emu
+  defconfig: mono
 
   # Mono/.NET runtime to link into the firmware
   #   (empty)                  — no mono runtime (NuttX only)

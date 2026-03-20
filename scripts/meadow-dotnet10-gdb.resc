@@ -1,8 +1,12 @@
 using sysbus
 include @peripherals/Winbond_W25QXXXJV.cs
-include @peripherals/STM32F7_RCC_Custom.cs
+include @peripherals/EspcpStub.cs
 include @peripherals/QspiDmaBypass.cs
-mach create "meadow"
+include @peripherals/EspcpSpiBypass.cs
+include @peripherals/MqReceiveIntercept.cs
+include @peripherals/UartRxBypass.cs
+include @peripherals/STM32F7_RCC_Custom.cs
+mach create "meadow-dotnet10-gdb"
 machine LoadPlatformDescription @platforms/meadow-f7.repl
 
 # RCC peripheral with proper clock ready bit handling
@@ -11,12 +15,22 @@ machine LoadPlatformDescriptionFromString "rcc: Miscellaneous.STM32F7_RCC_Custom
 # USB OTG FS stub — handles GRSTCTL polling (AHBIDL bit)
 machine PyDevFromFile @scripts/pydev/otg_fs.py 0x50000000 0x40000 true "otg_fs"
 
-# Load kernel at link-time address (0x08000000)
-sysbus LoadBinary @build/dotnet10/nuttx.bin 0x08000000
-# Load user binary at 0x08100000 (CONFIG_NUTTX_USERSPACE)
-sysbus LoadBinary @build/dotnet10/nuttx_user.bin 0x08100000
+# FMC (Flexible Memory Controller) stub — SDRAM init writes to 0xA0000000
+machine PyDevFromFile @scripts/pydev/fmc.py 0xA0000000 0x1000 true "fmc"
 
-sysbus.cpu VectorTableOffset 0x08000000
+# ESP32 coprocessor stub
+sysbus.spi2.espcpStub Reset
+
+# Legacy memory layout
+sysbus LoadBinary @build/dotnet10/nuttx_user.bin 0x08040000
+sysbus LoadBinary @build/dotnet10/nuttx_vectors.bin 0x08040000
+sysbus LoadBinary @build/dotnet10/nuttx_kernel.bin 0x08140000
+
+# Mono runtime — QSPI flash + SDRAM
+sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0x90000000
+sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0xC0000000
+
+sysbus.cpu VectorTableOffset 0x08040000
 
 # USART1: Console/syslog output to file
 usart1 CreateFileBackend @/tmp/renode-uart-dotnet10.txt true
@@ -25,43 +39,15 @@ usart1 CreateFileBackend @/tmp/renode-uart-dotnet10.txt true
 emulation CreateServerSocketTerminal 4242 "hcom" false
 connector Connect sysbus.uart4 hcom
 
-# Workaround: Renode skips SVC when PRIMASK=1 instead of escalating to HardFault.
-set svc_fix "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.PRIMASK = RegisterValue.Create(0, 32)"
-cpu AddHook 0x08002258 $svc_fix
-cpu AddHook 0x08036080 $svc_fix
-cpu AddHook 0x08036372 $svc_fix
-cpu AddHook 0x08036610 $svc_fix
-cpu AddHook 0x0803665a $svc_fix
-cpu AddHook 0x080368bc $svc_fix
-cpu AddHook 0x080616a2 $svc_fix
+# UART5: ESP32 control signal channel
+emulation CreateServerSocketTerminal 4243 "esp32ctrl" false
+connector Connect sysbus.uart5 esp32ctrl
 
-# Workaround: Force GPIO board version to CCMv2 (0x01).
-set gpio_ver_fix "sp = cpu.GetRegisterUnsafe(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 12, 0x01)"
-cpu AddHook 0x08002c60 $gpio_ver_fix
-
-# Workaround: Renode's STM32H7_QuadSPI doesn't set TCF in SR.
-set qspi_wait_skip "cpu.PC = cpu.LR"
-cpu AddHook 0x08033f74 $qspi_wait_skip
-
-# Workaround: QUADSPI doesn't drive DMA requests — bypass with direct memcpy.
-cpu InstallQspiBypass 0x0803415c 0x90000000
-
-# Fix return value for DMA bypass.
-set qspi_dma_fixret "sp = cpu.GetRegisterUnsafe(13).RawValue; machine.SystemBus.WriteDoubleWord(sp + 44, 0)"
-cpu AddHook 0x080346c8 $qspi_dma_fixret
-
-# Workaround: LSI clock calibration thread polls Timer 5 capture/compare which
-# Renode doesn't emulate. Skip the thread function to avoid burning CPU.
-set lsi_skip "cpu.PC = cpu.LR"
-cpu AddHook 0x0800e07c $lsi_skip
-
-# Workaround: Skip mono runtime copy from QSPI to SDRAM (no mono binary loaded yet).
-set mono_copy_bypass "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
-cpu AddHook 0x081428AC $mono_copy_bypass
-
-# Workaround: Skip mono version refresh.
-set mono_ver_skip "cpu.PC = cpu.LR"
-cpu AddHook 0x0800421C $mono_ver_skip
+# =============================================================================
+# Hook definitions (auto-generated with resolved addresses)
+# =============================================================================
+include @build/dotnet10/hooks.resc
+include @build/dotnet10/sdram-patches.resc
 
 # GDB server on port 3333
 machine StartGdbServer 3333
