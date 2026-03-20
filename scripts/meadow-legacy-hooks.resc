@@ -140,4 +140,4 @@ cpu AddHook $hook_HCOM_HOST_WATCHDOG_TIMEOUT_EXPIRED $wdog_skip
 # bypassing the per-byte interrupt-driven serial driver path. Critical for bulk
 # file transfers under emulation where the interrupt overhead makes transfers
 # ~100x slower than real hardware.
-cpu InstallUartRxBypass $hook_HCOM_RECV_READ $hook_HCOM_RECV_READ_RETURN
+# cpu InstallUartRxBypass $hook_HCOM_RECV_READ $hook_HCOM_RECV_READ_RETURN  # Disabled: UartRxBypass.cs API incompatible with Renode 1.16.1
