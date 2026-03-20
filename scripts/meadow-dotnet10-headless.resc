@@ -38,10 +38,8 @@ sysbus LoadBinary @build/dotnet10/nuttx_kernel.bin 0x08140000
 sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0x90000000
 sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0xC0000000
 # Zero .mono_bss (Mono static globals) — not covered by nuttx_mono.bin (NOBITS section)
-# Range: _s_mono_bss (0xC025EC00) to _e_mono_bss (0xC0300000) = 660480 bytes
-sysbus LoadBinary @build/dotnet10/mono_bss_zero.bin 0xC025EC00
-# Enable interpreter mode — runtime built with DISABLE_JIT requires this
-sysbus WriteDoubleWord 0xC0269FC4 0x1  # mono_use_interpreter = 1
+# Range: _s_mono_bss (0xC025F000) to _e_mono_bss (0xC0300000) = 659456 bytes
+sysbus LoadBinary @build/dotnet10/mono_bss_zero.bin 0xC025F000
 
 # LittleFS filesystem image — pre-populated with .NET 10 assemblies
 # File System partition starts at QSPI offset 0x500000 (see UART: "File System - Offset:0x00500000")
@@ -60,19 +58,9 @@ macro reset
     sysbus LoadBinary @build/dotnet10/nuttx_kernel.bin 0x08140000
     sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0x90000000
     sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0xC0000000
-    # Zero stale Mono globals in .mono_bss that cause heap corruption on reboot.
-    # These hold pointers to heap allocations from the previous boot; g_strfreev
-    # on stale pointers corrupts the freshly-reinitialized NuttX heap.
-    sysbus WriteDoubleWord 0xC025EC00 0x0  # trusted_platform_assemblies
-    sysbus WriteDoubleWord 0xC025EC04 0x0  # native_lib_paths
-    sysbus WriteDoubleWord 0xC025EC08 0x0  # app_paths
-    sysbus WriteDoubleWord 0xC025F704 0x0  # pinvoke_search_directories
-    sysbus WriteDoubleWord 0xC025FB44 0x0  # assemblies_path
-    sysbus WriteDoubleWord 0xC0265484 0x0  # n_appctx_props
-    sysbus WriteDoubleWord 0xC0265488 0x0  # appctx_keys
-    sysbus WriteDoubleWord 0xC026548C 0x0  # appctx_values
-    # Enable interpreter mode — runtime built with DISABLE_JIT requires this
-    sysbus WriteDoubleWord 0xC0269FC4 0x1  # mono_use_interpreter = 1
+    # NOTE: .mono_bss zeroing and interpreter mode are handled by firmware (mono_main.c).
+    # No need for WriteDoubleWord hacks — the firmware zeros _s_mono_bss.._e_mono_bss
+    # and sets MONO_ENV_OPTIONS=--interpreter before monovm_initialize.
     # NOTE: Do NOT reload littlefs.bin here — it would overwrite deployed app files.
     # The LFS image is loaded once at initial boot; the firmware manages QSPI flash after that.
     sysbus.cpu VectorTableOffset 0x08040000
