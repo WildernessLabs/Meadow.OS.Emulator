@@ -58,8 +58,17 @@ macro reset
     sysbus LoadBinary @build/dotnet10/nuttx_kernel.bin 0x08140000
     sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0x90000000
     sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0xC0000000
-    # NOTE: Do NOT reload mono_bss_zero.bin here — it would wipe SDRAM heap allocations.
-    # The firmware's mono_main.c zeros .mono_bss before monovm_initialize.
+    # Zero stale Mono globals in .mono_bss that cause heap corruption on reboot.
+    # These hold pointers to heap allocations from the previous boot; g_strfreev
+    # on stale pointers corrupts the freshly-reinitialized NuttX heap.
+    sysbus WriteDoubleWord 0xC025EC00 0x0  # trusted_platform_assemblies
+    sysbus WriteDoubleWord 0xC025EC04 0x0  # native_lib_paths
+    sysbus WriteDoubleWord 0xC025EC08 0x0  # app_paths
+    sysbus WriteDoubleWord 0xC025F704 0x0  # pinvoke_search_directories
+    sysbus WriteDoubleWord 0xC025FB44 0x0  # assemblies_path
+    sysbus WriteDoubleWord 0xC0265484 0x0  # n_appctx_props
+    sysbus WriteDoubleWord 0xC0265488 0x0  # appctx_keys
+    sysbus WriteDoubleWord 0xC026548C 0x0  # appctx_values
     # NOTE: Do NOT reload littlefs.bin here — it would overwrite deployed app files.
     # The LFS image is loaded once at initial boot; the firmware manages QSPI flash after that.
     sysbus.cpu VectorTableOffset 0x08040000
