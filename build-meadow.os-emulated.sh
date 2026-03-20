@@ -4,8 +4,18 @@ set -e
 SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
 MEADOW_OS_DIR="$SCRIPT_DIR/../Meadow.OS"
 NUTTX_DIR="$MEADOW_OS_DIR/nuttx"
-BUILD_DIR="$SCRIPT_DIR/build"
-CONFIG="${1:-meadow}"
+RUNTIME_DIR="$SCRIPT_DIR/../runtime"
+
+# Load config for defconfig name and runtime selection
+source "$SCRIPT_DIR/scripts/read-config.sh" "$@" 2>/dev/null || true
+CONFIG="${1:-${EMU_DEFCONFIG:-meadow_os_emu}}"
+
+# Select build output directory based on runtime
+if [ "$EMU_RUNTIME" = "legacy-os_modern-dotnet" ]; then
+    BUILD_DIR="$SCRIPT_DIR/build/dotnet10"
+else
+    BUILD_DIR="$SCRIPT_DIR/build"
+fi
 
 # Validate Meadow.OS sibling directory exists
 if [ ! -d "$NUTTX_DIR" ]; then
@@ -37,7 +47,28 @@ if ! command -v arm-none-eabi-gcc &> /dev/null; then
     fi
 fi
 
-echo "=== Building NuttX for Renode (config: $CONFIG) ==="
+# -------------------------------------------------------------------------
+# .NET 10 Mono runtime setup
+# -------------------------------------------------------------------------
+MONO_MAKE_VARS=""
+if [ "$EMU_RUNTIME" = "legacy-os_modern-dotnet" ]; then
+    MONO_LIB="$RUNTIME_DIR/src/mono/build-nuttx-debug/mono/mini/libmonosgen-2.0.a"
+    if [ ! -f "$MONO_LIB" ]; then
+        echo "ERROR: .NET 10 Mono runtime library not found at:"
+        echo "       $MONO_LIB"
+        echo ""
+        echo "       Build it first:"
+        echo "         cd $RUNTIME_DIR/src/mono"
+        echo "         ./build-nuttx.sh Debug"
+        exit 1
+    fi
+    echo "--- .NET 10 Mono runtime: $MONO_LIB ($(du -h "$MONO_LIB" | cut -f1)) ---"
+    # Pass MONO_AOBJS on make command line — overrides any Makefile assignment.
+    # The kernel/Makefile already references $(MONO_AOBJS) in the linker command.
+    MONO_MAKE_VARS="MONO_AOBJS=$MONO_LIB"
+fi
+
+echo "=== Building NuttX for Renode (config: $CONFIG, runtime: ${EMU_RUNTIME:-none}) ==="
 
 # Configure NuttX
 echo "--- Configuring NuttX with stm32f777zit6-meadow:$CONFIG ---"
@@ -49,38 +80,53 @@ if [ -f ".config" ]; then
     $MAKE distclean 2>/dev/null || true
 fi
 
-./tools/configure.sh "stm32f777zit6-meadow:$CONFIG"
+# configure.sh may exit non-zero due to a cosmetic Kconfig warning about
+# ARCH_BOARD_CUSTOM — the .config is written successfully before that step.
+./tools/configure.sh "stm32f777zit6-meadow:$CONFIG" || {
+    if [ -f "$NUTTX_DIR/.config" ]; then
+        echo "WARNING: configure.sh reported an error but .config was written — continuing"
+    else
+        echo "ERROR: configure.sh failed and no .config was produced"
+        exit 1
+    fi
+}
 
-# Apply emulator-specific config tweaks
-# (uses the standard meadow defconfig as base, then modifies for Renode)
+# Apply emulator-specific config tweaks (only if not using the _emu defconfig,
+# which already has these baked in)
 NUTTX_CONFIG="$NUTTX_DIR/.config"
 
-# Disable USB (Renode can't emulate USB device controllers)
-kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_CDCACM
-kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_BOARDCTL_USBDEVCTRL
-kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_STM32F7_OTGFS
-kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_USBDEV
+if [[ "$CONFIG" != *_emu* ]]; then
+    echo "--- Applying emulator config tweaks ---"
 
-# Enable UART4 for HCOM (replaces USB CDC-ACM)
-kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_STM32F7_UART4
-kconfig-tweak --file "$NUTTX_CONFIG" --set-str CONFIG_HCOM_COMMS_DEVICE_NAME /dev/ttyS1
-kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_BAUD 115200
-kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_BITS 8
-kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_PARITY 0
-kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_2STOP 0
-kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_RXBUFSIZE 512
-kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_TXBUFSIZE 512
+    # Disable USB (Renode can't emulate USB device controllers)
+    kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_CDCACM
+    kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_BOARDCTL_USBDEVCTRL
+    kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_STM32F7_OTGFS
+    kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_USBDEV
 
-# Route syslog to serial console instead of RAM log
-kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_DEV_CONSOLE
-kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_SYSLOG_SERIAL_CONSOLE
-kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_RAMLOG_SYSLOG
+    # Enable UART4 for HCOM (replaces USB CDC-ACM)
+    kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_STM32F7_UART4
+    kconfig-tweak --file "$NUTTX_CONFIG" --set-str CONFIG_HCOM_COMMS_DEVICE_NAME /dev/ttyS1
+    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_BAUD 115200
+    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_BITS 8
+    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_PARITY 0
+    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_2STOP 0
+    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_RXBUFSIZE 512
+    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_TXBUFSIZE 512
 
-# Prevent reset loops in emulator
-kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_BOARD_RESET_ON_ASSERT 0
+    # Route syslog to serial console instead of RAM log
+    kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_DEV_CONSOLE
+    kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_SYSLOG_SERIAL_CONSOLE
+    kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_RAMLOG_SYSLOG
 
-# Resolve kconfig dependencies after tweaks
-$MAKE olddefconfig 2>/dev/null || true
+    # Prevent reset loops in emulator
+    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_BOARD_RESET_ON_ASSERT 0
+
+    # Resolve kconfig dependencies after tweaks
+    $MAKE olddefconfig 2>/dev/null || true
+else
+    echo "--- Using pre-configured emulator defconfig (skipping kconfig tweaks) ---"
+fi
 
 # Inject version placeholders in hcom_nuttx_shared.h
 # The production build.sh does this via version_methods.sh — we use defaults
@@ -123,15 +169,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Parallel job count
+JOBS="-j$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+
 # Build
 if [ "$CONFIG" = "nsh" ]; then
     # Flat mode — single binary
     echo "--- Building (FLAT mode) ---"
-    $MAKE -j$(sysctl -n hw.ncpu 2>/dev/null || echo 4) MEADOW_OS=1
+    $MAKE $JOBS MEADOW_OS=1 $MONO_MAKE_VARS
 else
     # Protected mode — two-pass build
     echo "--- Building (PROTECTED mode, pass 2) ---"
-    $MAKE -j$(sysctl -n hw.ncpu 2>/dev/null || echo 4) MEADOW_OS=1 pass2
+    $MAKE $JOBS MEADOW_OS=1 $MONO_MAKE_VARS pass2
 
     # Build mbedTLS after pass2 (needs nuttx/config.h which pass2 generates)
     if [ ! -f "$MEADOW_OS_DIR/mbedtls/library/libmbedtls.a" ]; then
@@ -142,10 +191,10 @@ else
     fi
 
     echo "--- Building (PROTECTED mode, pass 1) ---"
-    $MAKE -j$(sysctl -n hw.ncpu 2>/dev/null || echo 4) MEADOW_OS=1 pass1
+    $MAKE $JOBS MEADOW_OS=1 $MONO_MAKE_VARS pass1
 
     echo "--- Building final image ---"
-    $MAKE -j$(sysctl -n hw.ncpu 2>/dev/null || echo 4) MEADOW_OS=1 nuttx
+    $MAKE $JOBS MEADOW_OS=1 $MONO_MAKE_VARS nuttx
 fi
 
 # Copy artifacts
@@ -158,11 +207,23 @@ if [ -f "$NUTTX_DIR/nuttx_user.bin" ]; then
     echo "--- Copied nuttx_user.bin to $BUILD_DIR/"
 fi
 
-# Copy ELF for GDB debugging
+# Copy ELFs for GDB debugging
 if [ -f "$NUTTX_DIR/nuttx" ]; then
     cp "$NUTTX_DIR/nuttx" "$BUILD_DIR/nuttx.elf"
     echo "--- Copied nuttx ELF to $BUILD_DIR/nuttx.elf"
 fi
+if [ -f "$NUTTX_DIR/nuttx_user.elf" ]; then
+    cp "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_user.elf"
+    echo "--- Copied nuttx_user ELF to $BUILD_DIR/nuttx_user.elf"
+fi
 
-echo "=== Build complete ==="
-ls -la "$BUILD_DIR/"
+# Extract hook addresses from ELF files (if both kernel and user ELFs exist)
+if [ -f "$BUILD_DIR/nuttx.elf" ] && [ -f "$BUILD_DIR/nuttx_user.elf" ]; then
+    echo "--- Extracting hook addresses for Renode ---"
+    python3 "$SCRIPT_DIR/tools/extract-hook-addresses.py" \
+        "$BUILD_DIR/nuttx.elf" "$BUILD_DIR/nuttx_user.elf" || \
+        echo "WARNING: Hook address extraction failed (non-fatal — new symbols may differ)"
+fi
+
+echo "=== Build complete (output: $BUILD_DIR/) ==="
+ls -lh "$BUILD_DIR/"

@@ -116,7 +116,9 @@ done
 
 # Select default script based on config + overrides
 if [ -z "$SCRIPT" ]; then
-    if [ "$LEGACY" = true ] && [ "$ESP32" = true ]; then
+    if [ "$EMU_RUNTIME" = "legacy-os_modern-dotnet" ]; then
+        SCRIPT="meadow-dotnet10-headless"
+    elif [ "$LEGACY" = true ] && [ "$ESP32" = true ]; then
         SCRIPT="meadow-dual"
     elif [ "$LEGACY" = true ]; then
         SCRIPT="meadow-legacy-headless"
@@ -155,6 +157,24 @@ if [ "$LEGACY" = true ]; then
         echo "WARNING: ELF is newer than addresses.resc — regenerating hook addresses..."
         python3 "$SCRIPT_DIR/tools/extract-hook-addresses.py" \
             "$SCRIPT_DIR/build/legacy/nuttx.elf" "$SCRIPT_DIR/build/legacy/nuttx_user.elf"
+    fi
+elif [ "$EMU_RUNTIME" = "legacy-os_modern-dotnet" ]; then
+    if [ ! -f "$SCRIPT_DIR/build/dotnet10/nuttx.bin" ]; then
+        echo "ERROR: nuttx.bin not found in build/dotnet10/"
+        echo "       Run ./build-meadow.os-emulated.sh with configs/legacy-os_modern-dotnet.yaml first"
+        exit 1
+    fi
+    # Check hook addresses are generated and not stale
+    ADDR_FILE="$SCRIPT_DIR/build/dotnet10/addresses.resc"
+    ELF_FILE="$SCRIPT_DIR/build/dotnet10/nuttx.elf"
+    if [ ! -f "$ADDR_FILE" ]; then
+        echo "WARNING: Hook addresses not generated. Extracting now..."
+        python3 "$SCRIPT_DIR/tools/extract-hook-addresses.py" \
+            "$SCRIPT_DIR/build/dotnet10/nuttx.elf" "$SCRIPT_DIR/build/dotnet10/nuttx_user.elf"
+    elif [ -f "$ELF_FILE" ] && [ "$ELF_FILE" -nt "$ADDR_FILE" ]; then
+        echo "WARNING: ELF is newer than addresses.resc — regenerating hook addresses..."
+        python3 "$SCRIPT_DIR/tools/extract-hook-addresses.py" \
+            "$SCRIPT_DIR/build/dotnet10/nuttx.elf" "$SCRIPT_DIR/build/dotnet10/nuttx_user.elf"
     fi
 else
     if [ ! -f "$SCRIPT_DIR/build/nuttx.bin" ]; then

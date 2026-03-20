@@ -11,6 +11,7 @@
 #   EMU_BOARD         — F7FeatherV2 | F7CoreComputeV2
 #   EMU_COPROCESSOR   — stub | dual-machine
 #   EMU_DEFCONFIG     — NuttX defconfig name (e.g., mono, meadow)
+#   EMU_RUNTIME       — (empty) | legacy-os_modern-dotnet
 #   EMU_HCOM_PORT     — HCOM TCP socket port
 #   EMU_MONITOR_PORT  — Renode monitor port
 #   EMU_ESP32CTRL_PORT — ESP32 control channel port
@@ -74,6 +75,7 @@ print(f'export EMU_OS=\"{val(\"os\", \"legacy\")}\"')
 print(f'export EMU_BOARD=\"{val(\"board\", \"F7FeatherV2\")}\"')
 print(f'export EMU_COPROCESSOR=\"{val(\"coprocessor\", \"stub\")}\"')
 print(f'export EMU_DEFCONFIG=\"{val(\"build.defconfig\", \"mono\")}\"')
+print(f'export EMU_RUNTIME=\"{val(\"build.runtime\", \"\")}\"')
 print(f'export EMU_HCOM_PORT=\"{val(\"ports.hcom\", \"4242\")}\"')
 print(f'export EMU_MONITOR_PORT=\"{val(\"ports.monitor\", \"1234\")}\"')
 print(f'export EMU_ESP32CTRL_PORT=\"{val(\"ports.esp32ctrl\", \"4243\")}\"')
@@ -106,6 +108,10 @@ esac
 case "$EMU_COPROCESSOR" in
     stub|dual-machine) ;;
     *) echo "ERROR: Invalid coprocessor '$EMU_COPROCESSOR' in $EMU_CONFIG_FILE (valid: stub, dual-machine)"; _RC_VALID=false ;;
+esac
+case "$EMU_RUNTIME" in
+    ""|legacy-os_modern-dotnet) ;;
+    *) echo "ERROR: Invalid build.runtime '$EMU_RUNTIME' in $EMU_CONFIG_FILE (valid: (empty), legacy-os_modern-dotnet)"; _RC_VALID=false ;;
 esac
 if ! [[ "$EMU_HCOM_PORT" =~ ^[0-9]+$ ]] || [ "$EMU_HCOM_PORT" -lt 1 ] || [ "$EMU_HCOM_PORT" -gt 65535 ]; then
     echo "ERROR: Invalid ports.hcom '$EMU_HCOM_PORT' (must be 1-65535)"; _RC_VALID=false
