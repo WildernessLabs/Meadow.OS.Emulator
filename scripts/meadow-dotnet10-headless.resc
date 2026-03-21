@@ -39,7 +39,7 @@ sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0x90000000
 sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0xC0000000
 # Zero .mono_bss (Mono static globals) — not covered by nuttx_mono.bin (NOBITS section)
 # Range: _s_mono_bss (0xC025F000) to _e_mono_bss (0xC0300000) = 659456 bytes
-sysbus LoadBinary @build/dotnet10/mono_bss_zero.bin 0xC025F000
+sysbus LoadBinary @build/dotnet10/mono_bss_zero.bin 0xC0254800
 
 # LittleFS filesystem image — pre-populated with .NET 10 assemblies
 # File System partition starts at QSPI offset 0x500000 (see UART: "File System - Offset:0x00500000")
