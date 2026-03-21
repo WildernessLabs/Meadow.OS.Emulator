@@ -121,6 +121,14 @@ kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_SYSLOG_WRITE
 # Prevent reset loops in emulator
 kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_BOARD_RESET_ON_ASSERT 0
 
+# Enable tmpfs for assembly pre-caching (QSPI→RAM copy for fast Mono loading)
+kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_FS_TMPFS
+kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_FS_TMPFS_BLOCKSIZE 512
+kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_FS_TMPFS_DIRECTORY_ALLOCGUARD 64
+kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_FS_TMPFS_DIRECTORY_FREEGUARD 64
+kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_FS_TMPFS_FILE_ALLOCGUARD 512
+kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_FS_TMPFS_FILE_FREEGUARD 512
+
 # Version — read from Meadow/version.txt (e.g. "2.5.7") to match real firmware
 if [ -f "$MEADOW_DIR/version.txt" ]; then
     IFS='.' read -r EMU_VERSION_MAJOR EMU_VERSION_MINOR EMU_VERSION_REVISION <<< "$(cat "$MEADOW_DIR/version.txt")"

@@ -101,9 +101,8 @@ include @build/dotnet10/sdram-patches.resc
 # NuttX VFS → LittleFS → QSPI driver path.
 # Comment out for hardware-accurate I/O timing validation.
 # =============================================================================
-# Pre-load raw SPCL DLL at a scratch SDRAM address (after .mono_bss, before heap)
-sysbus LoadBinary @build/dotnet10/assemblies/System.Private.CoreLib.dll 0xC0400000
-# Hook mono_file_map_fileio's read() call to serve from pre-loaded memory
-cpu InstallFileMapBypass 0xC015A460 "System.Private.CoreLib.dll" 0xC0400000 6044160
+# DISABLED — using tmpfs caching in firmware instead (mono_main.c copies to /tmp/).
+# sysbus LoadBinary @build/dotnet10/assemblies/System.Private.CoreLib.dll 0xC0400000
+# cpu InstallFileMapBypass 0xC015A460 "System.Private.CoreLib.dll" 0xC0400000 6044160
 
 start
