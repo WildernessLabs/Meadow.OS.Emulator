@@ -294,18 +294,38 @@ arm-none-eabi-gdb build/legacy/nuttx.elf
 
 ## Renode Fork Fixes
 
-The WildernessLabs/renode fork (`meadow-emulator-fixes` branch) contains fixes across two areas:
+The WildernessLabs/renode fork (`meadow-emulator-fixes` branch) contains 17 fixes across two areas. See [upstream_fixes.md](upstream_fixes.md) for PR status.
 
-### STM32/ARM (2 fixes)
+### STM32/ARM (2 fixes in Infrastructure)
 
 | Fix | Impact |
 |-----|--------|
-| SVC/PRIMASK handling in NVIC | Without this, per-address hooks on every SVC site are needed (~12,000x slower) |
-| RTC backup register count (20→32) | Meadow uses BKP31R for runtime state persistence |
+| SVC/PRIMASK handling in NVIC | ARM spec says SVC with PRIMASK=1 should escalate to HardFault, not be silently skipped. Without this fix, per-address hooks on every SVC site are needed (~12,000x slower) |
+| RTC backup register count (20→32) | STM32F4_RTC `BackupEnd` only covers 20 registers; STM32F7 has 32 (BKP0R–BKP31R). Meadow uses BKP31R for runtime state persistence |
+
+**Not yet fixed in fork (hook workaround):** STM32F4_RTC crashes with `ArgumentOutOfRangeException` when firmware writes BCD date register with partially-populated fields (intermediate zero month/day creates invalid DateTime). Worked around by skipping `hcom_nx_config_set_time_to_os_build_time` via hook.
 
 ### Xtensa/ESP32 (15 fixes in tlib)
 
-Fixes for TCG code generation (`tcg_const_i32` → local temps in retw, rfw, callw, entry), window overflow handling (rfwo no-phys-sync, window_check n>w early exit, test_ill_retw a0 fixup), interrupt delivery, and CCOUNT/WAITI timing. See the [plan](conductor/tracks/renode-esp32-dual/plan.md) for the full fix table.
+| # | Fix | Description |
+|---|-----|-------------|
+| 1 | arch_tlb_fill error code | Return real MMU cause instead of misidentifying as syscall |
+| 2 | WAITI halt | Don't halt CPU (prevents deadlock) |
+| 3 | CCOUNT/CCOMPARE | Fix time unit conversion |
+| 4 | clock_freq_khz | Set to 240MHz (ESP32 actual speed) |
+| 5 | win_helper | Assert→logging (don't crash on window edge cases) |
+| 6 | translate_retw | Local TCG temp (fixes register corruption) |
+| 7 | set_irq_pending_bit | Call check_interrupts (interrupts were being missed) |
+| 8 | OnGPIO | Remove conflicting base.OnGPIO call (in Xtensa.cs) |
+| 9 | translate_rfw | Local TCG temp |
+| 10 | window_check | n>w early exit (prevents invalid window operations) |
+| 11 | test_ill_retw | a0 fixup for WOVF8 scratch register |
+| 12 | rfwo | No-phys-sync (restore_owb_no_phys_sync) |
+| 13 | translate_callw | Local CALLINC temp |
+| 14 | translate_entry | Local temps + rotation in helper + cpu_R reload |
+| 15 | Diagnostic logging | Removed debug noise |
+
+See the [ESP32 dual-machine plan](conductor/tracks/renode-esp32-dual/plan.md) for full details and commit hashes.
 
 ## Verification Protocol
 
