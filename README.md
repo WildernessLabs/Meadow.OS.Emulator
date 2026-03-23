@@ -292,7 +292,40 @@ arm-none-eabi-gdb build/legacy/nuttx.elf
 (gdb) continue
 ```
 
-## Renode Fork Fixes
+## Renode Customizations
+
+### Custom Platform Definitions
+
+Both MCUs have full platform definitions written from scratch (Renode has no stock STM32F777 or Meadow-specific ESP32 platform):
+
+| Platform file | Description |
+|---------------|-------------|
+| `platforms/stm32f777.repl` | STM32F777ZIT6 chip-level: Cortex-M7, NVIC, all USARTs, SPI, I2C, DMA, QSPI, RCC, GPIO, timers |
+| `platforms/meadow-f7.repl` | Meadow F7 board: chip + 32MB SDRAM (0xC0000000) + 64MB QSPI flash (0x90000000) + UART4 socket |
+| `platforms/meadow-f7-dual.repl` | Dual-machine variant: adds SpiBridge on SPI2 for ESP32 communication |
+| `platforms/meadow-esp32.repl` | ESP32 platform: Xtensa LX6, DPORT interrupt matrix, SPI3, UART, RTC_CNTL, timer groups |
+
+### Custom C# Peripherals
+
+| Peripheral | Purpose |
+|------------|---------|
+| `Winbond_W25QXXXJV.cs` | 64MB QSPI NOR flash with quad-SPI command set |
+| `STM32F7_RCC_Custom.cs` | RCC with auto-set clock ready bits (LSI/LSE/HSE/PLL) |
+| `EspcpStub.cs` | ESP32 coprocessor SPI stub (single-machine mode) |
+| `SpiBridge.cs` | Cross-machine SPI frame queues (dual-machine mode) |
+| `ESP32_SPI.cs` | ESP32 SPI3 register map, DMA descriptor chains, IRQ generation |
+| `ESP32_DPORT.cs` | DPORT interrupt matrix (69 sources, level-OR routing) |
+| `ESP32_RTC_CNTL.cs` | RTC control with reactive status bits |
+| `ESP32_TimerGroup.cs` | Timer group with calibration ready bit |
+| `QspiDmaBypass.cs` | C# hook: QSPI DMA memory copy bypass (22K+ calls during assembly load) |
+| `EspcpSpiBypass.cs` | C# hook: ESPCP SPI DMA bypass |
+| `SvcPrimaskFix.cs` | C# hook: PRIMASK clearing at SVC (fallback if fork not available) |
+| `MqReceiveIntercept.cs` | C# hook: mq_receive interception for ESPCP polling |
+| `UartRxBypass.cs` | C# hook: UART RX bypass for fast file deploy (currently disabled — Renode 1.16.1 API change) |
+| `FileReadBypass.cs` | C# hook: file read bypass for .NET 10 assembly loading |
+| `XtensaHotPathHooks.cs` | C# hooks for ESP32 hot-path workarounds |
+
+### Renode Fork Fixes
 
 The WildernessLabs/renode fork (`meadow-emulator-fixes` branch) contains 17 fixes across two areas. See [upstream_fixes.md](upstream_fixes.md) for PR status.
 
