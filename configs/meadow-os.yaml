@@ -20,7 +20,7 @@ coprocessor: stub
 # Build configuration
 build:
   # NuttX defconfig name (subdirectory under stm32f777zit6-meadow/)
-  defconfig: meadow
+  defconfig: meadow_os_emu
 
 # Network ports
 ports:

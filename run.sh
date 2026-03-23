@@ -143,7 +143,7 @@ fi
 if [ "$LEGACY" = true ]; then
     if [ ! -f "$SCRIPT_DIR/build/legacy/nuttx.bin" ]; then
         echo "ERROR: nuttx.bin not found in build/legacy/"
-        echo "       Run ./build-meadow.os_legacy-emulated.sh first"
+        echo "       Run: ./build-meadow.os-emulated.sh --config configs/legacy.yaml"
         exit 1
     fi
     # Check hook addresses are generated and not stale
