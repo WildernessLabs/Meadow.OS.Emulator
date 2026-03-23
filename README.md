@@ -321,10 +321,10 @@ Three tiers of testing, run in order (see [workflow.md](conductor/workflow.md)):
 
 See [KnownIssues_and_Errata.md](KnownIssues_and_Errata.md) for a full list. Key items:
 
-- **UART RX bypass (§8.6)** — File deploy uses a hack to bypass per-byte UART
-  interrupt overhead. Works but ~4/36 files need CLI retry due to edge cases.
-  See KnownIssues for full details and proper fix paths.
-- **Flash persistence (§4.4)** — QSPI flash is volatile. Deployed files are
-  lost when the emulator restarts.
-- **ESPCP polling disabled by default** — needed for WiFi/BLE. The dual-machine
-  script enables it.
+- **UART RX bypass disabled (§8.6)** — The `UartRxBypass.cs` hook that sped up
+  file deployment is currently disabled due to API incompatibility with Renode
+  1.16.1. File deploy via Meadow.CLI works but is very slow without the bypass.
+- **Flash persistence (§4.4)** — QSPI flash is volatile across Renode sessions.
+  A pre-built LittleFS image is loaded at boot so the filesystem is pre-populated,
+  and deployed files persist across in-session resets, but everything is lost when
+  Renode exits.
