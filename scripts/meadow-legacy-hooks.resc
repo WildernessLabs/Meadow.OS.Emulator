@@ -111,12 +111,12 @@ cpu AddHook $hook_PWRMGMT_LSI_CALC_PREP_THREAD_FUNC $lsi_skip
 # pollDivisor=100: only inject a real SPI poll every 100th call from espcp_thread.
 # Skipped calls redirect to usleep(10ms) so the thread blocks in the kernel instead
 # of spinning in a tight loop that starves HCOM (~16M iterations/sec without sleep).
-cpu InstallMqIntercept $hook_MQ_RECEIVE $hook_ESPCP_THREAD_LR 0x2007C010 0x2007FFF0 100 $hook_USLEEP $hook_ESPCP_THREAD_LOOP_TOP 10000
+cpu InstallMqIntercept $hook_MQ_RECEIVE $hook_ESPCP_THREAD_LR 0x2007C010 0xC02FFC00 100 $hook_USLEEP $hook_ESPCP_THREAD_LOOP_TOP 10000
 
 # Set mono_ready flag when start_mono_main fires (0x080618F8).
 # This is a DIFFERENT address from mono_str_fix (0x08061940) — no conflict.
 # Gates poll enable in espcp_managed_cmd_fix.
-set mono_ready_flag "machine.SystemBus.WriteByte(0x2007FFF4, 1)"
+set mono_ready_flag "machine.SystemBus.WriteByte(0xC02FFC04, 1)"
 cpu AddHook $hook_HCOM_MONO_CTRL_START_MONO_MAIN $mono_ready_flag
 
 # Workaround: esp_not_responding flag starts true (espcp_coprocessor.c:303).
@@ -129,13 +129,13 @@ cpu AddHook $hook_HCOM_MONO_CTRL_START_MONO_MAIN $mono_ready_flag
 # Clear esp_not_responding AND conditionally enable polling.
 # Poll must be enabled BEFORE espcp_queue_message sends the command.
 # But polling slows Mono JIT, so only enable after boot QSPI reads complete
-# (flag at 0x2007FFF4 set by QspiDmaBypass after 150K reads).
+# (mono_ready flag at 0xC02FFC04 set by mono_ready_flag hook at start_mono_main).
 # Early managed ESPCP calls (during Mono init, before QSPI done) will block
 # without response — the framework WiFi init will time out, but boot completes.
 # Once QSPI is done, subsequent managed commands (from the app) get proper
 # poll-based response delivery.
 # Clear esp_not_responding. Poll is enabled separately by mono_ready hook.
-set espcp_managed_cmd_fix "r0 = cpu.GetRegisterUnsafe(0).RawValue; mono_ready = machine.SystemBus.ReadByte(0x2007FFF4); machine.SystemBus.WriteByte(r0 + 0x30, 0); [machine.SystemBus.WriteByte(0x2007FFF0, 1) for _ in [1] if mono_ready == 1]"
+set espcp_managed_cmd_fix "r0 = cpu.GetRegisterUnsafe(0).RawValue; mono_ready = machine.SystemBus.ReadByte(0xC02FFC04); machine.SystemBus.WriteByte(r0 + 0x30, 0); poll_was = machine.SystemBus.ReadByte(0xC02FFC00); [machine.SystemBus.WriteByte(0xC02FFC00, 1) for _ in [1] if mono_ready == 1]"
 cpu AddHook $hook_UPD_ESP32_CMD_NOTRESP $espcp_managed_cmd_fix
 
 # Workaround: Syslog semaphore leak in hcom_logging_syslog.

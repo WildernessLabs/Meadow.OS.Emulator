@@ -16,7 +16,7 @@
 //
 // Usage from .resc:
 //   cpu InstallMqIntercept <mq_receive> <espcpLR> <sendResponseAddr> <pollFlagAddr> <pollDivisor> <usleepAddr> <loopTopAddr> <pollSleepUs>
-//   cpu InstallMqIntercept 0x08157C40 0x0814E95B 0x2007C010 0x2007FFF0 100 0x0815F77C 0x0814E94D 10000
+//   cpu InstallMqIntercept 0x08157C40 0x0814E95B 0x2007C010 0xC02FFC00 100 0x0815F77C 0x0814E94D 10000
 
 using System;
 using Antmicro.Renode.Core;

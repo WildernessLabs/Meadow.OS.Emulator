@@ -686,7 +686,7 @@ if _ok_stm32 and _ok_esp32:
 # Enable ESPCP polling — MqReceiveIntercept throttles to ~100 SPI polls/sec
 # (pollDivisor=100) with usleep(10ms) between polls so HCOM isn't starved.
 mach set "stm32"
-sysbus WriteByte 0x2007FFF0 1
+sysbus WriteByte 0xC02FFC00 1
 
 # Performance tuning: increase quantum (10ms vs 100μs default) and max TB size
 # to reduce synchronization overhead and improve translation block caching.
