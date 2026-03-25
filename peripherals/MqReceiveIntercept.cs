@@ -34,7 +34,8 @@ namespace Antmicro.Renode.Hooks
             ulong sendResponseAddr, ulong pollFlagAddr,
             uint pollDivisor = 100,
             ulong usleepAddr = 0, ulong loopTopAddr = 0,
-            uint pollSleepUs = 10000)
+            uint pollSleepUs = 10000,
+            ulong spiDispatchAddr = 0, ulong gRequestResponseMsg = 0)
         {
             var arm = cpu as Arm;
             if(arm == null)
@@ -48,6 +49,8 @@ namespace Antmicro.Renode.Hooks
             long interceptedHits = 0;
             long sleepHits = 0;
             long espcpCalls = 0;
+            long passthroughHits = 0;
+            bool canDirectDispatch = spiDispatchAddr != 0 && gRequestResponseMsg != 0;
             uint divisor = pollDivisor > 0 ? pollDivisor : 1;
             bool canSleep = usleepAddr != 0 && loopTopAddr != 0;
 
@@ -61,9 +64,45 @@ namespace Antmicro.Renode.Hooks
                 {
                     espcpCalls++;
 
-                    if(espcpCalls % divisor == 0)
+                    // Check if there are real messages in the queue (from managed code).
+                    // R0 = mqd_t (struct mq_des *):
+                    //   offset 0: flink (4 bytes)
+                    //   offset 4: msgq (pointer to mqueue_inode_s)
+                    // mqueue_inode_s:
+                    //   offset 0: inode (4)
+                    //   offset 4: msglist.head (4)
+                    //   offset 8: msglist.tail (4)
+                    //   offset 12: maxmsgs (int16)
+                    //   offset 14: nmsgs (int16)
+                    // If nmsgs > 0, let the real mq_receive run to process the command.
+                    ulong mqd = arm.GetRegister((int)ArmRegisters.R0).RawValue;
+                    uint msgqPtr = bus.ReadDoubleWord(mqd + 4);  // mq_des.msgq at offset 4
+                    short nmsgs = (short)bus.ReadWord(msgqPtr + 14);
+
+                    if(nmsgs > 0)
                     {
-                        // Inject send_response message pointer into buffer (R1 = msg buffer)
+                        // Real message waiting — let mq_receive execute normally
+                        passthroughHits++;
+                        return;
+                    }
+
+                    if(canDirectDispatch)
+                    {
+                        // Direct dispatch: skip mq_receive entirely, redirect PC to
+                        // the SPI dispatch point in espcp_thread. Write the static
+                        // send_response message pointer to [sp, #4] (where the
+                        // dispatch reads it) and jump to espcp_spi_interface_lock.
+                        // This makes espcp_thread call espcp_get_message immediately
+                        // without going through the NuttX scheduler or mq_receive.
+                        uint msgPtr = bus.ReadDoubleWord(gRequestResponseMsg);
+                        ulong sp = arm.SP.RawValue;
+                        bus.WriteDoubleWord(sp + 4, msgPtr);
+                        arm.PC = RegisterValue.Create((uint)spiDispatchAddr | 1, 32);
+                        interceptedHits++;
+                    }
+                    else if(espcpCalls % divisor == 0)
+                    {
+                        // Legacy inject: return from mq_receive with send_response pointer
                         ulong msgBuf = arm.GetRegister((int)ArmRegisters.R1).RawValue;
                         bus.WriteDoubleWord(msgBuf, (uint)sendResponseAddr);
                         arm.SetRegister((int)ArmRegisters.R0, RegisterValue.Create(4, 32));
@@ -72,9 +111,6 @@ namespace Antmicro.Renode.Hooks
                     }
                     else if(canSleep)
                     {
-                        // Skip this poll — redirect thread to usleep() so it blocks
-                        // in the kernel instead of spinning in a tight loop.
-                        // usleep(pollSleepUs) then returns to loop top.
                         arm.SetRegister((int)ArmRegisters.R0,
                             RegisterValue.Create(pollSleepUs, 32));
                         arm.SetRegister((int)ArmRegisters.LR,
@@ -84,7 +120,6 @@ namespace Antmicro.Renode.Hooks
                     }
                     else
                     {
-                        // Fallback: return error (tight loop, but at least no SPI work)
                         arm.SetRegister((int)ArmRegisters.R0,
                             RegisterValue.Create(unchecked((uint)-1), 32));
                         arm.PC = arm.LR;
@@ -95,8 +130,8 @@ namespace Antmicro.Renode.Hooks
                 if(totalHits % 50000 == 0)
                 {
                     arm.Log(LogLevel.Info,
-                        "MqReceiveIntercept: {0} total, {1} intercepted, {2} slept (divisor={3})",
-                        totalHits, interceptedHits, sleepHits, divisor);
+                        "MqReceiveIntercept: {0} total, {1} intercepted, {2} slept, {3} passthrough (divisor={4})",
+                        totalHits, interceptedHits, sleepHits, passthroughHits, divisor);
                 }
             });
 

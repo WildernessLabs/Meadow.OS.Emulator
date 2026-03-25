@@ -47,6 +47,9 @@ namespace Antmicro.Renode.Hooks
             long callCount = 0;
             long totalBytes = 0;
             var startTime = DateTime.UtcNow;
+            bool bootCompleteSet = false;
+            // Address for "boot QSPI reads complete" flag, checked by poll-enable hook
+            const ulong bootCompleteAddr = 0x2007FFF4;
 
             cpu.AddHook(hookAddress, (ICpuSupportingGdb cpuArg, ulong pc) =>
             {
@@ -75,6 +78,13 @@ namespace Antmicro.Renode.Hooks
 
                 callCount++;
                 totalBytes += buflen;
+
+                // Signal boot QSPI reads complete after 150K calls.
+                // The poll-enable hook checks this flag before enabling
+                // ESPCP polling, preventing poll from starving Mono JIT.
+                // Boot complete flag at 0x2007FFF4 is now set by the
+                // mono_ready_flag hook at start_mono_main, not here.
+                // QSPI reads complete long before Mono finishes booting.
 
                 // Log stats every 1000 calls
                 if(callCount % 1000 == 0)

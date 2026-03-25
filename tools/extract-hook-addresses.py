@@ -156,6 +156,10 @@ def main():
         "ESPCP_SPI_INTERFACE_UNLOCK": ("espcp_spi_interface_unlock", ksyms),
         "PWRMGMT_LSI_CALC_PREP_THREAD_FUNC": ("pwrmgmt_lsi_calc_prep_thread_func", ksyms),
         "ESPCP_THREAD": ("espcp_thread", ksyms),
+        "G_ESPCP_CONFIG": ("g_espcp_configuration", ksyms),
+        "UPD_HANDLE_ESP32_CMD": ("upd_handle_esp32_command", ksyms),
+        "ESPCP_QUEUE_MESSAGE": ("espcp_queue_message", ksyms),
+        "G_REQUEST_RESPONSE_MSG": ("g_request_response_message", ksyms),
         "MQ_RECEIVE": ("mq_receive", ksyms),
         "USLEEP": ("usleep", ksyms),
         "LFS_FORMAT": ("lfs_format", ksyms),
@@ -221,6 +225,54 @@ def main():
             print(f"  mono_ver_copy at 0x{addr:08X} (hcom_nx_config_init+0x{addr - addrs['HCOM_NX_CONFIG_INIT']:x})")
         else:
             print("WARNING: Could not find mono_ver_copy offset in hcom_nx_config_init", file=sys.stderr)
+
+    # -------------------------------------------------------------------------
+    # upd_esp32_cmd_notresp — "ldrb.w r3, [r0, #48]" in upd_handle_esp32_command
+    # This is where esp_not_responding is read; R0 = config pointer from
+    # espcp_get_configuration. We hook here to clear the flag.
+    # -------------------------------------------------------------------------
+    if "UPD_HANDLE_ESP32_CMD" in addrs:
+        insns = objdump_function(kernel_elf, addrs["UPD_HANDLE_ESP32_CMD"], 0x100)
+        addr = find_insn_at(insns, r'ldrb\.w\s+r3,\s+\[r0,\s+#48\]')
+        if addr:
+            addrs["UPD_ESP32_CMD_NOTRESP"] = addr
+            print(f"  upd_esp32_cmd_notresp at 0x{addr:08X} (upd_handle_esp32_command+0x{addr - addrs['UPD_HANDLE_ESP32_CMD']:x})")
+        else:
+            print("WARNING: Could not find esp_not_responding check in upd_handle_esp32_command", file=sys.stderr)
+
+    # -------------------------------------------------------------------------
+    # espcp_thread SPI dispatch — "bl espcp_spi_interface_lock" in espcp_thread
+    # This is the entry to the SPI lock + message dispatch in the thread loop.
+    # -------------------------------------------------------------------------
+    if "ESPCP_THREAD" in addrs:
+        insns = objdump_function(kernel_elf, addrs["ESPCP_THREAD"], 0x80)
+        addr = find_insn_at(insns, r'bl\s+[0-9a-f]+\s+<espcp_spi_interface_lock>')
+        if addr:
+            addrs["ESPCP_THREAD_SPI_DISPATCH"] = addr
+            print(f"  espcp_thread_spi_dispatch at 0x{addr:08X} (espcp_thread+0x{addr - addrs['ESPCP_THREAD']:x})")
+        else:
+            print("WARNING: Could not find spi_interface_lock in espcp_thread", file=sys.stderr)
+
+    # -------------------------------------------------------------------------
+    # espcp_queue_msg_block — "bl net_lockedwait" in espcp_queue_message
+    # This is where the managed thread blocks waiting for the ESPCP response.
+    # -------------------------------------------------------------------------
+    if "ESPCP_QUEUE_MESSAGE" in addrs:
+        insns = objdump_function(kernel_elf, addrs["ESPCP_QUEUE_MESSAGE"], 0x80)
+        addr = find_insn_at(insns, r'bl\s+[0-9a-f]+\s+<net_lockedwait>')
+        if addr:
+            addrs["ESPCP_QUEUE_MSG_BLOCK"] = addr
+            print(f"  espcp_queue_msg_block at 0x{addr:08X} (espcp_queue_message+0x{addr - addrs['ESPCP_QUEUE_MESSAGE']:x})")
+            # ldr before the bl (2 bytes before)
+            addrs["ESPCP_QUEUE_MSG_LOAD_SEM"] = addr - 2
+            print(f"  espcp_queue_msg_load_sem at 0x{addr-2:08X}")
+        else:
+            print("WARNING: Could not find net_lockedwait in espcp_queue_message", file=sys.stderr)
+        # Success return: "movs r0, #0" followed by "add sp" + "pop pc"
+        addr2 = find_insn_at(insns, r'movs\s+r0,\s+#0')
+        if addr2:
+            addrs["ESPCP_QUEUE_MSG_RETURN"] = addr2
+            print(f"  espcp_queue_msg_return at 0x{addr2:08X} (espcp_queue_message+0x{addr2 - addrs['ESPCP_QUEUE_MESSAGE']:x})")
 
     # -------------------------------------------------------------------------
     # espcp_force_init — "ands.w r0, r5, #255" in hcom_nx_setup_mgr
