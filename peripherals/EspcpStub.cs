@@ -91,9 +91,19 @@ namespace Antmicro.Renode.Peripherals.SPI
                 return;
             }
 
-            this.Log(LogLevel.Debug,
-                "ESPCP: RX type=0x{0:X2} iface={1} func={2} msgId=0x{3:X8} payloadLen={4}",
-                msg.MessageType, msg.Interface, msg.Function, msg.MessageId, msg.PayloadLength);
+            frameCount++;
+            // Log non-poll frames at INFO level for debugging
+            if(msg.Interface != InterfaceTransport || msg.Function != TransportSendResponse)
+            {
+                this.Log(LogLevel.Info,
+                    "ESPCP: RX #{0} type=0x{1:X2} iface={2} func={3} msgId=0x{4:X8} payloadLen={5}",
+                    frameCount, msg.MessageType, msg.Interface, msg.Function, msg.MessageId, msg.PayloadLength);
+            }
+            else if(frameCount % 1000 == 0)
+            {
+                this.Log(LogLevel.Info, "ESPCP: {0} frames processed ({1} pending events)",
+                    frameCount, pendingEvents.Count);
+            }
 
             HandleMessage(msg, frameLength);
 
@@ -1919,6 +1929,7 @@ namespace Antmicro.Renode.Peripherals.SPI
         private int txLength;
         private bool hasResponse;
         private bool booted;
+        private long frameCount;
         private uint nextMessageId = 1;
         private SocketBridge socketBridge;
         private readonly Queue<byte[]> pendingEvents = new Queue<byte[]>();

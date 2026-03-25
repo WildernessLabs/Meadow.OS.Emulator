@@ -80,6 +80,18 @@ namespace Antmicro.Renode.Hooks
                     {
                         bus.WriteBytes(rxarr, rx);
                     }
+
+                    // Log non-poll SPI exchanges for debugging
+                    if(tx != 0 && txdata.Length > 1 && txdata[0] != 0x00)
+                    {
+                        bool isSendResponse = (txdata[0] == 0x20 && txdata[1] == 0x05);
+                        if(!isSendResponse)
+                        {
+                            arm.Log(LogLevel.Info,
+                                "EspcpSpiBypass: #{0} NON-POLL type=0x{1:X2} iface={2} len={3} LR=0x{4:X8}",
+                                callCount + 1, txdata[0], txdata[1], length, arm.LR.RawValue);
+                        }
+                    }
                 }
 
                 callCount++;
