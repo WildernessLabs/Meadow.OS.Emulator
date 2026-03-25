@@ -81,7 +81,7 @@ static int write_dir_to_lfs(lfs_t *lfs, const char *host_dir, const char *lfs_pr
 int main(int argc, char *argv[]) {
     if (argc < 3) {
         fprintf(stderr, "Usage: %s <bcl_assembly_dir> <output.bin> [app_dir]\n", argv[0]);
-        fprintf(stderr, "  bcl_assembly_dir: BCL DLLs → /mono/4.5/\n");
+        fprintf(stderr, "  bcl_assembly_dir: BCL DLLs → / (root)\n");
         fprintf(stderr, "  app_dir:          App files → / (root, all file types)\n");
         return 1;
     }
@@ -127,27 +127,11 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Create /mono/4.5 directory */
-    err = lfs_mkdir(&lfs, "mono");
-    if (err && err != LFS_ERR_EXIST) {
-        fprintf(stderr, "ERROR: mkdir mono failed: %d\n", err);
-        lfs_unmount(&lfs);
-        free(flash_image);
-        return 1;
-    }
-    err = lfs_mkdir(&lfs, "mono/4.5");
-    if (err && err != LFS_ERR_EXIST) {
-        fprintf(stderr, "ERROR: mkdir mono/4.5 failed: %d\n", err);
-        lfs_unmount(&lfs);
-        free(flash_image);
-        return 1;
-    }
-
-    /* Write BCL assemblies to /mono/4.5/ */
+    /* Write BCL assemblies to / (root) — firmware checks /meadow0/mscorlib.dll etc. */
     int file_count = 0;
     size_t total_size = 0;
-    printf("BCL assemblies → /mono/4.5/:\n");
-    write_dir_to_lfs(&lfs, asm_dir, "mono/4.5", ".dll", &file_count, &total_size);
+    printf("BCL assemblies → / (root):\n");
+    write_dir_to_lfs(&lfs, asm_dir, "", ".dll", &file_count, &total_size);
     printf("  %d BCL assemblies (%zu KB)\n\n", file_count, total_size / 1024);
 
     /* Write app files to root if app_dir specified */
@@ -162,7 +146,7 @@ int main(int argc, char *argv[]) {
     /* Write meadow.config.yaml at filesystem root */
     static const char config_yaml[] =
         "MonoControl:\n"
-        "    Options: --interp\n";
+        "    Options:\n";
 
     lfs_file_t cfgfile;
     err = lfs_file_open(&lfs, &cfgfile, "meadow.config.yaml", LFS_O_WRONLY | LFS_O_CREAT);
@@ -171,7 +155,7 @@ int main(int argc, char *argv[]) {
     } else {
         lfs_file_write(&lfs, &cfgfile, config_yaml, strlen(config_yaml));
         lfs_file_close(&lfs, &cfgfile);
-        printf("  meadow.config.yaml: %zu bytes (MonoControl: --interp)\n", strlen(config_yaml));
+        printf("  meadow.config.yaml: %zu bytes (MonoControl: JIT)\n", strlen(config_yaml));
     }
 
     lfs_unmount(&lfs);
