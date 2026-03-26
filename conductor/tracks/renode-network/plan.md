@@ -146,7 +146,7 @@ New test script (`tools/network_test.py` or inline in hcom_test.py) that:
 
 ### Tier 3 — Meadow.NET App
 `wifi_emulated_basics` app connects, resolves DNS, and fetches HTTP data through the socket bridge.
-**Note:** Rebuilt mscorlib Mono takes ~12 minutes to boot (vs ~6 min for old SPCL binary). Use 15+ minute timeouts for Tier 3 testing.
+**Note:** Mono JIT boot takes several minutes of virtual time. WiFi connect typically fires ~2 min after simulation start.
 
 ---
 
@@ -208,7 +208,8 @@ WiFiSendTo=24 (actually get_sock_name), WiFiIoctl=39 (actually error_event). Fix
 | 2026-03-24 | LittleFS assemblies at root (not /mono/4.5/) | Firmware's are_needed_files_here checks /meadow0/mscorlib.dll. LFS image had them at /meadow0/mono/4.5/. |
 | 2026-03-24 | esp_not_responding cleared at upd_handle_esp32_command | Flag initialized true, cleared by GPIO ISR path (bypassed by mq_intercept). Hook clears it where R0 = real config pointer from espcp_get_configuration. |
 | 2026-03-24 | Poll enable at upd_handle_esp32_command (before mq_send) | Must be enabled BEFORE espcp_queue_message sends the command. If enabled after espcp_thread blocks in mq_receive, deadlock: nobody injects the send_response message to wake it. |
-| 2026-03-24 | 12-minute boot time for rebuilt mscorlib Mono | Rebuilt binary takes ~12 min vs ~6 min for old SPCL binary. Previous "polling starves boot" conclusions were wrong — tests were killed too early. |
+| 2026-03-26 | Priority response buffer fix | pendingCmdResponse buffer in EspcpStub survives intervening polls. WiFi connect response delivered correctly. |
+| 2026-03-26 | MqReceiveIntercept sleep-when-poll-off | Redirect espcp_thread to usleep when poll=0, preventing kernel mq_receive deadlock. |
 
 ## ESPCP Response Delivery Path (Key Finding)
 

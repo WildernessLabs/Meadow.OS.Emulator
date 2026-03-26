@@ -60,11 +60,16 @@ namespace Antmicro.Renode.Peripherals.SPI
             rxIndex = 0;
             txIndex = 0;
 
-            if(hasPendingCmdResponse)
+            // Only consume responses on rx-only exchanges (firmware reading MISO).
+            // On tx-only exchanges (firmware sending MOSI), the response bytes were
+            // returned on MISO but the firmware ignores them — don't consume yet.
+            // The firmware's espcp_get_message does multiple tx-only exchanges
+            // (poll + ACK) before the rx-only read; consuming on tx-only would
+            // clear the response before the firmware reads it.
+            if(wasRxOnly)
             {
-                if(wasRxOnly)
+                if(hasPendingCmdResponse)
                 {
-                    // Firmware's response-receive exchange consumed the command response
                     this.Log(LogLevel.Info,
                         "ESPCP: Pending command response consumed — type=0x{0:X2} iface={1} msgId=0x{2:X2}{3:X2}{4:X2}{5:X2} len={6}",
                         pendingCmdResponseLength > 9 ? pendingCmdResponse[9] : (byte)0,
@@ -78,23 +83,21 @@ namespace Antmicro.Renode.Peripherals.SPI
                     pendingCmdResponseLength = 0;
                     MessageWaiting.Set(false);
                 }
-                // else: tx-only or data exchange — pending response survives
-            }
-            else if(hasResponse)
-            {
-                // Regular response (ACK/poll) consumed by this transaction
-                this.Log(LogLevel.Info,
-                    "ESPCP: Response consumed — type=0x{0:X2} iface={1} msgId=0x{2:X2}{3:X2}{4:X2}{5:X2} len={6}",
-                    txLength > 9 ? txBuffer[9] : (byte)0,
-                    txLength > 10 ? txBuffer[10] : (byte)0,
-                    txLength > 22 ? txBuffer[22] : (byte)0,
-                    txLength > 21 ? txBuffer[21] : (byte)0,
-                    txLength > 20 ? txBuffer[20] : (byte)0,
-                    txLength > 19 ? txBuffer[19] : (byte)0,
-                    txLength);
-                hasResponse = false;
-                txLength = 0;
-                MessageWaiting.Set(false);
+                else if(hasResponse)
+                {
+                    this.Log(LogLevel.Info,
+                        "ESPCP: Response consumed — type=0x{0:X2} iface={1} msgId=0x{2:X2}{3:X2}{4:X2}{5:X2} len={6}",
+                        txLength > 9 ? txBuffer[9] : (byte)0,
+                        txLength > 10 ? txBuffer[10] : (byte)0,
+                        txLength > 22 ? txBuffer[22] : (byte)0,
+                        txLength > 21 ? txBuffer[21] : (byte)0,
+                        txLength > 20 ? txBuffer[20] : (byte)0,
+                        txLength > 19 ? txBuffer[19] : (byte)0,
+                        txLength);
+                    hasResponse = false;
+                    txLength = 0;
+                    MessageWaiting.Set(false);
+                }
             }
 
             if(frameLength < HeaderSize)
