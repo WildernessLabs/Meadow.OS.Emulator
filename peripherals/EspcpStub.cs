@@ -37,9 +37,13 @@ namespace Antmicro.Renode.Peripherals.SPI
             }
             rxIndex++;
 
-            // Return outgoing MISO byte from prepared response
+            // Return outgoing MISO byte — pending command response takes priority
             byte result = 0x00;
-            if(hasResponse && txIndex < txLength)
+            if(hasPendingCmdResponse && txIndex < pendingCmdResponseLength)
+            {
+                result = pendingCmdResponse[txIndex];
+            }
+            else if(hasResponse && txIndex < txLength)
             {
                 result = txBuffer[txIndex];
             }
@@ -51,12 +55,34 @@ namespace Antmicro.Renode.Peripherals.SPI
         public void FinishTransmission()
         {
             int frameLength = rxIndex;
+            // Detect rx-only exchange: firmware sent zeros on MOSI to read our response
+            bool wasRxOnly = (frameLength >= 1 && rxBuffer[0] == 0x00);
             rxIndex = 0;
             txIndex = 0;
 
-            if(hasResponse)
+            if(hasPendingCmdResponse)
             {
-                // Previous response was consumed by this transaction
+                if(wasRxOnly)
+                {
+                    // Firmware's response-receive exchange consumed the command response
+                    this.Log(LogLevel.Info,
+                        "ESPCP: Pending command response consumed — type=0x{0:X2} iface={1} msgId=0x{2:X2}{3:X2}{4:X2}{5:X2} len={6}",
+                        pendingCmdResponseLength > 9 ? pendingCmdResponse[9] : (byte)0,
+                        pendingCmdResponseLength > 10 ? pendingCmdResponse[10] : (byte)0,
+                        pendingCmdResponseLength > 22 ? pendingCmdResponse[22] : (byte)0,
+                        pendingCmdResponseLength > 21 ? pendingCmdResponse[21] : (byte)0,
+                        pendingCmdResponseLength > 20 ? pendingCmdResponse[20] : (byte)0,
+                        pendingCmdResponseLength > 19 ? pendingCmdResponse[19] : (byte)0,
+                        pendingCmdResponseLength);
+                    hasPendingCmdResponse = false;
+                    pendingCmdResponseLength = 0;
+                    MessageWaiting.Set(false);
+                }
+                // else: tx-only or data exchange — pending response survives
+            }
+            else if(hasResponse)
+            {
+                // Regular response (ACK/poll) consumed by this transaction
                 this.Log(LogLevel.Info,
                     "ESPCP: Response consumed — type=0x{0:X2} iface={1} msgId=0x{2:X2}{3:X2}{4:X2}{5:X2} len={6}",
                     txLength > 9 ? txBuffer[9] : (byte)0,
@@ -119,8 +145,8 @@ namespace Antmicro.Renode.Peripherals.SPI
 
             HandleMessage(msg, frameLength);
 
-            // Signal MessageWaiting if we prepared a response
-            if(hasResponse)
+            // Signal MessageWaiting if we have a response ready
+            if(hasResponse || hasPendingCmdResponse)
             {
                 MessageWaiting.Set(true);
             }
@@ -147,6 +173,8 @@ namespace Antmicro.Renode.Peripherals.SPI
                         this.Log(LogLevel.Info, "ESPCP: Reset asserted — ESP32 held in reset");
                         booted = false;
                         hasResponse = false;
+                        hasPendingCmdResponse = false;
+                        pendingCmdResponseLength = 0;
                         txLength = 0;
                         Ready.Set(false);
                         MessageWaiting.Set(false);
@@ -174,6 +202,8 @@ namespace Antmicro.Renode.Peripherals.SPI
         {
             booted = true;  // Start ready — GPIO reset wiring is optional
             hasResponse = false;
+            hasPendingCmdResponse = false;
+            pendingCmdResponseLength = 0;
             rxIndex = 0;
             txIndex = 0;
             txLength = 0;
@@ -183,6 +213,7 @@ namespace Antmicro.Renode.Peripherals.SPI
                 socketBridge.CloseAll();
             Array.Clear(rxBuffer, 0, rxBuffer.Length);
             Array.Clear(txBuffer, 0, txBuffer.Length);
+            Array.Clear(pendingCmdResponse, 0, pendingCmdResponse.Length);
             // Signal ready so the STM32 ESPCP driver knows the ESP32 is up
             Ready.Set(true);
             // Signal message waiting to trigger initial ESPCP poll from STM32
@@ -689,12 +720,18 @@ namespace Antmicro.Renode.Peripherals.SPI
 
         private void PrepareResponse(EspcpMessage request, uint statusCode, byte[] payload)
         {
+            // Command responses go into the priority pending buffer so they
+            // survive intervening poll/handshake exchanges until the firmware's
+            // rx-only exchange consumes them.
             int encoded;
-            EncodeMessage(txBuffer, out encoded,
+            EncodeMessage(pendingCmdResponse, out encoded,
                 MsgTypeResponse, request.Interface, request.Function,
                 statusCode, request.MessageId, payload);
-            txLength = encoded;
-            hasResponse = true;
+            pendingCmdResponseLength = encoded;
+            hasPendingCmdResponse = true;
+            this.Log(LogLevel.Info,
+                "ESPCP: Command response queued — iface={0} func={1} msgId=0x{2:X8} len={3}",
+                request.Interface, request.Function, request.MessageId, encoded);
         }
 
         private void PrepareAck(byte iface, uint function, uint messageId)
@@ -1941,6 +1978,13 @@ namespace Antmicro.Renode.Peripherals.SPI
         private int txLength;
         private bool hasResponse;
         private bool booted;
+
+        // Priority buffer for command responses (type=Response/Event).
+        // Survives intervening poll/handshake exchanges until the firmware's
+        // rx-only exchange explicitly consumes it.
+        private readonly byte[] pendingCmdResponse = new byte[MaxSpiFrameSize];
+        private int pendingCmdResponseLength;
+        private bool hasPendingCmdResponse;
         private long frameCount;
         private uint nextMessageId = 1;
         private SocketBridge socketBridge;

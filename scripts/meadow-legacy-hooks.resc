@@ -87,6 +87,7 @@ cpu AddHook $hook_ESPCP_FORCE_INIT_ADDR $espcp_force_init
 # Since we bypass real SPI with the DMA bypass hook, skip the lock/unlock entirely.
 set spi_lock_skip "cpu.PC = cpu.LR"
 cpu AddHook $hook_ESPCP_SPI_INTERFACE_LOCK $spi_lock_skip
+
 cpu AddHook $hook_ESPCP_SPI_INTERFACE_UNLOCK $spi_lock_skip
 
 # Workaround: Renode's STM32F4_RTC crashes when firmware writes an RTC date register
@@ -116,6 +117,7 @@ cpu InstallMqIntercept $hook_MQ_RECEIVE $hook_ESPCP_THREAD_LR 0x2007C010 0xC02FF
 # Set mono_ready flag when start_mono_main fires (0x080618F8).
 # This is a DIFFERENT address from mono_str_fix (0x08061940) — no conflict.
 # Gates poll enable in espcp_managed_cmd_fix.
+# Set mono_ready flag when start_mono_main fires.
 set mono_ready_flag "machine.SystemBus.WriteByte(0xC02FFC04, 1)"
 cpu AddHook $hook_HCOM_MONO_CTRL_START_MONO_MAIN $mono_ready_flag
 

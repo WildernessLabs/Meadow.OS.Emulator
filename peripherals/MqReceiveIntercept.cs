@@ -60,9 +60,35 @@ namespace Antmicro.Renode.Hooks
                 var lr = arm.LR.RawValue;
                 var poll = bus.ReadByte(pollFlagAddr);
 
-                if(lr == espcpThreadLR && poll == 1)
+                if(lr == espcpThreadLR)
                 {
                     espcpCalls++;
+
+                    // When poll is disabled, redirect to usleep so espcp_thread
+                    // never blocks inside the kernel's mq_receive. This avoids a
+                    // deadlock: the poll flag gets set later (at mono_ready), but
+                    // espcp_thread would already be stuck inside mq_receive where
+                    // the hook can't intercept it.
+                    if(poll != 1)
+                    {
+                        if(canSleep)
+                        {
+                            arm.SetRegister((int)ArmRegisters.R0,
+                                RegisterValue.Create(pollSleepUs, 32));
+                            arm.SetRegister((int)ArmRegisters.LR,
+                                RegisterValue.Create((uint)loopTopAddr, 32));
+                            arm.PC = RegisterValue.Create((uint)usleepAddr | 1, 32);
+                            sleepHits++;
+                        }
+                        else
+                        {
+                            arm.SetRegister((int)ArmRegisters.R0,
+                                RegisterValue.Create(unchecked((uint)-1), 32));
+                            arm.PC = arm.LR;
+                            sleepHits++;
+                        }
+                        return;
+                    }
 
                     // Drain feedback send_response messages from the queue.
                     // The MessageWaiting GPIO ISR re-queues a send_response message
