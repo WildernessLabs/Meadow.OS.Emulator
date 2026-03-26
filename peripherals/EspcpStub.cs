@@ -57,6 +57,15 @@ namespace Antmicro.Renode.Peripherals.SPI
             if(hasResponse)
             {
                 // Previous response was consumed by this transaction
+                this.Log(LogLevel.Info,
+                    "ESPCP: Response consumed — type=0x{0:X2} iface={1} msgId=0x{2:X2}{3:X2}{4:X2}{5:X2} len={6}",
+                    txLength > 9 ? txBuffer[9] : (byte)0,
+                    txLength > 10 ? txBuffer[10] : (byte)0,
+                    txLength > 22 ? txBuffer[22] : (byte)0,
+                    txLength > 21 ? txBuffer[21] : (byte)0,
+                    txLength > 20 ? txBuffer[20] : (byte)0,
+                    txLength > 19 ? txBuffer[19] : (byte)0,
+                    txLength);
                 hasResponse = false;
                 txLength = 0;
                 MessageWaiting.Set(false);
@@ -85,9 +94,12 @@ namespace Antmicro.Renode.Peripherals.SPI
             var msg = DecodeMessage(rxBuffer, frameLength);
             if(msg == null)
             {
-                this.Log(LogLevel.Warning, "ESPCP: Failed to decode message (CRC mismatch or bad frame)");
-                // Prepare a NAK response
-                PrepareNak(0, 0, 0, StatusCrcError);
+                // Silently ignore frames that fail CRC decode. During boot, the
+                // firmware sends SPI handshake/sync frames (type=0x01) that have
+                // the same ProtocolNumber but aren't ESPCP messages. If we send
+                // a NAK here, it overwrites any pending command response in txBuffer,
+                // causing the command's rx-only exchange to get the NAK instead.
+                this.Log(LogLevel.Debug, "ESPCP: Failed to decode frame ({0} bytes), ignoring", frameLength);
                 return;
             }
 

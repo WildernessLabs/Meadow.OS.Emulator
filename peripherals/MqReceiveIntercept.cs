@@ -100,7 +100,18 @@ namespace Antmicro.Renode.Hooks
                         {
                             // Real command — let mq_receive process it
                             passthroughHits++;
+                            arm.Log(LogLevel.Info,
+                                "MqReceiveIntercept: PASSTHROUGH real cmd at head=0x{0:X8} mail=0x{1:X8} nmsgs={2}",
+                                headMsg, msgContent, nmsgs);
                             return;
+                        }
+
+                        // Log first few drains for debugging
+                        if(espcpCalls <= 5)
+                        {
+                            arm.Log(LogLevel.Info,
+                                "MqReceiveIntercept: DRAIN feedback at head=0x{0:X8} mail=0x{1:X8} nmsgs={2}",
+                                headMsg, msgContent, nmsgs);
                         }
 
                         // Drain this feedback message from the queue
