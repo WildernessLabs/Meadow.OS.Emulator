@@ -37,13 +37,10 @@ namespace Antmicro.Renode.Peripherals.SPI
             }
             rxIndex++;
 
-            // Return outgoing MISO byte — pending command response takes priority
+            // Return outgoing MISO byte from the single response buffer.
+            // Responses survive tx-only exchanges and are only consumed on rx-only.
             byte result = 0x00;
-            if(hasPendingCmdResponse && txIndex < pendingCmdResponseLength)
-            {
-                result = pendingCmdResponse[txIndex];
-            }
-            else if(hasResponse && txIndex < txLength)
+            if(hasResponse && txIndex < txLength)
             {
                 result = txBuffer[txIndex];
             }
@@ -61,43 +58,21 @@ namespace Antmicro.Renode.Peripherals.SPI
             txIndex = 0;
 
             // Only consume responses on rx-only exchanges (firmware reading MISO).
-            // On tx-only exchanges (firmware sending MOSI), the response bytes were
-            // returned on MISO but the firmware ignores them — don't consume yet.
-            // The firmware's espcp_get_message does multiple tx-only exchanges
-            // (poll + ACK) before the rx-only read; consuming on tx-only would
-            // clear the response before the firmware reads it.
-            if(wasRxOnly)
+            // On tx-only exchanges the firmware ignores MISO — don't consume.
+            if(wasRxOnly && hasResponse)
             {
-                if(hasPendingCmdResponse)
-                {
-                    this.Log(LogLevel.Info,
-                        "ESPCP: Pending command response consumed — type=0x{0:X2} iface={1} msgId=0x{2:X2}{3:X2}{4:X2}{5:X2} len={6}",
-                        pendingCmdResponseLength > 9 ? pendingCmdResponse[9] : (byte)0,
-                        pendingCmdResponseLength > 10 ? pendingCmdResponse[10] : (byte)0,
-                        pendingCmdResponseLength > 22 ? pendingCmdResponse[22] : (byte)0,
-                        pendingCmdResponseLength > 21 ? pendingCmdResponse[21] : (byte)0,
-                        pendingCmdResponseLength > 20 ? pendingCmdResponse[20] : (byte)0,
-                        pendingCmdResponseLength > 19 ? pendingCmdResponse[19] : (byte)0,
-                        pendingCmdResponseLength);
-                    hasPendingCmdResponse = false;
-                    pendingCmdResponseLength = 0;
-                    MessageWaiting.Set(false);
-                }
-                else if(hasResponse)
-                {
-                    this.Log(LogLevel.Info,
-                        "ESPCP: Response consumed — type=0x{0:X2} iface={1} msgId=0x{2:X2}{3:X2}{4:X2}{5:X2} len={6}",
-                        txLength > 9 ? txBuffer[9] : (byte)0,
-                        txLength > 10 ? txBuffer[10] : (byte)0,
-                        txLength > 22 ? txBuffer[22] : (byte)0,
-                        txLength > 21 ? txBuffer[21] : (byte)0,
-                        txLength > 20 ? txBuffer[20] : (byte)0,
-                        txLength > 19 ? txBuffer[19] : (byte)0,
-                        txLength);
-                    hasResponse = false;
-                    txLength = 0;
-                    MessageWaiting.Set(false);
-                }
+                this.Log(LogLevel.Info,
+                    "ESPCP: Response consumed — type=0x{0:X2} iface={1} msgId=0x{2:X2}{3:X2}{4:X2}{5:X2} len={6}",
+                    txLength > 9 ? txBuffer[9] : (byte)0,
+                    txLength > 10 ? txBuffer[10] : (byte)0,
+                    txLength > 22 ? txBuffer[22] : (byte)0,
+                    txLength > 21 ? txBuffer[21] : (byte)0,
+                    txLength > 20 ? txBuffer[20] : (byte)0,
+                    txLength > 19 ? txBuffer[19] : (byte)0,
+                    txLength);
+                hasResponse = false;
+                txLength = 0;
+                MessageWaiting.Set(false);
             }
 
             if(frameLength < HeaderSize)
@@ -146,10 +121,19 @@ namespace Antmicro.Renode.Peripherals.SPI
                     frameCount, pendingEvents.Count);
             }
 
+            // ACK/NAK frames from the firmware acknowledge receipt of our responses/events.
+            // Reply with an empty ACK so the firmware's espcp_get_message multi-packet
+            // loop sees a valid frame with payload_length=0 and exits cleanly.
+            if(msg.MessageType == MsgTypeAck || msg.MessageType == MsgTypeNak)
+            {
+                PrepareAck(msg.Interface, msg.Function, msg.MessageId);
+                return;
+            }
+
             HandleMessage(msg, frameLength);
 
             // Signal MessageWaiting if we have a response ready
-            if(hasResponse || hasPendingCmdResponse)
+            if(hasResponse)
             {
                 MessageWaiting.Set(true);
             }
@@ -176,8 +160,6 @@ namespace Antmicro.Renode.Peripherals.SPI
                         this.Log(LogLevel.Info, "ESPCP: Reset asserted — ESP32 held in reset");
                         booted = false;
                         hasResponse = false;
-                        hasPendingCmdResponse = false;
-                        pendingCmdResponseLength = 0;
                         txLength = 0;
                         Ready.Set(false);
                         MessageWaiting.Set(false);
@@ -205,8 +187,6 @@ namespace Antmicro.Renode.Peripherals.SPI
         {
             booted = true;  // Start ready — GPIO reset wiring is optional
             hasResponse = false;
-            hasPendingCmdResponse = false;
-            pendingCmdResponseLength = 0;
             rxIndex = 0;
             txIndex = 0;
             txLength = 0;
@@ -216,7 +196,6 @@ namespace Antmicro.Renode.Peripherals.SPI
                 socketBridge.CloseAll();
             Array.Clear(rxBuffer, 0, rxBuffer.Length);
             Array.Clear(txBuffer, 0, txBuffer.Length);
-            Array.Clear(pendingCmdResponse, 0, pendingCmdResponse.Length);
             // Signal ready so the STM32 ESPCP driver knows the ESP32 is up
             Ready.Set(true);
             // Signal message waiting to trigger initial ESPCP poll from STM32
@@ -723,15 +702,13 @@ namespace Antmicro.Renode.Peripherals.SPI
 
         private void PrepareResponse(EspcpMessage request, uint statusCode, byte[] payload)
         {
-            // Command responses go into the priority pending buffer so they
-            // survive intervening poll/handshake exchanges until the firmware's
-            // rx-only exchange consumes them.
+            // Command responses take priority — overwrite any pending ACK
             int encoded;
-            EncodeMessage(pendingCmdResponse, out encoded,
+            EncodeMessage(txBuffer, out encoded,
                 MsgTypeResponse, request.Interface, request.Function,
                 statusCode, request.MessageId, payload);
-            pendingCmdResponseLength = encoded;
-            hasPendingCmdResponse = true;
+            txLength = encoded;
+            hasResponse = true;
             this.Log(LogLevel.Info,
                 "ESPCP: Command response queued — iface={0} func={1} msgId=0x{2:X8} len={3}",
                 request.Interface, request.Function, request.MessageId, encoded);
@@ -739,6 +716,9 @@ namespace Antmicro.Renode.Peripherals.SPI
 
         private void PrepareAck(byte iface, uint function, uint messageId)
         {
+            // Don't overwrite a higher-priority response (command response or event)
+            if(hasResponse)
+                return;
             int encoded;
             EncodeMessage(txBuffer, out encoded,
                 MsgTypeAck, iface, function, StatusOk, messageId, null);
@@ -748,6 +728,8 @@ namespace Antmicro.Renode.Peripherals.SPI
 
         private void PrepareNak(byte iface, uint function, uint messageId, uint statusCode)
         {
+            if(hasResponse)
+                return;
             int encoded;
             EncodeMessage(txBuffer, out encoded,
                 MsgTypeNak, iface, function, statusCode, messageId, null);
@@ -757,6 +739,9 @@ namespace Antmicro.Renode.Peripherals.SPI
 
         private void PrepareRawResponse(byte[] frame)
         {
+            // Don't overwrite a pending command response
+            if(hasResponse)
+                return;
             Array.Copy(frame, 0, txBuffer, 0, frame.Length);
             txLength = frame.Length;
             hasResponse = true;
@@ -1982,12 +1967,6 @@ namespace Antmicro.Renode.Peripherals.SPI
         private bool hasResponse;
         private bool booted;
 
-        // Priority buffer for command responses (type=Response/Event).
-        // Survives intervening poll/handshake exchanges until the firmware's
-        // rx-only exchange explicitly consumes it.
-        private readonly byte[] pendingCmdResponse = new byte[MaxSpiFrameSize];
-        private int pendingCmdResponseLength;
-        private bool hasPendingCmdResponse;
         private long frameCount;
         private uint nextMessageId = 1;
         private SocketBridge socketBridge;
