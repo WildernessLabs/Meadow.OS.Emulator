@@ -150,6 +150,7 @@ cpu AddHook $hook_UPD_ESP32_CMD_NOTRESP $espcp_managed_cmd_fix
 set syslog_skip "cpu.PC = cpu.LR"
 cpu AddHook $hook_HCOM_LOGGING_SYSLOG $syslog_skip
 
+
 # Workaround: Download watchdog SIGALRM handler fires too early in emulator.
 # Renode's virtual time advances faster than wall time, so the 3-second POSIX timer
 # expires before TCP data from the CLI arrives. The handler just sets a flag to true.

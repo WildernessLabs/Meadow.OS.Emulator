@@ -59,22 +59,34 @@ namespace Antmicro.Renode.Peripherals.SPI
 
             // Only consume responses on rx-only exchanges (firmware reading MISO).
             // On tx-only exchanges the firmware ignores MISO — don't consume.
-            if(wasRxOnly && hasResponse)
+            if(wasRxOnly)
             {
-                this.Log(LogLevel.Info,
-                    "ESPCP: Response consumed — type=0x{0:X2} iface={1} msgId=0x{2:X2}{3:X2}{4:X2}{5:X2} len={6}",
-                    txLength > 9 ? txBuffer[9] : (byte)0,
-                    txLength > 10 ? txBuffer[10] : (byte)0,
-                    txLength > 22 ? txBuffer[22] : (byte)0,
-                    txLength > 21 ? txBuffer[21] : (byte)0,
-                    txLength > 20 ? txBuffer[20] : (byte)0,
-                    txLength > 19 ? txBuffer[19] : (byte)0,
-                    txLength);
-                hasResponse = false;
-                txLength = 0;
-                // Don't clear lastResponseBuffer here — the firmware may
-                // need it for multi-packet payload assembly on the next exchange.
-                MessageWaiting.Set(false);
+                if(hasResponse)
+                {
+                    this.Log(LogLevel.Info,
+                        "ESPCP: Response consumed — type=0x{0:X2} iface={1} msgId=0x{2:X2}{3:X2}{4:X2}{5:X2} len={6}",
+                        txLength > 9 ? txBuffer[9] : (byte)0,
+                        txLength > 10 ? txBuffer[10] : (byte)0,
+                        txLength > 22 ? txBuffer[22] : (byte)0,
+                        txLength > 21 ? txBuffer[21] : (byte)0,
+                        txLength > 20 ? txBuffer[20] : (byte)0,
+                        txLength > 19 ? txBuffer[19] : (byte)0,
+                        txLength);
+                    hasResponse = false;
+                    txLength = 0;
+                    MessageWaiting.Set(false);
+                }
+
+                // Re-serve ONCE for multi-packet assembly: the firmware does one
+                // additional rx-only exchange to extract the payload. After that,
+                // clear the saved response so it doesn't loop forever.
+                if(!hasResponse && lastResponseBuffer != null)
+                {
+                    Array.Copy(lastResponseBuffer, 0, txBuffer, 0, lastResponseLength);
+                    txLength = lastResponseLength;
+                    hasResponse = true;
+                    lastResponseBuffer = null; // single re-serve only
+                }
             }
 
             if(frameLength < HeaderSize)
@@ -123,26 +135,14 @@ namespace Antmicro.Renode.Peripherals.SPI
                     frameCount, pendingEvents.Count);
             }
 
-            // ACK/NAK frames from the firmware: either acknowledging a response we sent
-            // or requesting payload data during multi-packet assembly. If we have a
-            // saved last response, re-serve it (the firmware's espcp_get_message reads
-            // the payload from this second frame). Otherwise send a simple ACK.
+            // ACK/NAK frames from the firmware acknowledge receipt of our messages.
+            // Don't prepare any response — the re-serve handles multi-packet reads.
             if(msg.MessageType == MsgTypeAck || msg.MessageType == MsgTypeNak)
             {
-                if(lastResponseBuffer != null && !hasResponse)
-                {
-                    Array.Copy(lastResponseBuffer, 0, txBuffer, 0, lastResponseLength);
-                    txLength = lastResponseLength;
-                    hasResponse = true;
-                }
-                else if(!hasResponse)
-                {
-                    PrepareAck(msg.Interface, msg.Function, msg.MessageId);
-                }
                 return;
             }
 
-            // New command — clear the saved response (multi-packet re-serve is over)
+            // New command — clear re-serve buffer
             lastResponseBuffer = null;
 
             HandleMessage(msg, frameLength);
@@ -257,7 +257,7 @@ namespace Antmicro.Renode.Peripherals.SPI
                     // STM32 is polling: "do you have anything for me?"
                     // Check registered poll interests and queue events for ready sockets
                     socketBridge.CheckPollRegistrations();
-                    if(pendingEvents.Count > 0)
+                    if(pendingEvents.Count > 0 && !hasResponse)
                     {
                         // Send the queued event
                         var evt = pendingEvents.Dequeue();
@@ -724,7 +724,14 @@ namespace Antmicro.Renode.Peripherals.SPI
                 statusCode, request.MessageId, payload);
             txLength = encoded;
             hasResponse = true;
-            SaveLastResponse(encoded);
+            // Only save for re-serve if there's a payload — zero-payload responses
+            // don't need multi-packet assembly and re-serve would displace events.
+            if(payload != null && payload.Length > 0)
+            {
+                lastResponseBuffer = new byte[encoded];
+                Array.Copy(txBuffer, 0, lastResponseBuffer, 0, encoded);
+                lastResponseLength = encoded;
+            }
             this.Log(LogLevel.Info,
                 "ESPCP: Command response queued — iface={0} func={1} msgId=0x{2:X8} len={3}",
                 request.Interface, request.Function, request.MessageId, encoded);
@@ -761,14 +768,9 @@ namespace Antmicro.Renode.Peripherals.SPI
             Array.Copy(frame, 0, txBuffer, 0, frame.Length);
             txLength = frame.Length;
             hasResponse = true;
-            SaveLastResponse(frame.Length);
-        }
-
-        private void SaveLastResponse(int length)
-        {
-            lastResponseBuffer = new byte[length];
-            Array.Copy(txBuffer, 0, lastResponseBuffer, 0, length);
-            lastResponseLength = length;
+            lastResponseBuffer = new byte[frame.Length];
+            Array.Copy(frame, 0, lastResponseBuffer, 0, frame.Length);
+            lastResponseLength = frame.Length;
         }
 
         private void QueueEvent(byte iface, uint function, uint statusCode, byte[] payload)
@@ -1990,12 +1992,9 @@ namespace Antmicro.Renode.Peripherals.SPI
         private int txLength;
         private bool hasResponse;
         private bool booted;
-
-        // Last response saved for multi-packet re-serve. The firmware's
-        // espcp_get_message does a second rx-only exchange to fetch payload
-        // data — we re-serve the same frame so it can extract the payload.
         private byte[] lastResponseBuffer;
         private int lastResponseLength;
+
 
         private long frameCount;
         private uint nextMessageId = 1;

@@ -73,28 +73,9 @@ namespace Antmicro.Renode.Hooks
                     }
                     else
                     {
-                        // Full-duplex emulation: tx=0 means "use the pre-loaded SPI
-                        // encode buffer." The firmware's espcp_get_message encodes a
-                        // request via espcp_encode_message before calling with tx=0.
-                        //
-                        // The stub's response is prepared in FinishTransmission, but
-                        // Transmit already ran by then. So we split into two exchanges:
-                        //   1. TX-only: send the encode buffer so the stub processes it
-                        //   2. RX-only: read the response the stub prepared
-                        uint statePtr = bus.ReadDoubleWord(espcpConfigAddr + 8);
-                        uint encodeBuf = (statePtr != 0) ? bus.ReadDoubleWord(statePtr + 0x48) : 0;
-                        if(encodeBuf != 0)
-                        {
-                            // Exchange 1: TX-only — send the request
-                            byte[] reqdata = bus.ReadBytes(encodeBuf, length);
-                            for(int i = 0; i < length; i++)
-                                bridge.Transmit(reqdata[i]);
-                            bridge.FinishTransmission();
-                        }
-                        txdata = new byte[length]; // zeros for the rx-only read
+                        txdata = new byte[length];
                     }
 
-                    // Exchange (or Exchange 2 for full-duplex): read response
                     var rxarr = new byte[length];
                     for(int i = 0; i < length; i++)
                     {
