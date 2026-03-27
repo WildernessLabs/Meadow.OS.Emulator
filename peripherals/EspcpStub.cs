@@ -78,14 +78,25 @@ namespace Antmicro.Renode.Peripherals.SPI
                 }
 
                 // Re-serve ONCE for multi-packet assembly: the firmware does one
-                // additional rx-only exchange to extract the payload. After that,
-                // clear the saved response so it doesn't loop forever.
+                // additional rx-only exchange to extract the payload.
                 if(!hasResponse && lastResponseBuffer != null)
                 {
                     Array.Copy(lastResponseBuffer, 0, txBuffer, 0, lastResponseLength);
                     txLength = lastResponseLength;
                     hasResponse = true;
-                    lastResponseBuffer = null; // single re-serve only
+                    lastResponseBuffer = null;
+                }
+                // Restore displaced response (saved when PrepareResponse had to
+                // overwrite txBuffer with a command ACK).
+                else if(!hasResponse && displacedResponse != null)
+                {
+                    Array.Copy(displacedResponse, 0, txBuffer, 0, displacedResponseLength);
+                    txLength = displacedResponseLength;
+                    hasResponse = true;
+                    lastResponseBuffer = displacedLastResponse;
+                    lastResponseLength = displacedLastResponseLength;
+                    displacedResponse = null;
+                    displacedLastResponse = null;
                 }
             }
 
@@ -729,8 +740,20 @@ namespace Antmicro.Renode.Peripherals.SPI
             Array.Copy(responseBuffer, 0, responseFrame, 0, responseEncoded);
             pendingEvents.Enqueue(responseFrame);
 
-            // 2. Serve an ACK for the immediate header read
-            // Force-prepare even if hasResponse is set (e.g., from a previous poll cycle)
+            // 2. Serve an ACK for the immediate header read.
+            // If txBuffer already has a pending response (from a previous poll), save it
+            // so it can be restored after the ACK is consumed. Without this, overlapping
+            // commands clobber pending events/responses.
+            if(hasResponse)
+            {
+                displacedResponse = new byte[txLength];
+                Array.Copy(txBuffer, 0, displacedResponse, 0, txLength);
+                displacedResponseLength = txLength;
+                // Also preserve the re-serve buffer if one exists
+                displacedLastResponse = lastResponseBuffer;
+                displacedLastResponseLength = lastResponseLength;
+                lastResponseBuffer = null;
+            }
             int ackEncoded;
             EncodeMessage(txBuffer, out ackEncoded,
                 MsgTypeAck, request.Interface, request.Function,
@@ -2029,6 +2052,10 @@ namespace Antmicro.Renode.Peripherals.SPI
         private bool booted;
         private byte[] lastResponseBuffer;
         private int lastResponseLength;
+        private byte[] displacedResponse;
+        private int displacedResponseLength;
+        private byte[] displacedLastResponse;
+        private int displacedLastResponseLength;
 
 
         private long frameCount;
