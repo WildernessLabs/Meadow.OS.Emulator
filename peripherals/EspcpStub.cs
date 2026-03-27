@@ -361,6 +361,11 @@ namespace Antmicro.Renode.Peripherals.SPI
                 case WiFiConnectToDefaultAP:
                 case WiFiConnectToAP:
                     PrepareResponse(msg, StatusOk, null);
+                    // Configure the NuttX loopback device as a WiFi interface so
+                    // Mono's NetworkInterface.GetAllNetworkInterfaces() returns a
+                    // Wireless80211 adapter with the correct IP. Without this, Mono
+                    // sees no valid network and skips DNS resolution entirely.
+                    ConfigureLoopbackAsWifi();
                     // Queue "network connected" event with host IP info
                     var connectPayload = BuildNetworkConnectedPayload();
                     QueueEvent(InterfaceWiFi, WiFiEventNetworkConnected, StatusOk, connectPayload);
@@ -512,6 +517,77 @@ namespace Antmicro.Renode.Peripherals.SPI
         /// channel(1) + auth_mode(1) + reason(4)
         /// Uses the host machine's actual network interface when available.
         /// </summary>
+        /// <summary>
+        /// Configure the NuttX loopback device (g_loopback) to appear as a WiFi
+        /// interface with the host's real IP. Mono's NetworkInterface API reads from
+        /// NuttX's net_driver_s structs. Without a Wireless80211 interface, Mono's
+        /// managed DNS resolver refuses to attempt resolution.
+        /// </summary>
+        private void ConfigureLoopbackAsWifi()
+        {
+            try
+            {
+                var machine = this.GetMachine();
+                var bus = machine.SystemBus;
+
+                // g_loopback struct layout (verified via GDB):
+                // +0x2C: d_ifname (16 bytes)
+                // +0x3D: d_lltype (1 byte) — NET_LL_LOOPBACK=1, NET_LL_IEEE80211=2
+                // +0x40: d_ipaddr (4 bytes, NBO in LE memory)
+                // +0x44: d_draddr (4 bytes)
+                // +0x48: d_netmask (4 bytes)
+                const uint loopbackAddr = 0x20030AD8;
+
+                // Get host network info
+                byte[] ip = { 192, 168, 1, 100 };
+                byte[] subnet = { 255, 255, 255, 0 };
+                byte[] gateway = { 192, 168, 1, 1 };
+                try
+                {
+                    foreach(var iface in NetworkInterface.GetAllNetworkInterfaces())
+                    {
+                        if(iface.OperationalStatus != OperationalStatus.Up) continue;
+                        if(iface.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                        var props = iface.GetIPProperties();
+                        foreach(var addr in props.UnicastAddresses)
+                        {
+                            if(addr.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+                            ip = addr.Address.GetAddressBytes();
+                            if(addr.IPv4Mask != null) subnet = addr.IPv4Mask.GetAddressBytes();
+                            foreach(var gw in props.GatewayAddresses)
+                            {
+                                if(gw.Address.AddressFamily == AddressFamily.InterNetwork)
+                                { gateway = gw.Address.GetAddressBytes(); break; }
+                            }
+                            goto done;
+                        }
+                    }
+                }
+                catch { }
+                done:
+
+                // Change d_lltype from Loopback(1) to IEEE80211(2)
+                bus.WriteByte(loopbackAddr + 0x3D, 2);
+
+                // Write IP addresses (NBO bytes stored directly in LE memory)
+                for(int i = 0; i < 4; i++)
+                {
+                    bus.WriteByte(loopbackAddr + 0x40 + (uint)i, ip[i]);
+                    bus.WriteByte(loopbackAddr + 0x44 + (uint)i, gateway[i]);
+                    bus.WriteByte(loopbackAddr + 0x48 + (uint)i, subnet[i]);
+                }
+
+                this.Log(LogLevel.Info,
+                    "ESPCP: Configured loopback as WiFi — IP={0}, gw={1}, mask={2}",
+                    new IPAddress(ip), new IPAddress(gateway), new IPAddress(subnet));
+            }
+            catch(Exception ex)
+            {
+                this.Log(LogLevel.Warning,
+                    "ESPCP: Failed to configure loopback: {0}", ex.Message);
+            }
+        }
+
         private byte[] BuildNetworkConnectedPayload()
         {
             byte[] ip = { 192, 168, 1, 100 };
@@ -1520,6 +1596,10 @@ namespace Antmicro.Renode.Peripherals.SPI
             /// </summary>
             public byte[] HandleSend(byte[] payload)
             {
+                parent.Log(LogLevel.Info,
+                    "SocketBridge: HandleSend called, payload={0} bytes",
+                    payload != null ? payload.Length : 0);
+
                 if(payload == null || payload.Length < 8)
                     return EncodeIntegerAndErrno(-1, EINVAL);
 
@@ -1656,6 +1736,9 @@ namespace Antmicro.Renode.Peripherals.SPI
             /// </summary>
             public byte[] HandleRecvFrom(byte[] payload)
             {
+                parent.Log(LogLevel.Info,
+                    "SocketBridge: HandleRecvFrom called, payload={0} bytes",
+                    payload != null ? payload.Length : 0);
                 if(payload == null || payload.Length < 16)
                     return EncodeRecvFromResponse(null, -1, EINVAL, null, false);
 
