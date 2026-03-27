@@ -51,6 +51,13 @@ namespace Antmicro.Renode.Hooks
             var bus = machine.SystemBus;
             long callCount = 0;
 
+            // espcp_configuration global at 0x20020F6C (firmware BSS).
+            // state pointer at config+0x08, SPI encode buffer at state+0x48.
+            // Used to implement full-duplex: when tx=0, the firmware already
+            // loaded the encode buffer via espcp_encode_message — send that
+            // instead of zeros so the stub sees the request frame.
+            const uint espcpConfigAddr = 0x20020F6C;
+
             cpu.AddHook(hookAddress, (ICpuSupportingGdb c, ulong pc) =>
             {
                 uint tx = (uint)arm.GetRegister((int)ArmRegisters.R0).RawValue;
@@ -66,9 +73,28 @@ namespace Antmicro.Renode.Hooks
                     }
                     else
                     {
-                        txdata = new byte[length];
+                        // Full-duplex emulation: tx=0 means "use the pre-loaded SPI
+                        // encode buffer." The firmware's espcp_get_message encodes a
+                        // request via espcp_encode_message before calling with tx=0.
+                        //
+                        // The stub's response is prepared in FinishTransmission, but
+                        // Transmit already ran by then. So we split into two exchanges:
+                        //   1. TX-only: send the encode buffer so the stub processes it
+                        //   2. RX-only: read the response the stub prepared
+                        uint statePtr = bus.ReadDoubleWord(espcpConfigAddr + 8);
+                        uint encodeBuf = (statePtr != 0) ? bus.ReadDoubleWord(statePtr + 0x48) : 0;
+                        if(encodeBuf != 0)
+                        {
+                            // Exchange 1: TX-only — send the request
+                            byte[] reqdata = bus.ReadBytes(encodeBuf, length);
+                            for(int i = 0; i < length; i++)
+                                bridge.Transmit(reqdata[i]);
+                            bridge.FinishTransmission();
+                        }
+                        txdata = new byte[length]; // zeros for the rx-only read
                     }
 
+                    // Exchange (or Exchange 2 for full-duplex): read response
                     var rxarr = new byte[length];
                     for(int i = 0; i < length; i++)
                     {
