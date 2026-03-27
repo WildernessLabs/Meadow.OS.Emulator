@@ -556,14 +556,14 @@ namespace Antmicro.Renode.Peripherals.SPI
             // ip_address(4) + subnet_mask(4) + gateway(4) + ssid(33) + bssid(6) +
             // channel(1) + auth_mode(1) + reason(4) = 57 bytes
             var payload = new byte[57];
-            // IP addresses: the ESP32 stores ip4_addr_t in NBO (e.g. 192.168.0.105 = 0xC0A80069).
-            // espcp_encode_uint32 writes this as LE bytes: {0x69, 0x00, 0xA8, 0xC0}.
-            // The STM32's espcp_extract_uint32 reads LE → gets 0xC0A80069 (original NBO).
-            // GetAddressBytes() returns NBO: {0xC0, 0xA8, 0x00, 0x69}.
-            // We must reverse to match espcp_encode_uint32's LE output.
-            WriteIpLE(payload, 0, ip);
-            WriteIpLE(payload, 4, subnet);
-            WriteIpLE(payload, 8, gateway);
+            // IP addresses: the ESP32 stores ip4_addr_t as uint32 in NBO. On LE hardware,
+            // in_addr.s_addr for 192.168.0.105 = 0x6900A8C0 (memory: {C0, A8, 00, 69}).
+            // espcp_encode_uint32 writes this uint32 in LE: bytes {C0, A8, 00, 69}.
+            // GetAddressBytes() returns the same NBO bytes: {C0, A8, 00, 69}.
+            // So write them directly — no reversal needed.
+            Array.Copy(ip, 0, payload, 0, 4);
+            Array.Copy(subnet, 0, payload, 4, 4);
+            Array.Copy(gateway, 0, payload, 8, 4);
 
             // ssid: "Emulator" (null-padded to 33 bytes)
             var ssid = System.Text.Encoding.UTF8.GetBytes("Emulator");
@@ -571,18 +571,6 @@ namespace Antmicro.Renode.Peripherals.SPI
 
             // bssid(6) + channel(1) + auth_mode(1) + reason(4) left as zeros
             return payload;
-        }
-
-        /// <summary>
-        /// Write IP address bytes in LE order (reversed from GetAddressBytes NBO).
-        /// Matches espcp_encode_uint32(ip4_addr_t) on the ESP32 side.
-        /// </summary>
-        private static void WriteIpLE(byte[] buf, int offset, byte[] ip)
-        {
-            buf[offset]     = ip[3];
-            buf[offset + 1] = ip[2];
-            buf[offset + 2] = ip[1];
-            buf[offset + 3] = ip[0];
         }
 
         /// <summary>
@@ -622,8 +610,8 @@ namespace Antmicro.Renode.Peripherals.SPI
             }
             done:
 
-            // dns_address: LE encoding of NBO uint32 (reversed bytes)
-            return new byte[] { dns[3], dns[2], dns[1], dns[0] };
+            // dns_address: NBO bytes written directly (same as IP encoding)
+            return new byte[] { dns[0], dns[1], dns[2], dns[3] };
         }
 
         // ── Message encoding/decoding ───────────────────────────────────
