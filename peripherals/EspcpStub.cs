@@ -722,16 +722,28 @@ namespace Antmicro.Renode.Peripherals.SPI
             EncodeMessage(txBuffer, out encoded,
                 MsgTypeResponse, request.Interface, request.Function,
                 statusCode, request.MessageId, payload);
-            txLength = encoded;
-            hasResponse = true;
-            // Only save for re-serve if there's a payload — zero-payload responses
-            // don't need multi-packet assembly and re-serve would displace events.
-            if(payload != null && payload.Length > 0)
+
+            int headerOnlySize = ((HeaderSize + 3) & ~3) + SpiOverhead; // 32 bytes
+            if(payload != null && payload.Length > 0 && encoded > headerOnlySize)
             {
+                // Save full frame for re-serve, serve header-only with matching CRC
                 lastResponseBuffer = new byte[encoded];
                 Array.Copy(txBuffer, 0, lastResponseBuffer, 0, encoded);
                 lastResponseLength = encoded;
+                // Recompute CRC for header-only size
+                txBuffer[CrcOffset] = 0;
+                txBuffer[CrcOffset + 1] = 0;
+                txBuffer[CrcOffset + 2] = 0;
+                txBuffer[CrcOffset + 3] = 0;
+                uint crc = ComputeCrc32(txBuffer, headerOnlySize - SpiOverhead);
+                EncodeUint32(crc, txBuffer, CrcOffset);
+                txLength = headerOnlySize;
             }
+            else
+            {
+                txLength = encoded;
+            }
+            hasResponse = true;
             this.Log(LogLevel.Info,
                 "ESPCP: Command response queued — iface={0} func={1} msgId=0x{2:X8} len={3}",
                 request.Interface, request.Function, request.MessageId, encoded);
@@ -765,12 +777,36 @@ namespace Antmicro.Renode.Peripherals.SPI
             // Don't overwrite a pending command response
             if(hasResponse)
                 return;
-            Array.Copy(frame, 0, txBuffer, 0, frame.Length);
-            txLength = frame.Length;
-            hasResponse = true;
-            lastResponseBuffer = new byte[frame.Length];
-            Array.Copy(frame, 0, lastResponseBuffer, 0, frame.Length);
-            lastResponseLength = frame.Length;
+            // Serve header-only frame (32 bytes) for the first read.
+            // The firmware reads header_only_buffer_size bytes first to get payload_length,
+            // then does a second read for the full frame. CRC must match the served size.
+            int headerOnlySize = ((HeaderSize + 3) & ~3) + SpiOverhead; // 32 bytes
+            if(frame.Length > headerOnlySize)
+            {
+                // Re-encode as header-only frame with matching CRC
+                var headerFrame = new byte[headerOnlySize];
+                Array.Copy(frame, 0, headerFrame, 0, Math.Min(frame.Length, headerOnlySize));
+                // Recompute CRC over header-only size
+                headerFrame[CrcOffset] = 0;
+                headerFrame[CrcOffset + 1] = 0;
+                headerFrame[CrcOffset + 2] = 0;
+                headerFrame[CrcOffset + 3] = 0;
+                uint crc = ComputeCrc32(headerFrame, headerOnlySize - SpiOverhead);
+                EncodeUint32(crc, headerFrame, CrcOffset);
+                Array.Copy(headerFrame, 0, txBuffer, 0, headerOnlySize);
+                txLength = headerOnlySize;
+                hasResponse = true;
+                // Save the FULL frame for re-serve (multi-packet payload read)
+                lastResponseBuffer = new byte[frame.Length];
+                Array.Copy(frame, 0, lastResponseBuffer, 0, frame.Length);
+                lastResponseLength = frame.Length;
+            }
+            else
+            {
+                Array.Copy(frame, 0, txBuffer, 0, frame.Length);
+                txLength = frame.Length;
+                hasResponse = true;
+            }
         }
 
         private void QueueEvent(byte iface, uint function, uint statusCode, byte[] payload)
