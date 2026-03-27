@@ -180,8 +180,20 @@ Exchange E: RX-only — firmware reads "continuation" data
   → Firmware copies payload via memcpy(payload_buf + packet_offset, data, packet_length)
   → r6 -= packet_length → if r6 == 0, exits loop
 ```
-**CRITICAL:** The stub must re-serve the same response frame exactly once on the
-rx-only exchange after consumption. This is handled by lastResponseBuffer.
+**CRITICAL:** The first rx-only in espcp_get_message reads ONLY 32 bytes (header-only
+buffer). The payload is NOT included. The multi-packet loop then reads the payload
+in separate rx-only exchanges. The stub currently sends the full frame (header+payload)
+in one response, but the firmware only reads 32 bytes of it. The payload bytes are lost.
+
+For proper multi-packet support, the stub must:
+1. First rx-only (32 bytes): return header with payload_length set correctly
+2. Multi-packet loop rx-only (sized per chunk): return payload data
+
+The firmware sends an ACK request frame between reads with packet_offset/packet_length
+indicating which chunk it wants. But with tx=0 (rx-only), the request is in the
+pre-loaded SPI encode buffer which gets cleared by espcp_clear_spi_buffers.
+
+Source: espcp_message_dispatcher.c lines 768-901 in Meadow firmware repo.
 
 #### 4. After multi-packet assembly completes (r6 == 0):
 ```
