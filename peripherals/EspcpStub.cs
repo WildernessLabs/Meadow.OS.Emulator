@@ -255,18 +255,16 @@ namespace Antmicro.Renode.Peripherals.SPI
             {
                 case TransportSendResponse:
                     // STM32 is polling: "do you have anything for me?"
-                    // Check registered poll interests and queue events for ready sockets
                     socketBridge.CheckPollRegistrations();
                     if(pendingEvents.Count > 0 && !hasResponse)
                     {
-                        // Send the queued event
                         var evt = pendingEvents.Dequeue();
                         PrepareRawResponse(evt);
-                        this.Log(LogLevel.Debug, "ESPCP: Sending queued event to STM32");
+                        this.Log(LogLevel.Debug, "ESPCP: Sending queued response/event to STM32 ({0} remaining)",
+                            pendingEvents.Count);
                     }
-                    else
+                    else if(!hasResponse)
                     {
-                        // Nothing pending — return ACK with zero payload
                         PrepareAck(msg.Interface, msg.Function, msg.MessageId);
                     }
                     break;
