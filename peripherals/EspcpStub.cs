@@ -717,41 +717,38 @@ namespace Antmicro.Renode.Peripherals.SPI
 
         private void PrepareResponse(EspcpMessage request, uint statusCode, byte[] payload)
         {
-            // Command responses take priority — overwrite any pending ACK
-            int encoded;
-            EncodeMessage(txBuffer, out encoded,
+            // The firmware's protocol: espcp_send_message sends the command, then reads
+            // a header-only ACK (get_message_header_acknowledgement). The ACTUAL response
+            // with payload is read later during a poll cycle via espcp_get_message.
+            //
+            // So: serve an ACK immediately, and queue the full response for poll delivery.
+
+            // 1. Queue the full response for later poll delivery
+            var responseBuffer = new byte[MaxSpiFrameSize];
+            int responseEncoded;
+            EncodeMessage(responseBuffer, out responseEncoded,
                 MsgTypeResponse, request.Interface, request.Function,
                 statusCode, request.MessageId, payload);
+            var responseFrame = new byte[responseEncoded];
+            Array.Copy(responseBuffer, 0, responseFrame, 0, responseEncoded);
+            pendingEvents.Enqueue(responseFrame);
 
-            int headerOnlySize = ((HeaderSize + 3) & ~3) + SpiOverhead; // 32 bytes
-            if(payload != null && payload.Length > 0 && encoded > headerOnlySize)
-            {
-                // Save full frame for re-serve, serve header-only with matching CRC
-                lastResponseBuffer = new byte[encoded];
-                Array.Copy(txBuffer, 0, lastResponseBuffer, 0, encoded);
-                lastResponseLength = encoded;
-                // Recompute CRC for header-only size
-                txBuffer[CrcOffset] = 0;
-                txBuffer[CrcOffset + 1] = 0;
-                txBuffer[CrcOffset + 2] = 0;
-                txBuffer[CrcOffset + 3] = 0;
-                uint crc = ComputeCrc32(txBuffer, headerOnlySize - SpiOverhead);
-                EncodeUint32(crc, txBuffer, CrcOffset);
-                txLength = headerOnlySize;
-            }
-            else
-            {
-                txLength = encoded;
-            }
+            // 2. Serve an ACK for the immediate header read
+            // Force-prepare even if hasResponse is set (e.g., from a previous poll cycle)
+            int ackEncoded;
+            EncodeMessage(txBuffer, out ackEncoded,
+                MsgTypeAck, request.Interface, request.Function,
+                StatusOk, request.MessageId, null);
+            txLength = ackEncoded;
             hasResponse = true;
+
             this.Log(LogLevel.Info,
                 "ESPCP: Command response queued — iface={0} func={1} msgId=0x{2:X8} len={3}",
-                request.Interface, request.Function, request.MessageId, encoded);
+                request.Interface, request.Function, request.MessageId, responseEncoded);
         }
 
         private void PrepareAck(byte iface, uint function, uint messageId)
         {
-            // Don't overwrite a higher-priority response (command response or event)
             if(hasResponse)
                 return;
             int encoded;
@@ -806,6 +803,12 @@ namespace Antmicro.Renode.Peripherals.SPI
                 Array.Copy(frame, 0, txBuffer, 0, frame.Length);
                 txLength = frame.Length;
                 hasResponse = true;
+                // Save for re-serve even for small/zero-payload frames.
+                // The firmware's do-while loop always reads at least once after
+                // the header read, even for payload_length=0.
+                lastResponseBuffer = new byte[frame.Length];
+                Array.Copy(frame, 0, lastResponseBuffer, 0, frame.Length);
+                lastResponseLength = frame.Length;
             }
         }
 
