@@ -124,11 +124,16 @@ namespace Antmicro.Renode.Hooks
 
                         if(msgContent != (uint)sendResponseAddr)
                         {
-                            // Real command — let mq_receive process it
+                            // Real command — let mq_receive process it.
+                            // After the command is sent, we need to poll immediately
+                            // to deliver the queued response. Set flag for next call.
                             passthroughHits++;
-                            arm.Log(LogLevel.Info,
-                                "MqReceiveIntercept: PASSTHROUGH real cmd at head=0x{0:X8} mail=0x{1:X8} nmsgs={2}",
-                                headMsg, msgContent, nmsgs);
+                            if(passthroughHits <= 20)
+                            {
+                                arm.Log(LogLevel.Info,
+                                    "MqReceiveIntercept: PASSTHROUGH real cmd at head=0x{0:X8} mail=0x{1:X8} nmsgs={2} ({3})",
+                                    headMsg, msgContent, nmsgs, passthroughHits);
+                            }
                             return;
                         }
 
@@ -156,12 +161,6 @@ namespace Antmicro.Renode.Hooks
 
                     if(canDirectDispatch)
                     {
-                        // Direct dispatch: skip mq_receive entirely, redirect PC to
-                        // the SPI dispatch point in espcp_thread. Write the static
-                        // send_response message pointer to [sp, #4] (where the
-                        // dispatch reads it) and jump to espcp_spi_interface_lock.
-                        // This makes espcp_thread call espcp_get_message immediately
-                        // without going through the NuttX scheduler or mq_receive.
                         uint msgPtr = bus.ReadDoubleWord(gRequestResponseMsg);
                         ulong sp = arm.SP.RawValue;
                         bus.WriteDoubleWord(sp + 4, msgPtr);
