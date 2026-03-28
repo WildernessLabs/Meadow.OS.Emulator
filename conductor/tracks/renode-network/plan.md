@@ -229,3 +229,121 @@ ensuring correct timing.
 1. ~~**GetAddrInfo response format:**~~ RESOLVED — firmware never calls it. DNS goes through NuttX DNS client → UDP sockets.
 2. ~~**Poll two-phase model:**~~ RESOLVED — point-in-time query works regardless of setup flag. Firmware retries poll via its own loop. No need to track registered interests.
 3. **Max payload size:** Capped recv at 4000 bytes (`MaxReadWriteBuffer`), matching the firmware's `MAXIMUM_READ_WRITE_BUFFER_SIZE`. Multi-packet framing not needed.
+
+---
+
+## DNS Resolution Debugging Plan
+
+### Current State (2026-03-28)
+App reaches `HttpClient.GetAsync("http://postman-echo.com/get?request=1")` and BLOCKS
+indefinitely. No native DNS function is ever called (verified with Renode hooks added at
+startup on all 11 DNS-related functions). The app previously failed instantly with "No such
+host is known" but now blocks after the loopback-as-WiFi configuration.
+
+### Complete DNS Call Chain (verified from source code)
+
+```
+HttpClient.GetAsync(url)
+  → MonoWebRequestHandler.SendAsync() [MonoWebRequestHandler.cs:495]
+    → wrequest.GetResponseAsync()
+      → ServicePoint.HostEntry [ServicePoint.cs:270]
+        → Dns.GetHostEntry(hostname) [Dns.cs:397]
+          → Dns.GetHostByName(hostname) [Dns.cs:439]
+            → GetHostByName_internal() [P/Invoke to Mono native]
+              → ves_icall_System_Net_Dns_GetHostByName_internal [w32socket.c:2636]
+                → mono_get_address_info(hostname, ...) [networking-posix.c:66]
+                  → getaddrinfo(hostname, service, &hints, &info) [networking-posix.c:96]
+                    → gethostbyname_r() [lib_gethostbynamer.c:790]
+                      1. lib_numeric_address() → quick, no network
+                      2. lib_localhost() → quick, local check
+                      3. lib_find_answer() → DNS cache check
+                      4. lib_dns_lookup() → BLOCKING network I/O
+                        → lib_dns_query() [lib_gethostbynamer.c:565]
+                          → dns_bind() → socket(PF_INET, SOCK_DGRAM, 0) [lib_dnsbind.c:96]
+                            → psock_socket() → ROUTES TO USRSOCK [socket.c:139-149]
+                              → espcp_usrsock_socket() → espcp_queue_message(blocking=true)
+                          → dns_query(sd, hostname, ...) [lib_dnsquery.c:920]
+                            → dns_foreach_nameserver(callback, &query)
+                              → fopen("/meadow0/dns.conf", "rb") [lib_dnsforeach.c:104]
+                              → for each "nameserver" line:
+                                → dns_query_callback() [lib_dnsquery.c:678]
+                                  → dns_send_query(sd, hostname, &addr, ...) [lib_dnsquery.c:712]
+                                    → sendto(sd, buffer, len, 0, &addr, addrlen) [lib_dnsquery.c:320]
+                                      → psock_sendto() → si_sendto [sendto.c:162]
+                                        → espcp_usrsock_sendto() [espcp_usrsock_sockif.c:1958]
+                                          → CHECK: esp_not_responding → -ENETDOWN [line 1964]
+                                          → espcp_queue_message(sendto_msg, true) [BLOCKS]
+                                  → dns_recv_response(sd, ...) [lib_dnsquery.c:~730]
+                                    → recvfrom(sd, ...) with SO_RCVTIMEO timeout
+                                      → espcp_usrsock_recvfrom() → espcp_queue_message(blocking=true)
+```
+
+### Checkpoints to Verify (in order)
+
+Each checkpoint tests one link in the chain. Test from TOP DOWN — the first failure
+identifies the blocking point. For each checkpoint, set a Renode hook AT STARTUP (before
+`start`) to avoid translation cache issues.
+
+| # | Function | Address | What to check | Expected |
+|---|----------|---------|---------------|----------|
+| C1 | ServicePoint.HostEntry | N/A (managed) | Does HCOM show HTTP request? | "GET http://..." ✓ confirmed |
+| C2 | GetHostByName_internal | 0xC011704C | Renode hook fires? | Should fire if managed DNS path works |
+| C3 | mono_get_address_info | 0xC015CF40 | Renode hook fires? | Should fire (called from C2) |
+| C4 | getaddrinfo (user) | 0x080BAAF2 | Renode hook fires? | Should fire (called from C3 via thunk) |
+| C5 | gethostbyname_r (kernel) | 0x0815B8BC | Renode hook fires? | Should fire (called from C4) |
+| C6 | dns_bind (user) | 0x080B2D44 | Renode hook fires? | Should fire (creates DNS UDP socket) |
+| C7 | dns_foreach_nameserver | 0x080B30BC / 0x0815C1D4 | Hook fires? | Should fire (reads dns.conf) |
+| C8 | sendto (kernel) | find psock_sendto addr | Hook fires? | Should fire (sends DNS query) |
+| C9 | espcp_usrsock_sendto | 0x08148FF8 | Hook fires? | Should fire (routes to ESPCP) |
+| C10 | espcp_queue_message | 0x081484E4 | Hook fires? | Should fire (blocks on semaphore) |
+
+**Verified facts:**
+- C1: ✓ HCOM shows "[1] GET http://postman-echo.com/..."
+- C2: ✗ Hook at 0xC011704C NEVER fires
+- C3: ✗ Hook at 0xC015CF40 NEVER fires
+- C4-C10: ✗ None fire
+
+**Conclusion:** The blockage is BETWEEN C1 and C2 — in the MANAGED code between
+`HttpClient.GetAsync` and `GetHostByName_internal`. The managed code never reaches
+the native DNS icall.
+
+### Possible Managed-Level Blocking Points
+
+1. **ServicePoint.HostEntry lock** (ServicePoint.cs:245) — `lock(hostE)` contention.
+   If another thread holds this lock, the HTTP request blocks. Unlikely on first request.
+
+2. **ServicePoint cache with null host** — If a previous DNS attempt set `host = null`
+   (from the catch block at line 271), and `HasTimedOut` returns false, the cached null
+   is returned without retrying DNS. CHECK: ServicePointManager.DnsRefreshTimeout.
+
+3. **Socket.FamilyHint** throws — The `Socket.FamilyHint` property at Dns.cs:439 is
+   passed to GetHostByName_internal. If this property throws (e.g., accessing network
+   config), the exception propagates before the icall.
+
+4. **HttpWebRequest.GetResponseAsync blocks before DNS** — The request might block
+   on connection pool, proxy resolution, or other pre-DNS checks.
+
+5. **MONO_ENTER_GC_SAFE deadlock** — mono_get_address_info wraps getaddrinfo in
+   GC_SAFE region. If Mono's GC is stuck (e.g., waiting for another thread), the
+   GC transition blocks indefinitely.
+
+6. **Managed Socket constructor** — HttpWebRequest might create a managed Socket
+   before DNS. If `new Socket(AF_INET, SOCK_STREAM, TCP)` blocks (goes through
+   usrsock → ESPCP → blocks on semaphore), the request never reaches DNS.
+
+### Next Steps
+
+1. **Verify C2 with startup hooks** — Add hooks to the .resc file (not dynamically)
+   for `ves_icall_System_Net_Dns_GetHostByName_internal` at 0xC011704C. Also hook
+   `Socket.FamilyHint` icall if identifiable.
+
+2. **Check #6 (managed Socket before DNS)** — Set hooks on ALL usrsock socket operations
+   at startup. If `espcp_usrsock_socket` fires AFTER the HTTP request, a managed TCP
+   socket is being created before DNS → blocks on ESPCP response delivery.
+
+3. **Check #4 (HttpWebRequest blocking)** — Look at Mono source for what
+   `HttpWebRequest.GetResponseAsync` does before ServicePoint.HostEntry. Trace the
+   managed code path to find the exact blocking point.
+
+4. **Build app with Console.WriteLine** — Add debug output to the Meadow app at each
+   step of the HTTP request to narrow down where it blocks in managed code.
