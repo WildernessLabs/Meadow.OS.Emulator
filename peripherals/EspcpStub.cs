@@ -138,6 +138,7 @@ namespace Antmicro.Renode.Peripherals.SPI
             // This runs during the boot handshake, well before Mono starts,
             // ensuring Mono's GetAllNetworkInterfaces() finds a Wireless80211
             // adapter with a valid IP for DNS resolution.
+            // ConfigureLoopbackAsWifi disabled for testing
             if(frameCount == 1)
             {
                 ConfigureLoopbackAsWifi();

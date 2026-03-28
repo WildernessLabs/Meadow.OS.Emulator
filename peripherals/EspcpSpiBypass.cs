@@ -89,7 +89,7 @@ namespace Antmicro.Renode.Hooks
                     }
 
                     // Log first 100 SPI exchanges for debugging
-                    if(callCount < 100)
+                    if(callCount < 500)
                     {
                         arm.Log(LogLevel.Info,
                             "EspcpSpiBypass: #{0} tx=0x{1:X8} rx=0x{2:X8} len={3} tx[0..3]=0x{4:X2}{5:X2}{6:X2}{7:X2} rx[0..3]=0x{8:X2}{9:X2}{10:X2}{11:X2} LR=0x{12:X8}",
