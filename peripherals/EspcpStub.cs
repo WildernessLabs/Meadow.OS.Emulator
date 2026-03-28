@@ -133,6 +133,16 @@ namespace Antmicro.Renode.Peripherals.SPI
             }
 
             frameCount++;
+
+            // Configure loopback as WiFi on the first valid ESPCP frame.
+            // This runs during the boot handshake, well before Mono starts,
+            // ensuring Mono's GetAllNetworkInterfaces() finds a Wireless80211
+            // adapter with a valid IP for DNS resolution.
+            if(frameCount == 1)
+            {
+                ConfigureLoopbackAsWifi();
+            }
+
             // Log non-poll frames at INFO level for debugging
             if(msg.Interface != InterfaceTransport || msg.Function != TransportSendResponse)
             {
@@ -361,11 +371,6 @@ namespace Antmicro.Renode.Peripherals.SPI
                 case WiFiConnectToDefaultAP:
                 case WiFiConnectToAP:
                     PrepareResponse(msg, StatusOk, null);
-                    // Configure the NuttX loopback device as a WiFi interface so
-                    // Mono's NetworkInterface.GetAllNetworkInterfaces() returns a
-                    // Wireless80211 adapter with the correct IP. Without this, Mono
-                    // sees no valid network and skips DNS resolution entirely.
-                    ConfigureLoopbackAsWifi();
                     // Queue "network connected" event with host IP info
                     var connectPayload = BuildNetworkConnectedPayload();
                     QueueEvent(InterfaceWiFi, WiFiEventNetworkConnected, StatusOk, connectPayload);
