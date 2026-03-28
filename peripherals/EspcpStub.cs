@@ -850,13 +850,15 @@ namespace Antmicro.Renode.Peripherals.SPI
 
         private void PrepareAck(byte iface, uint function, uint messageId)
         {
-            if(hasResponse)
-                return;
+            // ACKs always overwrite — they're the default poll response.
+            // The guard was causing stale re-served responses to persist
+            // through subsequent poll cycles, poisoning espcp_get_message.
             int encoded;
             EncodeMessage(txBuffer, out encoded,
                 MsgTypeAck, iface, function, StatusOk, messageId, null);
             txLength = encoded;
             hasResponse = true;
+            lastResponseBuffer = null; // Clear stale re-serve data
         }
 
         private void PrepareNak(byte iface, uint function, uint messageId, uint statusCode)
