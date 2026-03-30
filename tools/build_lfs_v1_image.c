@@ -159,19 +159,30 @@ int main(int argc, char *argv[]) {
         printf("  %d app files (%zu KB)\n\n", app_count, app_size / 1024);
     }
 
-    /* Write meadow.config.yaml at filesystem root */
-    static const char config_yaml[] =
-        "MonoControl:\n"
-        "    Options: --interp\n";
-
-    lfs_file_t cfgfile;
-    err = lfs_file_open(&lfs, &cfgfile, "meadow.config.yaml", LFS_O_WRONLY | LFS_O_CREAT);
-    if (err) {
-        fprintf(stderr, "ERROR: open meadow.config.yaml failed: %d\n", err);
-    } else {
-        lfs_file_write(&lfs, &cfgfile, config_yaml, strlen(config_yaml));
-        lfs_file_close(&lfs, &cfgfile);
-        printf("  meadow.config.yaml: %zu bytes (MonoControl: --interp)\n", strlen(config_yaml));
+    /* meadow.config.yaml: use whatever was in the app directory (already copied above).
+     * If none was provided, write a minimal default (no --interp, JIT mode). */
+    {
+        lfs_file_t cfgfile;
+        err = lfs_file_open(&lfs, &cfgfile, "meadow.config.yaml", LFS_O_RDONLY);
+        if (err) {
+            /* No config in app dir — write minimal default */
+            static const char config_yaml[] =
+                "MonoControl:\n"
+                "    Options:\n";
+            err = lfs_file_open(&lfs, &cfgfile, "meadow.config.yaml", LFS_O_WRONLY | LFS_O_CREAT);
+            if (err) {
+                fprintf(stderr, "ERROR: open meadow.config.yaml failed: %d\n", err);
+            } else {
+                lfs_file_write(&lfs, &cfgfile, config_yaml, strlen(config_yaml));
+                lfs_file_close(&lfs, &cfgfile);
+                printf("  meadow.config.yaml: %zu bytes (default, JIT mode)\n", strlen(config_yaml));
+            }
+        } else {
+            /* Config already exists from app dir — leave it as-is */
+            lfs_soff_t sz = lfs_file_size(&lfs, &cfgfile);
+            lfs_file_close(&lfs, &cfgfile);
+            printf("  meadow.config.yaml: %d bytes (from app dir)\n", (int)sz);
+        }
     }
 
     lfs_unmount(&lfs);
