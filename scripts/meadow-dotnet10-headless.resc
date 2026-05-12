@@ -38,8 +38,9 @@ sysbus LoadBinary @build/dotnet10/nuttx_kernel.bin 0x08140000
 sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0x90000000
 sysbus LoadBinary @build/dotnet10/nuttx_mono.bin 0xC0000000
 # Zero .mono_bss (Mono static globals) — not covered by nuttx_mono.bin (NOBITS section)
-# Range: .mono_bss at 0xC01AF800, size 0x50800 (329,728 bytes)
-sysbus LoadBinary @build/dotnet10/mono_bss_zero.bin 0xC01AF800
+# Range: .mono_bss at 0xC0177800..0xC0200000 (size 0x88800 = 559104 bytes)
+# Refresh after each Mono lib rebuild — nm nuttx_user.elf | grep _._mono_bss
+sysbus LoadBinary @build/dotnet10/mono_bss_zero.bin 0xC0177800
 
 # LittleFS filesystem image — pre-populated with .NET 10 assemblies
 # File System partition starts at QSPI offset 0x500000 (see UART: "File System - Offset:0x00500000")
