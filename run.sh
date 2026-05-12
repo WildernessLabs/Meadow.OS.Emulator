@@ -75,17 +75,31 @@ fi
 LEGACY=$( [ "$EMU_OS" = "legacy" ] && echo true || echo false )
 ESP32=$( [ "$EMU_COPROCESSOR" = "dual-machine" ] && echo true || echo false )
 MONITOR_PORT="$EMU_MONITOR_PORT"
+MEADOW_REPO_OVERRIDE=""
 
-for arg in "$@"; do
-    case "$arg" in
+POSITIONAL_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --legacy)
             LEGACY=true
+            if [[ -n "$2" && ! "$2" == -* ]]; then
+                MEADOW_REPO_OVERRIDE="$2"
+                shift
+            fi
+            ;;
+        --rebase)
+            LEGACY=false
+            if [[ -n "$2" && ! "$2" == -* ]]; then
+                MEADOW_REPO_OVERRIDE="$2"
+                shift
+            fi
             ;;
         --esp32)
             ESP32=true
             ;;
         --port=*)
-            MONITOR_PORT="${arg#--port=}"
+            MONITOR_PORT="${1#--port=}"
             ;;
         --config=*)
             ;; # already handled above
@@ -94,9 +108,12 @@ for arg in "$@"; do
             echo ""
             echo "Options:"
             echo "  --config=FILE   Use a specific config file (default: emulator.config.yaml)"
-            echo "  --legacy        Override OS to legacy (same as os: legacy in config)"
+            echo "  --legacy [DIR]  Override OS to legacy (same as os: legacy in config)"
+            echo "  --rebase [DIR]  Override OS to meadow-os (same as os: meadow-os in config)"
             echo "  --esp32         Override coprocessor to dual-machine"
             echo "  --port=N        Override Renode monitor port"
+            echo ""
+            echo "If no DIR is provided, it checks for ../Meadow, ../Legacy, or ../Rebase."
             echo ""
             echo "Config files:"
             echo "  configs/legacy.yaml       Legacy OS, F7FeatherV2, stub ESP32"
@@ -109,10 +126,41 @@ for arg in "$@"; do
             exit 0
             ;;
         *)
-            SCRIPT="$arg"
+            POSITIONAL_ARGS+=("$1")
             ;;
     esac
+    shift
 done
+
+# Restore positional arguments for SCRIPT variable
+set -- "${POSITIONAL_ARGS[@]}"
+SCRIPT="$1"
+
+# Determine MEADOW_REPO for finding assets (e.g. ESP32 firmware)
+if [ -n "$MEADOW_REPO_OVERRIDE" ]; then
+    MEADOW_REPO="$MEADOW_REPO_OVERRIDE"
+else
+    # Auto-detect based on mode
+    if [ "$LEGACY" = false ]; then
+        # rebase mode
+        if [ -d "$SCRIPT_DIR/../Meadow" ]; then
+            MEADOW_REPO="Meadow"
+        elif [ -d "$SCRIPT_DIR/../Rebase" ]; then
+            MEADOW_REPO="Rebase"
+        else
+            MEADOW_REPO="Meadow.OS"
+        fi
+    else
+        # legacy mode
+        if [ -d "$SCRIPT_DIR/../Meadow" ]; then
+            MEADOW_REPO="Meadow"
+        elif [ -d "$SCRIPT_DIR/../Legacy" ]; then
+            MEADOW_REPO="Legacy"
+        else
+            MEADOW_REPO="Meadow"
+        fi
+    fi
+fi
 
 # Select default script based on config + overrides
 if [ -z "$SCRIPT" ]; then
@@ -186,12 +234,12 @@ fi
 
 # ESP32 dual-machine prerequisites
 if [ "$ESP32" = true ]; then
-    # ESP32 firmware — look in sibling repos (Meadow-ESP32 for legacy, Meadow.OS for new)
+    # ESP32 firmware — look in sibling repos (Meadow-ESP32 for legacy, $MEADOW_REPO for new)
     ESP32_FW=""
     for candidate in \
         "${ESP32_FW_PATH:-}" \
         "$SCRIPT_DIR/../Meadow-ESP32/build/MeadowComms.elf" \
-        "$SCRIPT_DIR/../Meadow.OS/esp32/build/MeadowComms.elf" \
+        "$SCRIPT_DIR/../$MEADOW_REPO/esp32/build/MeadowComms.elf" \
     ; do
         if [ -f "$candidate" ]; then
             ESP32_FW="$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"

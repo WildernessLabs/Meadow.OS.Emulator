@@ -1,5 +1,4 @@
 #!/bin/bash
-set -e
 
 SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
 PARENT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -27,19 +26,46 @@ fail()    { FAILED+=("$1");     printf "  ${RED}✗${RESET} %s\n" "$1"; }
 warn()    { WARNINGS+=("$1");   printf "  ${YELLOW}!${RESET} %s\n" "$1"; }
 section() { printf "\n${BOLD}%s${RESET}\n" "$1"; }
 
+execute_command() {
+    if [ "$DRYRUN" = true ]; then
+        printf "  ${YELLOW}[DRYRUN]${RESET} %s\n" "$*"
+        return 0
+    else
+        eval "$@"
+    fi
+}
+
 # --- Parse arguments ---
 
 MODE="legacy"
+DRYRUN=false
+MEADOW_REPO_OVERRIDE=""
 
-for arg in "$@"; do
-    case "$arg" in
-        --legacy)  MODE="legacy" ;;
-        --rebase)  MODE="rebase" ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --legacy)
+            MODE="legacy"
+            if [[ -n "$2" && ! "$2" == -* ]]; then
+                MEADOW_REPO_OVERRIDE="$2"
+                shift
+            fi
+            ;;
+        --rebase)
+            MODE="rebase"
+            if [[ -n "$2" && ! "$2" == -* ]]; then
+                MEADOW_REPO_OVERRIDE="$2"
+                shift
+            fi
+            ;;
+        --dryrun)  DRYRUN=true ;;
         -h|--help)
-            echo "Usage: ./setup.sh [--legacy|--rebase]"
+            echo "Usage: ./setup.sh [--legacy [DIR]|--rebase [DIR]|--dryrun]"
             echo ""
-            echo "  --legacy   Set up for legacy Meadow OS (../Meadow/) [default]"
-            echo "  --rebase   Set up for rebased Meadow OS (../Meadow.OS/)"
+            echo "  --legacy [DIR]  Set up for legacy Meadow OS (default dir: ../Meadow/)"
+            echo "  --rebase [DIR]  Set up for rebased Meadow OS (default dir: ../Meadow.OS/)"
+            echo "  --dryrun        Show commands that would be run without executing them"
+            echo ""
+            echo "If no DIR is provided, it checks for ../Meadow, ../Legacy, or ../Rebase."
             echo ""
             echo "Checks and installs all prerequisites for building and running"
             echo "the Meadow.OS Emulator, including firmware build tools, custom"
@@ -47,21 +73,43 @@ for arg in "$@"; do
             exit 0
             ;;
         *)
-            echo "Unknown argument: $arg"
-            echo "Usage: ./setup.sh [--legacy|--rebase]"
+            echo "Unknown argument: $1"
+            echo "Usage: ./setup.sh [--legacy [DIR]|--rebase [DIR]|--dryrun]"
             exit 1
             ;;
     esac
+    shift
 done
 
-if [ "$MODE" = "legacy" ]; then
-    MEADOW_REPO="Meadow"
+if [ -n "$MEADOW_REPO_OVERRIDE" ]; then
+    MEADOW_REPO="$MEADOW_REPO_OVERRIDE"
 else
-    MEADOW_REPO="Meadow.OS"
+    # Auto-detect based on mode
+    if [ "$MODE" = "rebase" ]; then
+        if [ -d "$PARENT_DIR/Meadow" ]; then
+            MEADOW_REPO="Meadow"
+        elif [ -d "$PARENT_DIR/Rebase" ]; then
+            MEADOW_REPO="Rebase"
+        else
+            MEADOW_REPO="Meadow.OS"
+        fi
+    else
+        # legacy mode
+        if [ -d "$PARENT_DIR/Meadow" ]; then
+            MEADOW_REPO="Meadow"
+        elif [ -d "$PARENT_DIR/Legacy" ]; then
+            MEADOW_REPO="Legacy"
+        else
+            MEADOW_REPO="Meadow"
+        fi
+    fi
 fi
 
 echo "==========================================="
 echo " Meadow.OS Emulator — Setup ($MODE mode)"
+if [ "$DRYRUN" = true ]; then
+    echo " *** DRY RUN MODE — No changes will be made ***"
+fi
 echo "==========================================="
 
 # ============================================================
@@ -111,7 +159,7 @@ section ".NET SDK"
 if ! command -v dotnet &> /dev/null; then
     for p in /usr/local/share/dotnet /opt/homebrew/bin ~/.dotnet; do
         if [ -x "$p/dotnet" ]; then
-            export PATH="$p:$PATH"
+            execute_command "export PATH=\"$p:\$PATH\""
             break
         fi
     done
@@ -123,7 +171,7 @@ if command -v dotnet &> /dev/null; then
 else
     if [ "$PLATFORM" = "macos" ] && command -v brew &> /dev/null; then
         echo "  Installing .NET SDK via Homebrew..."
-        if brew install dotnet 2>/dev/null; then
+        if execute_command "brew install dotnet 2>/dev/null"; then
             added ".NET SDK"
         else
             fail ".NET SDK — brew install failed"
@@ -164,7 +212,7 @@ check_repo() {
 
 check_repo "$MEADOW_REPO" "$PARENT_DIR/$MEADOW_REPO"
 check_repo "Meadow.CLI" "$PARENT_DIR/Meadow.CLI" "feature/TCP_Socket_Connection_for_EMU"
-check_repo "Meadow.Samples" "$PARENT_DIR/Meadow.Samples" || true
+check_repo "Meadow.Samples" "$PARENT_DIR/Meadow.Samples"
 
 # ============================================================
 # 5. Meadow OS build tools (delegate to upstream repo)
@@ -178,12 +226,12 @@ if [ -d "$MEADOW_DIR" ]; then
     if command -v arm-none-eabi-gcc &> /dev/null; then
         ok "arm-none-eabi-gcc ($(arm-none-eabi-gcc --version 2>&1 | head -1))"
     elif [ -d "/Applications/ARM/bin" ]; then
-        export PATH="/Applications/ARM/bin:$PATH"
+        execute_command "export PATH=\"/Applications/ARM/bin:\$PATH\""
         ok "arm-none-eabi-gcc (/Applications/ARM/bin)"
     else
         if [ "$PLATFORM" = "macos" ] && [ -f "$MEADOW_DIR/install-packages.sh" ]; then
             echo "  Running $MEADOW_REPO/install-packages.sh..."
-            if bash "$MEADOW_DIR/install-packages.sh"; then
+            if execute_command "bash \"$MEADOW_DIR/install-packages.sh\""; then
                 added "Meadow build packages (via install-packages.sh)"
             else
                 fail "install-packages.sh failed"
@@ -201,7 +249,7 @@ if [ -d "$MEADOW_DIR" ]; then
             ok "GNU Make ($(gmake --version | head -1))"
         else
             echo "  Installing GNU Make via Homebrew..."
-            if brew install make 2>/dev/null; then
+            if execute_command "brew install make 2>/dev/null"; then
                 added "GNU Make (gmake)"
             else
                 fail "GNU Make — brew install make"
@@ -231,7 +279,7 @@ if [ -d "$MEADOW_DIR" ]; then
                 ok "$pkg"
             else
                 echo "  Installing $pkg..."
-                if brew install "$pkg" 2>/dev/null; then
+                if execute_command "brew install \"$pkg\" 2>/dev/null"; then
                     added "$pkg"
                 else
                     fail "$pkg"
@@ -293,7 +341,7 @@ if [ -d "$RENODE_DIR" ]; then
         ok "Infrastructure submodule initialized"
     else
         echo "  Initializing Infrastructure submodule..."
-        if git -C "$RENODE_DIR" submodule update --init src/Infrastructure; then
+        if execute_command "git -C \"$RENODE_DIR\" submodule update --init src/Infrastructure"; then
             added "Infrastructure submodule"
         else
             fail "Submodule init failed"
@@ -310,8 +358,8 @@ if [ -d "$RENODE_DIR" ]; then
             BUILD_FLAGS="--host-arch aarch64"
         fi
         # Newer upstream may need relaxed warnings for AppleClang
-        export CFLAGS="${CFLAGS:--Wno-error}"
-        if (cd "$RENODE_DIR" && bash build.sh $BUILD_FLAGS); then
+        execute_command "export CFLAGS=\"\${CFLAGS:--Wno-error}\""
+        if execute_command "(cd \"$RENODE_DIR\" && bash build.sh $BUILD_FLAGS)"; then
             added "Renode build"
         else
             fail "Renode build failed"
@@ -320,22 +368,22 @@ if [ -d "$RENODE_DIR" ]; then
     fi
 else
     echo "  Cloning WildernessLabs/renode..."
-    if git clone https://github.com/WildernessLabs/renode.git "$RENODE_DIR"; then
+    if execute_command "git clone https://github.com/WildernessLabs/renode.git \"$RENODE_DIR\""; then
         added "renode/ repo cloned"
 
         echo "  Checking out meadow-emulator-fixes..."
-        git -C "$RENODE_DIR" checkout meadow-emulator-fixes
+        execute_command "git -C \"$RENODE_DIR\" checkout meadow-emulator-fixes"
 
         echo "  Initializing submodules..."
-        git -C "$RENODE_DIR" submodule update --init src/Infrastructure
+        execute_command "git -C \"$RENODE_DIR\" submodule update --init src/Infrastructure"
 
         echo "  Building Renode (this may take several minutes)..."
         BUILD_FLAGS=""
         if [ "$ARCH" = "arm64" ]; then
             BUILD_FLAGS="--host-arch aarch64"
         fi
-        export CFLAGS="${CFLAGS:--Wno-error}"
-        if (cd "$RENODE_DIR" && bash build.sh $BUILD_FLAGS); then
+        execute_command "export CFLAGS=\"\${CFLAGS:--Wno-error}\""
+        if execute_command "(cd \"$RENODE_DIR\" && bash build.sh $BUILD_FLAGS)"; then
             added "Renode built"
         else
             fail "Renode build failed"
@@ -363,9 +411,8 @@ if [ -f "$ESP32_ROM" ]; then
     ok "esp32-v3-rom.bin ($(ls -lh "$ESP32_ROM" | awk '{print $5}'))"
 else
     echo "  Downloading ESP32 ROM from Espressif QEMU repo..."
-    mkdir -p "$SCRIPT_DIR/roms"
-    if curl -fSL -o "$ESP32_ROM" \
-        https://github.com/espressif/qemu/raw/esp-develop/pc-bios/esp32-v3-rom.bin 2>/dev/null; then
+    execute_command "mkdir -p \"$SCRIPT_DIR/roms\""
+    if execute_command "curl -fSL -o \"$ESP32_ROM\" https://github.com/espressif/qemu/raw/esp-develop/pc-bios/esp32-v3-rom.bin 2>/dev/null"; then
         added "esp32-v3-rom.bin"
     else
         fail "ESP32 ROM download — see roms/README.md for manual instructions"
