@@ -54,11 +54,19 @@ cpu AddHook $hook_MONO_VER_COPY_ADDR $mono_ver_copy
 # With BBR defaulting to 0, it naturally returns 1 (enabled) — no bypass needed.
 
 # Workaround: hcom_mono_ctrl_start_mono_main checks config+0x80 (mono version string).
-# The deep_copy_config doesn't copy our bypass-written value, so patch it directly.
+# The deep_copy_config doesn't copy our bypass-written values, so patch it directly.
 # Hook after deep_copy_config returns non-NULL in R0/R4:
-# If config+0x80 is NULL, copy config+0x54 (firmware version string) to config+0x80.
-set mono_str_fix "r0 = cpu.GetRegisterUnsafe(0).RawValue; monostr = machine.SystemBus.ReadDoubleWord(r0 + 0x80); fwstr = machine.SystemBus.ReadDoubleWord(r0 + 0x54); [machine.SystemBus.WriteDoubleWord(r0 + 0x80, fwstr), machine.SystemBus.WriteDoubleWord(r0 + 0x84, fwstr)] if monostr == 0 else None"
+# Copy firmware version strings AND numbers to mono version fields in the deep-copied config.
+# (deep_copy_config doesn't preserve the mono version fields written by mono_ver_copy)
+set mono_str_fix "r0 = cpu.GetRegisterUnsafe(0).RawValue; fwstr = machine.SystemBus.ReadDoubleWord(r0 + 0x54); fwlstr = machine.SystemBus.ReadDoubleWord(r0 + 0x58); machine.SystemBus.WriteDoubleWord(r0 + 0x80, fwstr); machine.SystemBus.WriteDoubleWord(r0 + 0x84, fwlstr); fw30 = machine.SystemBus.ReadDoubleWord(r0 + 0x30); fw34 = machine.SystemBus.ReadDoubleWord(r0 + 0x34); fw38 = machine.SystemBus.ReadDoubleWord(r0 + 0x38); fw3c = machine.SystemBus.ReadDoubleWord(r0 + 0x3c); machine.SystemBus.WriteDoubleWord(r0 + 0x5c, fw30); machine.SystemBus.WriteDoubleWord(r0 + 0x60, fw34); machine.SystemBus.WriteDoubleWord(r0 + 0x64, fw38); machine.SystemBus.WriteDoubleWord(r0 + 0x68, fw3c)"
 cpu AddHook $hook_MONO_STR_FIX_ADDR $mono_str_fix
+
+# Workaround: hcom_mono_ctrl_mono_appears_to_be_running blocks in the emulator.
+# The function redirects stdout/stderr to FIFOs (which block without a HCOM client),
+# reconfigures LEDs, and clears BBR bits — none of which matter for emulation.
+# Skip the entire function and return 0 (OK) immediately.
+set mono_running_skip "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(0, 32)); cpu.PC = cpu.LR"
+cpu AddHook $hook_MONO_APPEARS_RUNNING $mono_running_skip
 
 # Workaround: start_mono_main scans for .NET assembly DLLs on the filesystem.
 # When no assemblies are deployed, the scan correctly finds missing files (r4 != 0)
@@ -119,8 +127,9 @@ cpu InstallMqIntercept $hook_MQ_RECEIVE $hook_ESPCP_THREAD_LR 0x2007C010 0x2007F
 # In the emulator, malloc failures are more likely due to Mono's constrained GC heap.
 # Fix: skip hcom_logging_syslog entirely — Mono's managed logging uses meadow.log file,
 # not the firmware syslog path. Boot-time kernel syslog() calls are unaffected.
-set syslog_skip "cpu.PC = cpu.LR"
-cpu AddHook $hook_HCOM_LOGGING_SYSLOG $syslog_skip
+# DISABLED for diagnostics — need to see syslog output from Mono
+# set syslog_skip "cpu.PC = cpu.LR"
+# cpu AddHook $hook_HCOM_LOGGING_SYSLOG $syslog_skip
 
 # Workaround: Download watchdog SIGALRM handler fires too early in emulator.
 # Renode's virtual time advances faster than wall time, so the 3-second POSIX timer

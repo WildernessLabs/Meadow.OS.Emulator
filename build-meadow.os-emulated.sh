@@ -3,8 +3,18 @@ set -e
 
 SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
 
+# Parse build-specific flags before forwarding to read-config.sh
+DO_CLEAN=false
+REMAINING_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --clean) DO_CLEAN=true ;;
+        *) REMAINING_ARGS+=("$arg") ;;
+    esac
+done
+
 # Load config for EMU_OS, EMU_DEFCONFIG, EMU_RUNTIME, etc.
-source "$SCRIPT_DIR/scripts/read-config.sh" "$@" 2>/dev/null || true
+source "$SCRIPT_DIR/scripts/read-config.sh" "${REMAINING_ARGS[@]}" 2>/dev/null || true
 
 # -------------------------------------------------------------------------
 # OS-dependent path setup
@@ -94,7 +104,25 @@ fi
 # -------------------------------------------------------------------------
 MONO_MAKE_VARS=""
 
-if [ "$EMU_OS" = "legacy" ]; then
+if [ "$EMU_RUNTIME" = "legacy-os_modern-dotnet" ]; then
+    # .NET 10 Mono runtime — used by both legacy and meadow-os OS variants
+    RUNTIME_DIR="$SCRIPT_DIR/../runtime"
+    MONO_LIB="$RUNTIME_DIR/src/mono/build-nuttx-debug/mono/mini/libmonosgen-2.0.a"
+    if [ ! -f "$MONO_LIB" ]; then
+        echo "ERROR: .NET 10 Mono runtime library not found at:"
+        echo "       $MONO_LIB"
+        echo ""
+        echo "       Build it first:"
+        echo "         cd $RUNTIME_DIR/src/mono"
+        echo "         ./build-nuttx.sh Debug"
+        exit 1
+    fi
+    echo "--- .NET 10 Mono runtime: $MONO_LIB ($(du -h "$MONO_LIB" | cut -f1)) ---"
+    # Legacy NuttX links via Make.defs (MONO_BUILD_DIR); meadow-os uses MONO_AOBJS
+    if [ "$EMU_OS" != "legacy" ]; then
+        MONO_MAKE_VARS="MONO_AOBJS=$MONO_LIB"
+    fi
+elif [ "$EMU_OS" = "legacy" ]; then
     MONO_DIR="$MEADOW_SRC_DIR/mono/mono"
     if [ ! -f "$MONO_DIR/sgen/.libs/libmonosgen.a" ]; then
         echo "ERROR: Mono runtime libraries not found at $MONO_DIR/sgen/.libs/"
@@ -102,23 +130,6 @@ if [ "$EMU_OS" = "legacy" ]; then
         exit 1
     fi
     echo "--- Legacy Mono runtime libraries found ---"
-else
-    # Meadow.OS: optionally link .NET 10 mono from ../runtime/
-    if [ "$EMU_RUNTIME" = "legacy-os_modern-dotnet" ]; then
-        RUNTIME_DIR="$SCRIPT_DIR/../runtime"
-        MONO_LIB="$RUNTIME_DIR/src/mono/build-nuttx-debug/mono/mini/libmonosgen-2.0.a"
-        if [ ! -f "$MONO_LIB" ]; then
-            echo "ERROR: .NET 10 Mono runtime library not found at:"
-            echo "       $MONO_LIB"
-            echo ""
-            echo "       Build it first:"
-            echo "         cd $RUNTIME_DIR/src/mono"
-            echo "         ./build-nuttx.sh Debug"
-            exit 1
-        fi
-        echo "--- .NET 10 Mono runtime: $MONO_LIB ($(du -h "$MONO_LIB" | cut -f1)) ---"
-        MONO_MAKE_VARS="MONO_AOBJS=$MONO_LIB"
-    fi
 fi
 
 echo "=== Building NuttX for Renode (os: $EMU_OS, config: $CONFIG, runtime: ${EMU_RUNTIME:-default}) ==="
@@ -129,29 +140,31 @@ echo "=== Building NuttX for Renode (os: $EMU_OS, config: $CONFIG, runtime: ${EM
 echo "--- Configuring NuttX with stm32f777zit6-meadow${CONFIGURE_SEP}$CONFIG ---"
 cd "$NUTTX_DIR"
 
-# Clean previous build if .config exists
-if [ -f ".config" ]; then
+# Clean build if --clean flag passed or no .config exists (first build)
+if [ "$DO_CLEAN" = true ] || [ ! -f "$NUTTX_DIR/.config" ]; then
     echo "--- Cleaning previous build ---"
     $MAKE distclean 2>/dev/null || true
-fi
 
-if [ "$EMU_OS" = "legacy" ]; then
-    # Legacy NuttX distclean doesn't clean board config subdirectory objects
-    find "$NUTTX_DIR/configs/stm32f777zit6-meadow/src" -name "*.o" -delete 2>/dev/null || true
+    if [ "$EMU_OS" = "legacy" ]; then
+        # Legacy NuttX distclean doesn't clean board config subdirectory objects
+        find "$NUTTX_DIR/configs/stm32f777zit6-meadow/src" -name "*.o" -delete 2>/dev/null || true
 
-    # Legacy NuttX uses slash separator
-    ./tools/configure.sh "stm32f777zit6-meadow/${CONFIG}"
+        # Legacy NuttX uses slash separator
+        ./tools/configure.sh "stm32f777zit6-meadow/${CONFIG}"
+    else
+        # Meadow.OS uses colon separator; configure.sh may exit non-zero due to
+        # cosmetic Kconfig warning — .config is written successfully before that.
+        ./tools/configure.sh "stm32f777zit6-meadow:${CONFIG}" || {
+            if [ -f "$NUTTX_DIR/.config" ]; then
+                echo "WARNING: configure.sh reported an error but .config was written — continuing"
+            else
+                echo "ERROR: configure.sh failed and no .config was produced"
+                exit 1
+            fi
+        }
+    fi
 else
-    # Meadow.OS uses colon separator; configure.sh may exit non-zero due to
-    # cosmetic Kconfig warning — .config is written successfully before that.
-    ./tools/configure.sh "stm32f777zit6-meadow:${CONFIG}" || {
-        if [ -f "$NUTTX_DIR/.config" ]; then
-            echo "WARNING: configure.sh reported an error but .config was written — continuing"
-        else
-            echo "ERROR: configure.sh failed and no .config was produced"
-            exit 1
-        fi
-    }
+    echo "--- Incremental build (skipping distclean + configure, use --clean for full rebuild) ---"
 fi
 
 # -------------------------------------------------------------------------
@@ -234,6 +247,13 @@ if [ -n "$VERSION_SOURCE" ] && [ -f "$VERSION_SOURCE" ]; then
 else
     EMU_VERSION_MAJOR=0; EMU_VERSION_MINOR=0; EMU_VERSION_REVISION=0
 fi
+# Compute git distance from last version.txt change (matches build.sh behavior)
+if [ -z "$EMU_VERSION_BUILD" ] && [ -n "$VERSION_SOURCE" ] && [ -f "$VERSION_SOURCE" ]; then
+    _ver_origin=$(git -C "$MEADOW_SRC_DIR" log -n 1 --format=%H -- "$VERSION_SOURCE" 2>/dev/null)
+    if [ -n "$_ver_origin" ]; then
+        EMU_VERSION_BUILD=$(git -C "$MEADOW_SRC_DIR" log --oneline "${_ver_origin}..HEAD" 2>/dev/null | wc -l | tr -d ' ')
+    fi
+fi
 EMU_VERSION_BUILD=${EMU_VERSION_BUILD:-0}
 echo "--- Version: $EMU_VERSION_MAJOR.$EMU_VERSION_MINOR.$EMU_VERSION_REVISION.$EMU_VERSION_BUILD ---"
 
@@ -270,6 +290,22 @@ if grep -q '###VERSION_MAJOR###' "$SHARED_HEADER" 2>/dev/null; then
     RESTORE_SHARED_HEADER=true
 fi
 
+# Generate BYTE() directives for MONO_GIT_REF (matches build.sh behavior)
+_mono_git_ref_bytes() {
+    local ref
+    ref=$(git -C "$MEADOW_SRC_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    local result=""
+    local count=0
+    for b in $(xxd -p -c 1 <<<"$ref"); do
+        if [ "$count" -lt 32 ] && [ "$b" != "0a" ]; then
+            result+="BYTE(0x$b)"
+            count=$((count+1))
+        fi
+    done
+    result+="BYTE(00)"
+    echo "$result"
+}
+
 # Legacy-only: inject version placeholders in user-space linker script
 if [ "$EMU_OS" = "legacy" ]; then
     USER_LD="$NUTTX_DIR/configs/stm32f777zit6-meadow/scripts/user-space.ld"
@@ -288,7 +324,7 @@ if [ "$EMU_OS" = "legacy" ]; then
             -e "s/###BUILD_MINUTE###/$((10#$(date -u +%M)))/g" \
             -e "s/###BUILD_SECOND###/$((10#$(date -u +%S)))/g" \
             -e "s/###BUILD_HASH###/0x${GIT_HASH:-00000000}/g" \
-            -e "s/###MONO_GIT_REF###/$(git -C "$MEADOW_SRC_DIR/mono" rev-parse --short HEAD 2>/dev/null || echo 'emulator')/g" \
+            -e "s/###MONO_GIT_REF###/$(_mono_git_ref_bytes)/g" \
             "$USER_LD"
         rm -f "$USER_LD.bak"
         RESTORE_USER_LD=true
@@ -333,12 +369,11 @@ if [ "$EMU_OS" = "legacy" ]; then
     echo "--- Building mksyscall ---"
     $MAKE -C "$NUTTX_DIR/tools" -f Makefile.host mksyscall 2>/dev/null || true
 
-    # pass2 and pass1deps use -j1 to avoid ar race conditions
     echo "--- Building (PROTECTED mode, pass 2) ---"
-    $MAKE -j1 pass2
+    $MAKE $JOBS pass2
 
     echo "--- Building pass1 dependencies ---"
-    $MAKE -j1 pass1deps
+    $MAKE $JOBS pass1deps
 
     echo "--- Building (PROTECTED mode, pass 1) ---"
     $MAKE $JOBS pass1
@@ -406,20 +441,30 @@ if [ "$EMU_OS" = "legacy" ]; then
             --only-section=.mono_comment \
             "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_mono_code.bin"
 
-        # Extract .mono_signature directly from ELF
+        # Extract .mono_signature directly from ELF and pad to match .mono start
         SIG_OFFSET=$(arm-none-eabi-readelf -S "$NUTTX_DIR/nuttx_user.elf" | \
             awk '/\.mono_signature/ {print "0x" $5}')
         SIG_SIZE=$(arm-none-eabi-readelf -S "$NUTTX_DIR/nuttx_user.elf" | \
             awk '/\.mono_signature/ {print "0x" $6}')
+        # Get the VMA (load address) of .mono_signature and .mono sections
+        # to compute the exact padding between them
+        SIG_VMA=$(arm-none-eabi-readelf -S "$NUTTX_DIR/nuttx_user.elf" | \
+            awk '/\.mono_signature/ {print "0x" $4}')
+        MONO_VMA=$(arm-none-eabi-readelf -S "$NUTTX_DIR/nuttx_user.elf" | \
+            awk '/[^_]\.mono / {print "0x" $4}')
         python3 -c "
 import sys
+sig_vma = $SIG_VMA
+mono_vma = $MONO_VMA
+pad_size = mono_vma - sig_vma  # exact distance from sig start to .mono start
 with open('$NUTTX_DIR/nuttx_user.elf', 'rb') as f:
     f.seek($SIG_OFFSET)
     sig = f.read($SIG_SIZE)
-    sig = sig.ljust(0x20, b'\x00')
+    sig = sig.ljust(pad_size, b'\x00')
     with open('$BUILD_DIR/nuttx_mono_sig.bin', 'wb') as out:
         out.write(sig)
 print(f'Signature: {sig[:4].hex()} version={int.from_bytes(sig[16:20], \"little\")}.{int.from_bytes(sig[12:16], \"little\")}.{int.from_bytes(sig[8:12], \"little\")}.{int.from_bytes(sig[4:8], \"little\")}')
+print(f'Sig padding: {len(sig)} bytes (sig_vma=0x{sig_vma:X}, mono_vma=0x{mono_vma:X})')
 "
         cat "$BUILD_DIR/nuttx_mono_sig.bin" "$BUILD_DIR/nuttx_mono_code.bin" > "$BUILD_DIR/nuttx_mono.bin"
         rm -f "$BUILD_DIR/nuttx_mono_code.bin" "$BUILD_DIR/nuttx_mono_sig.bin"
@@ -447,7 +492,7 @@ if [ -f "$NUTTX_DIR/nuttx" ]; then
     cp "$NUTTX_DIR/nuttx" "$BUILD_DIR/nuttx.elf"
     echo "--- Copied nuttx ELF to $BUILD_DIR/nuttx.elf"
 fi
-if [ -f "$NUTTX_DIR/nuttx.elf" ] && [ ! -f "$BUILD_DIR/nuttx.elf" ]; then
+if [ -f "$NUTTX_DIR/nuttx.elf" ]; then
     cp "$NUTTX_DIR/nuttx.elf" "$BUILD_DIR/nuttx.elf"
     echo "--- Copied nuttx ELF to $BUILD_DIR/nuttx.elf"
 fi

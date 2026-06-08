@@ -67,7 +67,7 @@ if [ "$SKIP_FIRMWARE" = false ]; then
   # Update resc file if address changed
   RESC="$SCRIPT_DIR/scripts/meadow-dotnet10-headless.resc"
   CURRENT_ADDR=$(grep 'mono_bss_zero.bin' "$RESC" | grep -o '0x[0-9A-Fa-f]*' | head -1)
-  NEW_ADDR="0x${BSS_START^^}"
+  NEW_ADDR="0x$(echo "$BSS_START" | tr 'a-f' 'A-F')"
   if [ "$CURRENT_ADDR" != "$NEW_ADDR" ]; then
     echo "  Updating resc: $CURRENT_ADDR -> $NEW_ADDR"
     sed -i '' "s|mono_bss_zero.bin $CURRENT_ADDR|mono_bss_zero.bin $NEW_ADDR|" "$RESC"

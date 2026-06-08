@@ -3,6 +3,12 @@
 # Legacy NuttX calls: kconfig-conf --olddefconfig Kconfig
 # kconfiglib provides: olddefconfig (reads Kconfig from env or arg)
 
+# Ensure Python user bin is on PATH (kconfiglib installs scripts there)
+_PY_USER_BIN="$(python3 -m site --user-base 2>/dev/null)/bin"
+if [ -d "$_PY_USER_BIN" ]; then
+    export PATH="$_PY_USER_BIN:$PATH"
+fi
+
 for arg in "$@"; do
     case "$arg" in
         --olddefconfig)
