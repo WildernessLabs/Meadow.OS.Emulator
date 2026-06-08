@@ -68,5 +68,8 @@ include @build/legacy/sdram-patches.resc
 # Hook at mono_main_driver (in SDRAM Mono binary)
 # cpu AddHook 0xc0022748 "machine.SystemBus.WriteDoubleWord(0xC03FF048, cpu.GetRegisterUnsafe(0).RawValue); machine.SystemBus.WriteDoubleWord(0xC03FF04C, 0x7777)"
 
+# GDB server on port 3333
+machine StartGdbServer 3333
+
 # NOTE: Do NOT start here — start from console after all hooks are registered
 # start

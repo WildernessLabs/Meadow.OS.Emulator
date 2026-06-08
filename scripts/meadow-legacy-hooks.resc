@@ -91,6 +91,7 @@ cpu AddHook $hook_ESPCP_FORCE_INIT_ADDR $espcp_force_init
 # Since we bypass real SPI with the DMA bypass hook, skip the lock/unlock entirely.
 set spi_lock_skip "cpu.PC = cpu.LR"
 cpu AddHook $hook_ESPCP_SPI_INTERFACE_LOCK $spi_lock_skip
+
 cpu AddHook $hook_ESPCP_SPI_INTERFACE_UNLOCK $spi_lock_skip
 
 # Workaround: Renode's STM32F4_RTC crashes when firmware writes an RTC date register
@@ -112,13 +113,35 @@ cpu AddHook $hook_PWRMGMT_LSI_CALC_PREP_THREAD_FUNC $lsi_skip
 # Post-boot ESPCP polling via mq_receive intercept.
 # Uses compiled C# hook (MqReceiveIntercept.cs) instead of IronPython for performance.
 # Fires on ALL mq_receive calls system-wide; must be fast.
-# pollDivisor=100: only inject a real SPI poll every 100th call from espcp_thread.
-# Skipped calls redirect to usleep(10ms) so the thread blocks in the kernel instead
-# of spinning in a tight loop that starves HCOM (~16M iterations/sec without sleep).
-cpu InstallMqIntercept $hook_MQ_RECEIVE $hook_ESPCP_THREAD_LR 0x2007C010 0x2007FFF0 100 $hook_USLEEP $hook_ESPCP_THREAD_LOOP_TOP 10000
+# pollDivisor=2: poll every 2nd call for fast response delivery during socket ops.
+# Sleep=1ms keeps response latency low while still yielding CPU to other threads.
+cpu InstallMqIntercept $hook_MQ_RECEIVE $hook_ESPCP_THREAD_LR 0x2007C010 0xC02FFC00 100 $hook_USLEEP $hook_ESPCP_THREAD_LOOP_TOP 10000
 
-# ESPCP post-boot polling disabled during Mono init to avoid CPU starvation.
-# Enable later via: sysbus WriteByte 0x2007FFF0 1
+# Set mono_ready flag when start_mono_main fires (0x080618F8).
+# This is a DIFFERENT address from mono_str_fix (0x08061940) — no conflict.
+# Gates poll enable in espcp_managed_cmd_fix.
+# Set mono_ready flag when start_mono_main fires.
+set mono_ready_flag "machine.SystemBus.WriteByte(0xC02FFC04, 1)"
+cpu AddHook $hook_HCOM_MONO_CTRL_START_MONO_MAIN $mono_ready_flag
+
+# Workaround: esp_not_responding flag starts true (espcp_coprocessor.c:303).
+# Normally cleared by espcp_queue_send_response_message (GPIO ISR path), but
+# the mq_intercept hook bypasses that path. Without this fix, all managed
+# ESP32 commands (WiFi connect, etc.) fail with "ESP Ioctl returned non-success".
+# Hook inside upd_handle_esp32_command right after espcp_get_configuration
+# returns the config pointer in R0. Clear config+0x30 (esp_not_responding).
+# Address: the ldrb.w instruction that reads the flag (verified via GDB).
+# Clear esp_not_responding AND conditionally enable polling.
+# Poll must be enabled BEFORE espcp_queue_message sends the command.
+# But polling slows Mono JIT, so only enable after boot QSPI reads complete
+# (mono_ready flag at 0xC02FFC04 set by mono_ready_flag hook at start_mono_main).
+# Early managed ESPCP calls (during Mono init, before QSPI done) will block
+# without response — the framework WiFi init will time out, but boot completes.
+# Once QSPI is done, subsequent managed commands (from the app) get proper
+# poll-based response delivery.
+# Clear esp_not_responding. Poll is enabled separately by mono_ready hook.
+set espcp_managed_cmd_fix "r0 = cpu.GetRegisterUnsafe(0).RawValue; mono_ready = machine.SystemBus.ReadByte(0xC02FFC04); machine.SystemBus.WriteByte(r0 + 0x30, 0); poll_was = machine.SystemBus.ReadByte(0xC02FFC00); [machine.SystemBus.WriteByte(0xC02FFC00, 1) for _ in [1] if mono_ready == 1]"
+cpu AddHook $hook_UPD_ESP32_CMD_NOTRESP $espcp_managed_cmd_fix
 
 # Workaround: Syslog semaphore leak in hcom_logging_syslog.
 # When malloc fails inside hcom_diag_logging_build_syslog_string, the function returns
@@ -130,6 +153,7 @@ cpu InstallMqIntercept $hook_MQ_RECEIVE $hook_ESPCP_THREAD_LR 0x2007C010 0x2007F
 # DISABLED for diagnostics — need to see syslog output from Mono
 # set syslog_skip "cpu.PC = cpu.LR"
 # cpu AddHook $hook_HCOM_LOGGING_SYSLOG $syslog_skip
+
 
 # Workaround: Download watchdog SIGALRM handler fires too early in emulator.
 # Renode's virtual time advances faster than wall time, so the 3-second POSIX timer

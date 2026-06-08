@@ -16,7 +16,7 @@
 //
 // Usage from .resc:
 //   cpu InstallMqIntercept <mq_receive> <espcpLR> <sendResponseAddr> <pollFlagAddr> <pollDivisor> <usleepAddr> <loopTopAddr> <pollSleepUs>
-//   cpu InstallMqIntercept 0x08157C40 0x0814E95B 0x2007C010 0x2007FFF0 100 0x0815F77C 0x0814E94D 10000
+//   cpu InstallMqIntercept 0x08157C40 0x0814E95B 0x2007C010 0xC02FFC00 100 0x0815F77C 0x0814E94D 10000
 
 using System;
 using Antmicro.Renode.Core;
@@ -34,7 +34,8 @@ namespace Antmicro.Renode.Hooks
             ulong sendResponseAddr, ulong pollFlagAddr,
             uint pollDivisor = 100,
             ulong usleepAddr = 0, ulong loopTopAddr = 0,
-            uint pollSleepUs = 10000)
+            uint pollSleepUs = 10000,
+            ulong spiDispatchAddr = 0, ulong gRequestResponseMsg = 0)
         {
             var arm = cpu as Arm;
             if(arm == null)
@@ -48,6 +49,8 @@ namespace Antmicro.Renode.Hooks
             long interceptedHits = 0;
             long sleepHits = 0;
             long espcpCalls = 0;
+            long passthroughHits = 0;
+            bool canDirectDispatch = spiDispatchAddr != 0 && gRequestResponseMsg != 0;
             uint divisor = pollDivisor > 0 ? pollDivisor : 1;
             bool canSleep = usleepAddr != 0 && loopTopAddr != 0;
 
@@ -57,13 +60,116 @@ namespace Antmicro.Renode.Hooks
                 var lr = arm.LR.RawValue;
                 var poll = bus.ReadByte(pollFlagAddr);
 
-                if(lr == espcpThreadLR && poll == 1)
+                if(lr == espcpThreadLR)
                 {
                     espcpCalls++;
 
-                    if(espcpCalls % divisor == 0)
+                    // When poll is disabled, redirect to usleep so espcp_thread
+                    // never blocks inside the kernel's mq_receive. This avoids a
+                    // deadlock: the poll flag gets set later (at mono_ready), but
+                    // espcp_thread would already be stuck inside mq_receive where
+                    // the hook can't intercept it.
+                    if(poll != 1)
                     {
-                        // Inject send_response message pointer into buffer (R1 = msg buffer)
+                        if(canSleep)
+                        {
+                            arm.SetRegister((int)ArmRegisters.R0,
+                                RegisterValue.Create(pollSleepUs, 32));
+                            arm.SetRegister((int)ArmRegisters.LR,
+                                RegisterValue.Create((uint)loopTopAddr, 32));
+                            arm.PC = RegisterValue.Create((uint)usleepAddr | 1, 32);
+                            sleepHits++;
+                        }
+                        else
+                        {
+                            arm.SetRegister((int)ArmRegisters.R0,
+                                RegisterValue.Create(unchecked((uint)-1), 32));
+                            arm.PC = arm.LR;
+                            sleepHits++;
+                        }
+                        return;
+                    }
+
+                    // Drain feedback send_response messages from the queue.
+                    // The MessageWaiting GPIO ISR re-queues a send_response message
+                    // after every SPI exchange, keeping nmsgs > 0. Without draining,
+                    // the hook always passes through and espcp_thread runs a tight
+                    // loop instead of sleeping.
+                    //
+                    // NuttX legacy mqueue layout (singly-linked, ARM32):
+                    //   mq_des: +0 flink(4), +4 msgq(4) → mqueue_inode_s
+                    //   mqueue_inode_s: +0 inode(4), +4 msglist.head(4),
+                    //     +8 msglist.tail(4), +12 maxmsgs(i16), +14 nmsgs(i16),
+                    //     +16 nwaitnotfull(i16), +18 nwaitnotempty(i16),
+                    //     +20 freelist.head(4), +24 freelist.tail(4)
+                    //   mqueue_msg_s: +0 next(4), +4 type(1), +5 priority(1),
+                    //     +6 msglen(1), +7 mail[] (message data)
+                    ulong mqd = arm.GetRegister((int)ArmRegisters.R0).RawValue;
+                    uint msgqPtr = bus.ReadDoubleWord(mqd + 4);
+                    short nmsgs = (short)bus.ReadWord(msgqPtr + 14);
+
+                    // Drain all feedback messages (mail == sendResponseAddr).
+                    // Stop at the first real command message and passthrough.
+                    while(nmsgs > 0)
+                    {
+                        uint headMsg = bus.ReadDoubleWord(msgqPtr + 4);
+                        if(headMsg == 0) break;
+
+                        // Peek at mail content at offset +7 (unaligned, read bytes)
+                        uint msgContent = (uint)(
+                            bus.ReadByte(headMsg + 7) |
+                            (bus.ReadByte(headMsg + 8) << 8) |
+                            (bus.ReadByte(headMsg + 9) << 16) |
+                            (bus.ReadByte(headMsg + 10) << 24));
+
+                        if(msgContent != (uint)sendResponseAddr)
+                        {
+                            // Real command — let mq_receive process it.
+                            // After the command is sent, we need to poll immediately
+                            // to deliver the queued response. Set flag for next call.
+                            passthroughHits++;
+                            if(passthroughHits <= 20)
+                            {
+                                arm.Log(LogLevel.Info,
+                                    "MqReceiveIntercept: PASSTHROUGH real cmd at head=0x{0:X8} mail=0x{1:X8} nmsgs={2} ({3})",
+                                    headMsg, msgContent, nmsgs, passthroughHits);
+                            }
+                            return;
+                        }
+
+                        // Log first few drains for debugging
+                        if(espcpCalls <= 5)
+                        {
+                            arm.Log(LogLevel.Info,
+                                "MqReceiveIntercept: DRAIN feedback at head=0x{0:X8} mail=0x{1:X8} nmsgs={2}",
+                                headMsg, msgContent, nmsgs);
+                        }
+
+                        // Drain this feedback message from the queue
+                        uint nextMsg = bus.ReadDoubleWord(headMsg);
+                        bus.WriteDoubleWord(msgqPtr + 4, nextMsg);   // msglist.head = next
+                        if(nextMsg == 0)
+                            bus.WriteDoubleWord(msgqPtr + 8, 0);     // msglist.tail = NULL
+                        nmsgs--;
+                        bus.WriteWord(msgqPtr + 14, (ushort)nmsgs);
+
+                        // Return message node to the freelist
+                        uint freeHead = bus.ReadDoubleWord(msgqPtr + 20);
+                        bus.WriteDoubleWord(headMsg, freeHead);      // msg->next = freelist.head
+                        bus.WriteDoubleWord(msgqPtr + 20, headMsg);  // freelist.head = msg
+                    }
+
+                    if(canDirectDispatch)
+                    {
+                        uint msgPtr = bus.ReadDoubleWord(gRequestResponseMsg);
+                        ulong sp = arm.SP.RawValue;
+                        bus.WriteDoubleWord(sp + 4, msgPtr);
+                        arm.PC = RegisterValue.Create((uint)spiDispatchAddr | 1, 32);
+                        interceptedHits++;
+                    }
+                    else if(espcpCalls % divisor == 0)
+                    {
+                        // Legacy inject: return from mq_receive with send_response pointer
                         ulong msgBuf = arm.GetRegister((int)ArmRegisters.R1).RawValue;
                         bus.WriteDoubleWord(msgBuf, (uint)sendResponseAddr);
                         arm.SetRegister((int)ArmRegisters.R0, RegisterValue.Create(4, 32));
@@ -72,9 +178,6 @@ namespace Antmicro.Renode.Hooks
                     }
                     else if(canSleep)
                     {
-                        // Skip this poll — redirect thread to usleep() so it blocks
-                        // in the kernel instead of spinning in a tight loop.
-                        // usleep(pollSleepUs) then returns to loop top.
                         arm.SetRegister((int)ArmRegisters.R0,
                             RegisterValue.Create(pollSleepUs, 32));
                         arm.SetRegister((int)ArmRegisters.LR,
@@ -84,7 +187,6 @@ namespace Antmicro.Renode.Hooks
                     }
                     else
                     {
-                        // Fallback: return error (tight loop, but at least no SPI work)
                         arm.SetRegister((int)ArmRegisters.R0,
                             RegisterValue.Create(unchecked((uint)-1), 32));
                         arm.PC = arm.LR;
@@ -95,8 +197,8 @@ namespace Antmicro.Renode.Hooks
                 if(totalHits % 50000 == 0)
                 {
                     arm.Log(LogLevel.Info,
-                        "MqReceiveIntercept: {0} total, {1} intercepted, {2} slept (divisor={3})",
-                        totalHits, interceptedHits, sleepHits, divisor);
+                        "MqReceiveIntercept: {0} total, {1} intercepted, {2} slept, {3} passthrough (divisor={4})",
+                        totalHits, interceptedHits, sleepHits, passthroughHits, divisor);
                 }
             });
 

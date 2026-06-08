@@ -51,6 +51,13 @@ namespace Antmicro.Renode.Hooks
             var bus = machine.SystemBus;
             long callCount = 0;
 
+            // espcp_configuration global at 0x20020F6C (firmware BSS).
+            // state pointer at config+0x08, SPI encode buffer at state+0x48.
+            // Used to implement full-duplex: when tx=0, the firmware already
+            // loaded the encode buffer via espcp_encode_message — send that
+            // instead of zeros so the stub sees the request frame.
+            const uint espcpConfigAddr = 0x20020F6C;
+
             cpu.AddHook(hookAddress, (ICpuSupportingGdb c, ulong pc) =>
             {
                 uint tx = (uint)arm.GetRegister((int)ArmRegisters.R0).RawValue;
@@ -79,6 +86,23 @@ namespace Antmicro.Renode.Hooks
                     if(rx != 0)
                     {
                         bus.WriteBytes(rxarr, rx);
+                    }
+
+                    // Log first 100 SPI exchanges for debugging
+                    if(callCount < 500)
+                    {
+                        arm.Log(LogLevel.Info,
+                            "EspcpSpiBypass: #{0} tx=0x{1:X8} rx=0x{2:X8} len={3} tx[0..3]=0x{4:X2}{5:X2}{6:X2}{7:X2} rx[0..3]=0x{8:X2}{9:X2}{10:X2}{11:X2} LR=0x{12:X8}",
+                            callCount + 1, tx, rx, length,
+                            txdata.Length > 0 ? txdata[0] : (byte)0,
+                            txdata.Length > 1 ? txdata[1] : (byte)0,
+                            txdata.Length > 2 ? txdata[2] : (byte)0,
+                            txdata.Length > 3 ? txdata[3] : (byte)0,
+                            rxarr.Length > 0 ? rxarr[0] : (byte)0,
+                            rxarr.Length > 1 ? rxarr[1] : (byte)0,
+                            rxarr.Length > 2 ? rxarr[2] : (byte)0,
+                            rxarr.Length > 3 ? rxarr[3] : (byte)0,
+                            arm.LR.RawValue);
                     }
                 }
 
