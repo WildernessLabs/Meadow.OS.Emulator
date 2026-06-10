@@ -4,7 +4,7 @@ include @peripherals/EspcpStub.cs
 include @peripherals/QspiDmaBypass.cs
 include @peripherals/EspcpSpiBypass.cs
 include @peripherals/MqReceiveIntercept.cs
-# include @peripherals/UartRxBypass.cs  # Disabled: API incompatibility with Renode 1.16.1
+include @peripherals/UartRxBypass.cs
 include @peripherals/FileReadBypass.cs
 include @peripherals/STM32F7_RCC_Custom.cs
 mach create "meadow-dotnet10"
@@ -84,6 +84,12 @@ connector Connect sysbus.uart4 hcom
 # Also capture raw UART4 bytes to file for debugging managed Console.WriteLine
 uart4 CreateFileBackend @/tmp/renode-uart4-raw.txt true
 
+# UART RX bypass: intercept the HCOM recv thread's `bl __wrap_read` (0x08059e10,
+# returns to 0x08059e14 in hcom_host_recv_pthread) and feed bytes from the host
+# socket queue straight into the read buffer. Without this the HCOM RX path never
+# delivers socket data → no `meadow` deploy/listen. (Re-enabled: was panic-disabled.)
+cpu InstallUartRxBypass 0x08059e10 0x08059e14
+
 # UART5: ESP32 control signal channel — exposed as TCP socket on port 4243
 # Firmware's hcom_esp32_network_monitor_thread reads /dev/ttyS2 (UART5) for
 # control signals: +++MW (message waiting), +++SIR (SPI ready), +++RDY, +++RST
@@ -115,5 +121,12 @@ machine StartGdbServer 3333
 # during device initialization. Without this, the framework blocks waiting
 # for SPI responses that never come.
 sysbus WriteByte 0x2007FFF0 1
+
+# NOTE: do NOT enable `cpu ChainingEnabled true` / large `cpu MaximumBlockSize`
+# here — they crash the Mono task with a memfault (Data access violation at the
+# SDRAM boundary), because chained/cached translation blocks go stale against
+# Mono's self-modifying JIT code. (meadow-dual.resc uses them only for the ESP32,
+# which doesn't JIT.) The cold-JIT of the TLS/HTTP stack is inherently slow
+# (~90s first request, ~17s warm); that's the dominant cost, not sync overhead.
 
 start

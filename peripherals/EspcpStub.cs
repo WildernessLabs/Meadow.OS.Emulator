@@ -63,15 +63,15 @@ namespace Antmicro.Renode.Peripherals.SPI
             {
                 if(hasResponse)
                 {
-                    this.Log(LogLevel.Info,
-                        "ESPCP: Response consumed — type=0x{0:X2} iface={1} msgId=0x{2:X2}{3:X2}{4:X2}{5:X2} len={6}",
+                    this.Log(LogLevel.Error,
+                        "ESPCP-RX: consumed type=0x{0:X2} iface={1} func={2} msgId=0x{3:X8} payLen={4} frameLen={5} reserve={6}",
                         txLength > 9 ? txBuffer[9] : (byte)0,
                         txLength > 10 ? txBuffer[10] : (byte)0,
-                        txLength > 22 ? txBuffer[22] : (byte)0,
-                        txLength > 21 ? txBuffer[21] : (byte)0,
-                        txLength > 20 ? txBuffer[20] : (byte)0,
-                        txLength > 19 ? txBuffer[19] : (byte)0,
-                        txLength);
+                        txLength > 14 ? ExtractUint32(txBuffer, 11) : 0,
+                        txLength > 22 ? ExtractUint32(txBuffer, 19) : 0,
+                        txLength > 26 ? ExtractUint32(txBuffer, 23) : 0,
+                        txLength,
+                        lastResponseBuffer != null ? lastResponseLength : -1);
                     hasResponse = false;
                     txLength = 0;
                     MessageWaiting.Set(false);
@@ -85,6 +85,7 @@ namespace Antmicro.Renode.Peripherals.SPI
                     txLength = lastResponseLength;
                     hasResponse = true;
                     lastResponseBuffer = null;
+                    this.Log(LogLevel.Error, "ESPCP-RX: re-served full frame len={0}", txLength);
                 }
                 // Restore displaced response (saved when PrepareResponse had to
                 // overwrite txBuffer with a command ACK).
@@ -277,15 +278,25 @@ namespace Antmicro.Renode.Peripherals.SPI
             {
                 case TransportSendResponse:
                     // STM32 is polling: "do you have anything for me?"
+                    // A send_response poll is the start of a fresh espcp_get_message cycle
+                    // on the firmware side, so the previous multi-packet read is complete —
+                    // any leftover hasResponse/re-serve here is STALE and would corrupt this
+                    // poll's header read (CRC fail → firmware spins). Clear it and serve fresh.
                     socketBridge.CheckPollRegistrations();
-                    if(pendingEvents.Count > 0 && !hasResponse)
+                    hasResponse = false;
+                    lastResponseBuffer = null;
+                    displacedResponse = null;
+                    displacedLastResponse = null;
+                    if(pendingEvents.Count > 0)
                     {
                         var evt = pendingEvents.Dequeue();
-                        PrepareRawResponse(evt);
-                        this.Log(LogLevel.Debug, "ESPCP: Sending queued response/event to STM32 ({0} remaining)",
+                        this.Log(LogLevel.Error, "ESPCP-POLL: delivering queued msg type=0x{0:X2} func={1} msgId=0x{2:X8} payLen={3} ({4} remaining)",
+                            evt.Length > 9 ? evt[9] : (byte)0, evt.Length > 14 ? ExtractUint32(evt, 11) : 0,
+                            evt.Length > 22 ? ExtractUint32(evt, 19) : 0, evt.Length > 26 ? ExtractUint32(evt, 23) : 0,
                             pendingEvents.Count);
+                        PrepareRawResponse(evt);
                     }
-                    else if(!hasResponse)
+                    else
                     {
                         PrepareAck(msg.Interface, msg.Function, msg.MessageId);
                     }
@@ -355,6 +366,7 @@ namespace Antmicro.Renode.Peripherals.SPI
 
         private void HandleWiFi(EspcpMessage msg, int frameLength)
         {
+            this.Log(LogLevel.Error, "ESPCP-WIFI: func={0} payloadLen={1}", msg.Function, msg.Payload?.Length ?? 0);
             switch(msg.Function)
             {
                 case WiFiStartInterface:
@@ -447,6 +459,14 @@ namespace Antmicro.Renode.Peripherals.SPI
 
                 case WiFiIoctl:
                     PrepareResponse(msg, StatusOk, socketBridge.HandleIoctl(msg.Payload));
+                    break;
+
+                case WiFiGetSockName:
+                    PrepareResponse(msg, StatusOk, socketBridge.HandleGetSockName(msg.Payload));
+                    break;
+
+                case WiFiGetPeerName:
+                    PrepareResponse(msg, StatusOk, socketBridge.HandleGetPeerName(msg.Payload));
                     break;
 
                 case WiFiGetAddrInfo:
@@ -851,14 +871,19 @@ namespace Antmicro.Renode.Peripherals.SPI
         private void PrepareAck(byte iface, uint function, uint messageId)
         {
             // ACKs always overwrite — they're the default poll response.
-            // The guard was causing stale re-served responses to persist
-            // through subsequent poll cycles, poisoning espcp_get_message.
             int encoded;
             EncodeMessage(txBuffer, out encoded,
                 MsgTypeAck, iface, function, StatusOk, messageId, null);
             txLength = encoded;
             hasResponse = true;
-            lastResponseBuffer = null; // Clear stale re-serve data
+            // The firmware's espcp_get_message do-while loop ALWAYS does one chunk read
+            // after the header read, even for payload_length=0. Save the ACK frame for that
+            // re-serve so the chunk read gets a valid frame — otherwise it reads garbage,
+            // fails CRC, and espcp_get_message spins (starving real commands). Stale
+            // re-serves are cleared at the start of each send_response poll (HandleTransport).
+            lastResponseBuffer = new byte[encoded];
+            Array.Copy(txBuffer, 0, lastResponseBuffer, 0, encoded);
+            lastResponseLength = encoded;
         }
 
         private void PrepareNak(byte iface, uint function, uint messageId, uint statusCode)
@@ -881,6 +906,10 @@ namespace Antmicro.Renode.Peripherals.SPI
             // The firmware reads header_only_buffer_size bytes first to get payload_length,
             // then does a second read for the full frame. CRC must match the served size.
             int headerOnlySize = ((HeaderSize + 3) & ~3) + SpiOverhead; // 32 bytes
+            this.Log(LogLevel.Error, "ESPCP-RAW: serve frameLen={0} headerOnly={1} payLen={2} pktLen={3}",
+                frame.Length, headerOnlySize,
+                frame.Length > 26 ? ExtractUint32(frame, 23) : 0,
+                frame.Length > 8 ? ExtractUint16(frame, 7) : 0);
             if(frame.Length > headerOnlySize)
             {
                 // Re-encode as header-only frame with matching CRC
@@ -1076,6 +1105,8 @@ namespace Antmicro.Renode.Peripherals.SPI
         private const uint WiFiListen = 21;
         private const uint WiFiAccept = 22;
         private const uint WiFiIoctl = 23;
+        private const uint WiFiGetSockName = 24;
+        private const uint WiFiGetPeerName = 25;
         private const uint WiFiGetAddrInfo = 27;
 
         // WiFi events and async responses
@@ -1279,6 +1310,79 @@ namespace Antmicro.Renode.Peripherals.SPI
             }
 
             /// <summary>
+            /// WiFiGetPeerName (func=25): getpeername — remote endpoint of a connected socket.
+            /// HttpClient reads socket.RemoteEndPoint after connecting, which the raw socket
+            /// path never did. Request: socket_handle(4).
+            /// </summary>
+            public byte[] HandleGetPeerName(byte[] payload)
+            {
+                return HandleGetSockPeerName(payload, peer: true);
+            }
+
+            /// <summary>
+            /// WiFiGetSockName (func=24): getsockname — local endpoint of a socket.
+            /// </summary>
+            public byte[] HandleGetSockName(byte[] payload)
+            {
+                return HandleGetSockPeerName(payload, peer: false);
+            }
+
+            private byte[] HandleGetSockPeerName(byte[] payload, bool peer)
+            {
+                if(payload == null || payload.Length < 4)
+                    return EncodeGetSockPeerNameResponse(null, -1, EINVAL);
+
+                int fd = DecodeInt32(payload, 0);
+                Socket sock;
+                if(!sockets.TryGetValue(fd, out sock))
+                    return EncodeGetSockPeerNameResponse(null, -1, EBADF);
+
+                try
+                {
+                    var ep = (peer ? sock.RemoteEndPoint : sock.LocalEndPoint) as IPEndPoint;
+                    if(ep == null)
+                        return EncodeGetSockPeerNameResponse(null, -1, peer ? ENOTCONN : EINVAL);
+                    parent.Log(LogLevel.Error, "SocketBridge: Get{0}Name fd={1} -> {2}",
+                        peer ? "Peer" : "Sock", fd, ep);
+                    return EncodeGetSockPeerNameResponse(ep, 0, 0);
+                }
+                catch(SocketException ex)
+                {
+                    return EncodeGetSockPeerNameResponse(null, -1, MapSocketError(ex.SocketErrorCode));
+                }
+            }
+
+            /// <summary>
+            /// Encode get_sock/peer_name response: addr_length(4) + addr(N) + result(4) + errno(4)
+            /// matching espcp_extract_get_sock_peer_name_response.
+            /// </summary>
+            private static byte[] EncodeGetSockPeerNameResponse(IPEndPoint ep, int result, int errno)
+            {
+                byte[] addr = (ep != null) ? EncodeSockAddr(ep) : null;
+                uint addrLen = (addr != null) ? (uint)addr.Length : 0;
+                var buf = new byte[4 + addrLen + 4 + 4];
+                int o = 0;
+                buf[o++] = (byte)(addrLen & 0xFF);
+                buf[o++] = (byte)((addrLen >> 8) & 0xFF);
+                buf[o++] = (byte)((addrLen >> 16) & 0xFF);
+                buf[o++] = (byte)((addrLen >> 24) & 0xFF);
+                if(addr != null)
+                {
+                    Array.Copy(addr, 0, buf, o, addr.Length);
+                    o += addr.Length;
+                }
+                buf[o++] = (byte)(result & 0xFF);
+                buf[o++] = (byte)((result >> 8) & 0xFF);
+                buf[o++] = (byte)((result >> 16) & 0xFF);
+                buf[o++] = (byte)((result >> 24) & 0xFF);
+                buf[o++] = (byte)(errno & 0xFF);
+                buf[o++] = (byte)((errno >> 8) & 0xFF);
+                buf[o++] = (byte)((errno >> 16) & 0xFF);
+                buf[o++] = (byte)((errno >> 24) & 0xFF);
+                return buf;
+            }
+
+            /// <summary>
             /// Encode read response: buffer_length(4) + buffer(N) + result(4) + errno(4)
             /// </summary>
             private static byte[] EncodeReadResponse(byte[] data, int result, int errno)
@@ -1458,6 +1562,7 @@ namespace Antmicro.Renode.Peripherals.SPI
             /// </summary>
             public byte[] HandleSocket(byte[] payload)
             {
+                parent.Log(LogLevel.Error, "SocketBridge: HandleSocket payloadLen={0}", payload?.Length ?? 0);
                 if(payload == null || payload.Length < 16)
                 {
                     parent.Log(LogLevel.Warning, "SocketBridge: Socket request too short");
@@ -1573,13 +1678,14 @@ namespace Antmicro.Renode.Peripherals.SPI
                     return EncodeIntegerAndErrno(-1, EINVAL);
 
                 var ep = DecodeSockAddr(payload, 8);
-                parent.Log(LogLevel.Info,
+                parent.Log(LogLevel.Error,
                     "SocketBridge: Connect fd={0} to {1}", fd, ep);
 
                 try
                 {
                     sock.Connect(ep);
                     // Non-blocking connect completed immediately
+                    parent.Log(LogLevel.Error, "SocketBridge: Connect fd={0} to {1} OK", fd, ep);
                     return EncodeIntegerAndErrno(0, 0);
                 }
                 catch(SocketException ex)
@@ -1587,8 +1693,27 @@ namespace Antmicro.Renode.Peripherals.SPI
                     if(ex.SocketErrorCode == SocketError.WouldBlock ||
                        ex.SocketErrorCode == SocketError.InProgress)
                     {
-                        // Connect in progress — firmware will poll for completion
-                        return EncodeIntegerAndErrno(-1, EINPROGRESS);
+                        // The firmware doesn't poll for connect completion, so wait here
+                        // for the non-blocking connect to finish (loopback completes in ms;
+                        // remote within a few s). Poll for writability, then report the
+                        // definitive result via SO_ERROR.
+                        try
+                        {
+                            bool writable = sock.Poll(3_000_000, SelectMode.SelectWrite);
+                            int soErr = (int)sock.GetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Error);
+                            if(writable && soErr == 0)
+                            {
+                                parent.Log(LogLevel.Error, "SocketBridge: Connect fd={0} to {1} OK (completed after poll)", fd, ep);
+                                return EncodeIntegerAndErrno(0, 0);
+                            }
+                            parent.Log(LogLevel.Warning, "SocketBridge: Connect fd={0} not completed (writable={1} soErr={2})", fd, writable, soErr);
+                            return EncodeIntegerAndErrno(-1, soErr != 0 ? MapSocketError((SocketError)soErr) : EINPROGRESS);
+                        }
+                        catch(Exception pe)
+                        {
+                            parent.Log(LogLevel.Warning, "SocketBridge: Connect poll failed: {0}", pe.Message);
+                            return EncodeIntegerAndErrno(-1, EINPROGRESS);
+                        }
                     }
                     parent.Log(LogLevel.Warning,
                         "SocketBridge: Connect failed: {0}", ex.Message);
@@ -1667,8 +1792,8 @@ namespace Antmicro.Renode.Peripherals.SPI
                     {
                         sent = sock.Send(data, socketFlags);
                     }
-                    parent.Log(LogLevel.Debug,
-                        "SocketBridge: Send fd={0} sent={1}/{2}", fd, sent, data.Length);
+                    parent.Log(LogLevel.Error,
+                        "SocketBridge: Send fd={0} sent={1}/{2} dest={3}", fd, sent, data.Length, destEp != null ? destEp.ToString() : "(connected)");
                     return EncodeIntegerAndErrno(sent, 0);
                 }
                 catch(SocketException ex)
@@ -1772,6 +1897,17 @@ namespace Antmicro.Renode.Peripherals.SPI
                     int received;
                     var socketFlags = (SocketFlags)flags;
 
+                    // Stream reads: wait briefly for data (or EOF/close, which also makes the
+                    // socket readable) before falling through to a bare EAGAIN. The managed
+                    // TLS/HTTP read path here surfaces an immediate EAGAIN as a hard
+                    // "SocketException: Try again" and stalls response completion; a short
+                    // readability poll smooths the common case where the peer's data/FIN is
+                    // imminent. Genuinely idle sockets still return EAGAIN after the window.
+                    if(sock.SocketType == SocketType.Stream)
+                    {
+                        try { sock.Poll(1_000_000, SelectMode.SelectRead); } catch { }
+                    }
+
                     if(getSourceAddr != 0 && sock.SocketType == SocketType.Dgram)
                     {
                         received = sock.ReceiveFrom(buf, 0, length, socketFlags, ref remoteEp);
@@ -1796,15 +1932,18 @@ namespace Antmicro.Renode.Peripherals.SPI
                         buf = trimmed;
                     }
 
-                    parent.Log(LogLevel.Debug,
-                        "SocketBridge: RecvFrom fd={0} got {1} bytes", fd, received);
+                    parent.Log(LogLevel.Error,
+                        "SocketBridge: RecvFrom fd={0} got {1} bytes from {2}", fd, received, remoteEp);
                     return EncodeRecvFromResponse(buf, received, 0,
                         remoteEp as IPEndPoint, getSourceAddr != 0);
                 }
                 catch(SocketException ex)
                 {
                     if(ex.SocketErrorCode == SocketError.WouldBlock)
+                    {
+                        parent.Log(LogLevel.Error, "SocketBridge: RecvFrom fd={0} EAGAIN (no data)", fd);
                         return EncodeRecvFromResponse(null, -1, EAGAIN, null, getSourceAddr != 0);
+                    }
                     parent.Log(LogLevel.Warning,
                         "SocketBridge: RecvFrom fd={0} failed: {1}", fd, ex.Message);
                     return EncodeRecvFromResponse(null, -1,
