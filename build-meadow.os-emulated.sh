@@ -6,11 +6,14 @@ SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
 # Load config for EMU_OS, EMU_DEFCONFIG, EMU_RUNTIME, etc.
 source "$SCRIPT_DIR/scripts/read-config.sh" "$@" 2>/dev/null || true
 
+# Resolve sibling-repo locations (MEADOW_EMULATOR_OS_DIR, _CLI_DIR, _ESP_DIR, _SAMPLES_DIR)
+source "$SCRIPT_DIR/scripts/resolve-locations.sh" "$EMU_OS"
+
 # -------------------------------------------------------------------------
 # OS-dependent path setup
 # -------------------------------------------------------------------------
 if [ "$EMU_OS" = "legacy" ]; then
-    MEADOW_SRC_DIR="$SCRIPT_DIR/../Meadow"
+    MEADOW_SRC_DIR="$MEADOW_EMULATOR_OS_DIR"
     NUTTX_DIR="$MEADOW_SRC_DIR/nuttx"
     CONFIG="${EMU_DEFCONFIG:-mono}"
     CONFIGURE_SEP="/"
@@ -18,7 +21,7 @@ if [ "$EMU_OS" = "legacy" ]; then
     VERSION_SOURCE="$MEADOW_SRC_DIR/version.txt"
 else
     # meadow-os (default)
-    MEADOW_SRC_DIR="$SCRIPT_DIR/../Meadow.OS"
+    MEADOW_SRC_DIR="$MEADOW_EMULATOR_OS_DIR"
     NUTTX_DIR="$MEADOW_SRC_DIR/nuttx"
     CONFIG="${EMU_DEFCONFIG:-meadow_os_emu}"
     CONFIGURE_SEP=":"

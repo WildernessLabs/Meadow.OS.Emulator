@@ -39,33 +39,36 @@ execute_command() {
 
 MODE="legacy"
 DRYRUN=false
-MEADOW_REPO_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --legacy)
             MODE="legacy"
             if [[ -n "$2" && ! "$2" == -* ]]; then
-                MEADOW_REPO_OVERRIDE="$2"
-                shift
+                echo "ERROR: '--legacy DIR' no longer accepts a directory argument."
+                echo "       Set MEADOW_EMULATOR_OS_DIR=DIR instead (see README)."
+                exit 1
             fi
             ;;
         --rebase)
             MODE="rebase"
             if [[ -n "$2" && ! "$2" == -* ]]; then
-                MEADOW_REPO_OVERRIDE="$2"
-                shift
+                echo "ERROR: '--rebase DIR' no longer accepts a directory argument."
+                echo "       Set MEADOW_EMULATOR_OS_DIR=DIR instead (see README)."
+                exit 1
             fi
             ;;
         --dryrun)  DRYRUN=true ;;
         -h|--help)
-            echo "Usage: ./setup.sh [--legacy [DIR]|--rebase [DIR]|--dryrun]"
+            echo "Usage: ./setup.sh [--legacy|--rebase|--dryrun]"
             echo ""
-            echo "  --legacy [DIR]  Set up for legacy Meadow OS (default dir: ../Meadow/)"
-            echo "  --rebase [DIR]  Set up for rebased Meadow OS (default dir: ../Meadow.OS/)"
+            echo "  --legacy        Set up for legacy Meadow OS (default dir: ../Meadow/)"
+            echo "  --rebase        Set up for rebased Meadow OS (default dir: ../Meadow.OS/)"
             echo "  --dryrun        Show commands that would be run without executing them"
             echo ""
-            echo "If no DIR is provided, it checks for ../Meadow, ../Legacy, or ../Rebase."
+            echo "Override sibling-repo locations with MEADOW_EMULATOR_OS_DIR,"
+            echo "MEADOW_EMULATOR_CLI_DIR, MEADOW_EMULATOR_ESP_DIR, MEADOW_EMULATOR_SAMPLES_DIR"
+            echo "(see README). If unset, each is auto-detected from sibling directories."
             echo ""
             echo "Checks and installs all prerequisites for building and running"
             echo "the Meadow.OS Emulator, including firmware build tools, custom"
@@ -74,36 +77,15 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown argument: $1"
-            echo "Usage: ./setup.sh [--legacy [DIR]|--rebase [DIR]|--dryrun]"
+            echo "Usage: ./setup.sh [--legacy|--rebase|--dryrun]"
             exit 1
             ;;
     esac
     shift
 done
 
-if [ -n "$MEADOW_REPO_OVERRIDE" ]; then
-    MEADOW_REPO="$MEADOW_REPO_OVERRIDE"
-else
-    # Auto-detect based on mode
-    if [ "$MODE" = "rebase" ]; then
-        if [ -d "$PARENT_DIR/Meadow" ]; then
-            MEADOW_REPO="Meadow"
-        elif [ -d "$PARENT_DIR/Rebase" ]; then
-            MEADOW_REPO="Rebase"
-        else
-            MEADOW_REPO="Meadow.OS"
-        fi
-    else
-        # legacy mode
-        if [ -d "$PARENT_DIR/Meadow" ]; then
-            MEADOW_REPO="Meadow"
-        elif [ -d "$PARENT_DIR/Legacy" ]; then
-            MEADOW_REPO="Legacy"
-        else
-            MEADOW_REPO="Meadow"
-        fi
-    fi
-fi
+source "$SCRIPT_DIR/scripts/resolve-locations.sh" "$MODE"
+MEADOW_DIR="$MEADOW_EMULATOR_OS_DIR"
 
 echo "==========================================="
 echo " Meadow.OS Emulator — Setup ($MODE mode)"
@@ -210,16 +192,14 @@ check_repo() {
     fi
 }
 
-check_repo "$MEADOW_REPO" "$PARENT_DIR/$MEADOW_REPO"
-check_repo "Meadow.CLI" "$PARENT_DIR/Meadow.CLI" "feature/TCP_Socket_Connection_for_EMU"
-check_repo "Meadow.Samples" "$PARENT_DIR/Meadow.Samples"
+check_repo "$(basename "$MEADOW_DIR")" "$MEADOW_DIR"
+check_repo "Meadow.CLI" "$MEADOW_EMULATOR_CLI_DIR" "feature/TCP_Socket_Connection_for_EMU"
+check_repo "Meadow.Samples" "$MEADOW_EMULATOR_SAMPLES_DIR"
 
 # ============================================================
 # 5. Meadow OS build tools (delegate to upstream repo)
 # ============================================================
 section "Meadow OS Build Tools"
-
-MEADOW_DIR="$PARENT_DIR/$MEADOW_REPO"
 
 if [ -d "$MEADOW_DIR" ]; then
     # ARM GCC
@@ -230,7 +210,7 @@ if [ -d "$MEADOW_DIR" ]; then
         ok "arm-none-eabi-gcc (/Applications/ARM/bin)"
     else
         if [ "$PLATFORM" = "macos" ] && [ -f "$MEADOW_DIR/install-packages.sh" ]; then
-            echo "  Running $MEADOW_REPO/install-packages.sh..."
+            echo "  Running $(basename "$MEADOW_DIR")/install-packages.sh..."
             if execute_command "bash \"$MEADOW_DIR/install-packages.sh\""; then
                 added "Meadow build packages (via install-packages.sh)"
             else
@@ -300,7 +280,7 @@ if [ -d "$MEADOW_DIR" ]; then
         warn "ld.lld — LLVM linker not found. May be needed for firmware link step."
     fi
 else
-    warn "Skipping build tools — $MEADOW_REPO repo not found"
+    warn "Skipping build tools — $(basename "$MEADOW_DIR") repo not found"
 fi
 
 # ============================================================
@@ -316,7 +296,7 @@ if [ -d "$MEADOW_DIR" ]; then
         warn "Mono runtime not built — run: cd $MEADOW_DIR && ./build-mono.sh"
     fi
 else
-    warn "Skipping — $MEADOW_REPO repo not found"
+    warn "Skipping — $(basename "$MEADOW_DIR") repo not found"
 fi
 
 # ============================================================

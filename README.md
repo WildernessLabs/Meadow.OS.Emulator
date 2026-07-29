@@ -123,7 +123,7 @@ STM32 (NuttX)                          ESP32 (Meadow firmware)
   source ~/esp/esp-idf-v4.2.4/export.sh   # ESP-IDF toolchain
   ./build.sh
   ```
-  The ELF is output to `Meadow-ESP32/build/MeadowComms.elf`. Alternatively, set `ESP32_FW_PATH` to point to an existing ELF.
+  The ELF is output to `Meadow-ESP32/build/MeadowComms.elf`. The `Meadow-ESP32` sibling repo location can be overridden with `MEADOW_EMULATOR_ESP_DIR`; alternatively, set `ESP32_FW_PATH` to point directly to an existing ELF.
 - ESP32 ROM binary at `roms/esp32-v3-rom.bin` (see `roms/README.md`)
 - ESP-IDF 4.2.4 toolchain (only needed for building, not running)
 
@@ -140,7 +140,7 @@ Key C# peripherals:
 
 ## Using Meadow.CLI
 
-The emulator connects via TCP socket instead of USB serial. This requires the `feature/TCP_Socket_Connection_for_EMU` branch of Meadow.CLI, built from source:
+The emulator connects via TCP socket instead of USB serial. This requires the `feature/TCP_Socket_Connection_for_EMU` branch of Meadow.CLI, built from source. The `../Meadow.CLI` path below is the default; override it with `MEADOW_EMULATOR_CLI_DIR` (and `../Meadow.Samples` with `MEADOW_EMULATOR_SAMPLES_DIR`):
 
 ```bash
 # Build the CLI from source (one-time setup):
@@ -206,6 +206,23 @@ wilderness_labs/
 ├── Meadow.Samples/        # Sample apps (Blinky, etc.)
 └── renode/                # WildernessLabs/renode fork (branch: meadow-emulator-fixes)
 ```
+
+The paths above are just the auto-detected defaults. Override any of them with an env var,
+resolved once by `scripts/resolve-locations.sh` and honored by `setup.sh`, `run.sh`, and both
+`build-meadow.*` scripts:
+
+| Env var                        | Default (auto-detected)                          |
+|---------------------------------|---------------------------------------------------|
+| `MEADOW_EMULATOR_OS_DIR`        | `../Meadow` (legacy) / `../Meadow.OS` (rebase)    |
+| `MEADOW_EMULATOR_CLI_DIR`       | `../Meadow.CLI`                                   |
+| `MEADOW_EMULATOR_ESP_DIR`       | `../Meadow-ESP32`                                 |
+| `MEADOW_EMULATOR_SAMPLES_DIR`   | `../Meadow.Samples`                               |
+
+If unset, each falls back to an auto-detect chain against sibling directory names (e.g.
+`MEADOW_EMULATOR_OS_DIR` also checks `../Legacy`/`../Rebase`, and `MEADOW_EMULATOR_ESP_DIR`
+also checks `$MEADOW_EMULATOR_OS_DIR/esp32`). `RENODE_PATH` (a Renode fork checkout) and
+`ESP32_FW_PATH` (a direct path to a built `MeadowComms.elf`) are separate, pre-existing,
+more-specific overrides and are unaffected by these four.
 
 ### Custom Renode Fork (required)
 

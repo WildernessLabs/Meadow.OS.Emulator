@@ -2,7 +2,11 @@
 set -e
 
 SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
-MEADOW_DIR="$SCRIPT_DIR/../Meadow"
+
+# Resolve sibling-repo locations (MEADOW_EMULATOR_OS_DIR, _CLI_DIR, _ESP_DIR, _SAMPLES_DIR)
+source "$SCRIPT_DIR/scripts/resolve-locations.sh" legacy
+
+MEADOW_DIR="$MEADOW_EMULATOR_OS_DIR"
 NUTTX_DIR="$MEADOW_DIR/nuttx"
 BUILD_DIR="$SCRIPT_DIR/build/legacy"
 
@@ -25,6 +29,11 @@ export PATH="$SCRIPT_DIR/tools:$PATH"
 case "$(uname -s)" in
     Darwin)
         export PATH="$MEADOW_DIR/toolchain/macos:$PATH"
+        # Ensure ld.lld is available
+        if [ ! -f "$MEADOW_DIR/toolchain/macos/ld.lld" ]; then
+            echo "ERROR: ld.lld not found in $MEADOW_DIR/toolchain/macos"
+            exit 1
+        fi
         # ARM GCC 10.3 from /Applications/ARM (legacy NuttX requires ~10.x)
         if [ -d "/Applications/ARM/bin" ]; then
             export PATH="/Applications/ARM/bin:$PATH"

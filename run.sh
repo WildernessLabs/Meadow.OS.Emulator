@@ -75,7 +75,6 @@ fi
 LEGACY=$( [ "$EMU_OS" = "legacy" ] && echo true || echo false )
 ESP32=$( [ "$EMU_COPROCESSOR" = "dual-machine" ] && echo true || echo false )
 MONITOR_PORT="$EMU_MONITOR_PORT"
-MEADOW_REPO_OVERRIDE=""
 
 POSITIONAL_ARGS=()
 
@@ -84,15 +83,17 @@ while [[ $# -gt 0 ]]; do
         --legacy)
             LEGACY=true
             if [[ -n "$2" && ! "$2" == -* ]]; then
-                MEADOW_REPO_OVERRIDE="$2"
-                shift
+                echo "ERROR: '--legacy DIR' no longer accepts a directory argument."
+                echo "       Set MEADOW_EMULATOR_OS_DIR=DIR instead (see README)."
+                exit 1
             fi
             ;;
         --rebase)
             LEGACY=false
             if [[ -n "$2" && ! "$2" == -* ]]; then
-                MEADOW_REPO_OVERRIDE="$2"
-                shift
+                echo "ERROR: '--rebase DIR' no longer accepts a directory argument."
+                echo "       Set MEADOW_EMULATOR_OS_DIR=DIR instead (see README)."
+                exit 1
             fi
             ;;
         --esp32)
@@ -108,12 +109,14 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --config=FILE   Use a specific config file (default: emulator.config.yaml)"
-            echo "  --legacy [DIR]  Override OS to legacy (same as os: legacy in config)"
-            echo "  --rebase [DIR]  Override OS to meadow-os (same as os: meadow-os in config)"
+            echo "  --legacy        Override OS to legacy (same as os: legacy in config)"
+            echo "  --rebase        Override OS to meadow-os (same as os: meadow-os in config)"
             echo "  --esp32         Override coprocessor to dual-machine"
             echo "  --port=N        Override Renode monitor port"
             echo ""
-            echo "If no DIR is provided, it checks for ../Meadow, ../Legacy, or ../Rebase."
+            echo "Override sibling-repo locations with MEADOW_EMULATOR_OS_DIR,"
+            echo "MEADOW_EMULATOR_CLI_DIR, MEADOW_EMULATOR_ESP_DIR, MEADOW_EMULATOR_SAMPLES_DIR"
+            echo "(see README). If unset, each is auto-detected from sibling directories."
             echo ""
             echo "Config files:"
             echo "  configs/legacy.yaml       Legacy OS, F7FeatherV2, stub ESP32"
@@ -136,31 +139,8 @@ done
 set -- "${POSITIONAL_ARGS[@]}"
 SCRIPT="$1"
 
-# Determine MEADOW_REPO for finding assets (e.g. ESP32 firmware)
-if [ -n "$MEADOW_REPO_OVERRIDE" ]; then
-    MEADOW_REPO="$MEADOW_REPO_OVERRIDE"
-else
-    # Auto-detect based on mode
-    if [ "$LEGACY" = false ]; then
-        # rebase mode
-        if [ -d "$SCRIPT_DIR/../Meadow" ]; then
-            MEADOW_REPO="Meadow"
-        elif [ -d "$SCRIPT_DIR/../Rebase" ]; then
-            MEADOW_REPO="Rebase"
-        else
-            MEADOW_REPO="Meadow.OS"
-        fi
-    else
-        # legacy mode
-        if [ -d "$SCRIPT_DIR/../Meadow" ]; then
-            MEADOW_REPO="Meadow"
-        elif [ -d "$SCRIPT_DIR/../Legacy" ]; then
-            MEADOW_REPO="Legacy"
-        else
-            MEADOW_REPO="Meadow"
-        fi
-    fi
-fi
+# Resolve sibling-repo locations (MEADOW_EMULATOR_OS_DIR, _CLI_DIR, _ESP_DIR, _SAMPLES_DIR)
+source "$SCRIPT_DIR/scripts/resolve-locations.sh" "$( [ "$LEGACY" = true ] && echo legacy || echo rebase )"
 
 # Select default script based on config + overrides
 if [ -z "$SCRIPT" ]; then
@@ -234,12 +214,12 @@ fi
 
 # ESP32 dual-machine prerequisites
 if [ "$ESP32" = true ]; then
-    # ESP32 firmware — look in sibling repos (Meadow-ESP32 for legacy, $MEADOW_REPO for new)
+    # ESP32 firmware — look in MEADOW_EMULATOR_ESP_DIR (resolved above), or ESP32_FW_PATH
+    # for a direct path to an already-built ELF
     ESP32_FW=""
     for candidate in \
         "${ESP32_FW_PATH:-}" \
-        "$SCRIPT_DIR/../Meadow-ESP32/build/MeadowComms.elf" \
-        "$SCRIPT_DIR/../$MEADOW_REPO/esp32/build/MeadowComms.elf" \
+        "$MEADOW_EMULATOR_ESP_DIR/build/MeadowComms.elf" \
     ; do
         if [ -f "$candidate" ]; then
             ESP32_FW="$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
@@ -249,8 +229,9 @@ if [ "$ESP32" = true ]; then
 
     if [ -z "$ESP32_FW" ]; then
         echo "ERROR: ESP32 firmware (MeadowComms.elf) not found."
-        echo "       Expected in sibling Meadow-ESP32/build/ or set ESP32_FW_PATH"
-        echo "       Build it:  cd ../Meadow-ESP32 && ./build.sh"
+        echo "       Expected at \$MEADOW_EMULATOR_ESP_DIR/build/ (currently: $MEADOW_EMULATOR_ESP_DIR)"
+        echo "       or set ESP32_FW_PATH to point directly at a built ELF."
+        echo "       Build it:  cd $MEADOW_EMULATOR_ESP_DIR && ./build.sh"
         exit 1
     fi
     echo "ESP32 firmware: $ESP32_FW"
