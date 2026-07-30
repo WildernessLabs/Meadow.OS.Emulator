@@ -382,14 +382,37 @@ def main():
         # Replace $hook_VARNAME with literal hex addresses, skipping comment lines
         def replace_hook_var(m):
             var_name = m.group(1)
-            if var_name in addrs:
-                return f"0x{addrs[var_name]:08X}"
-            return m.group(0)  # leave as-is (comments, disabled hooks, etc.)
+            return f"0x{addrs[var_name]:08X}"
 
+        set_re = re.compile(r'^\s*set\s+(\w+)\s+')
+        skipped_vars: set[str] = set()
         result_lines = []
         for line in template_text.splitlines():
             if line.lstrip().startswith("#"):
                 result_lines.append(line)  # preserve comment lines unchanged
+                continue
+            missing = [v for v in re.findall(r'\$hook_(\w+)', line) if v not in addrs]
+            # A line can also reference a plain `set`-defined variable (not
+            # $hook_*) whose own defining line was skipped above — e.g.
+            # `cpu AddHook $hook_X $some_fix` where `set some_fix ...` was
+            # itself skipped for missing a $hook_* symbol. That leaves
+            # $some_fix undefined, so cascade the skip.
+            other_refs = [v for v in re.findall(r'\$(\w+)', line) if not v.startswith('hook_')]
+            depends_on_skipped = [v for v in other_refs if v in skipped_vars]
+            if missing or depends_on_skipped:
+                # Renode can't use an unresolved $hook_* (or a $variable whose
+                # `set` line was skipped) as a command argument — comment the
+                # line out instead of emitting a broken reference. Missing
+                # symbols were already reported in the WARNING list above.
+                reasons = []
+                if missing:
+                    reasons.append(f"missing symbol: {', '.join(missing)}")
+                if depends_on_skipped:
+                    reasons.append(f"depends on skipped: {', '.join(depends_on_skipped)}")
+                result_lines.append(f"# SKIPPED ({'; '.join(reasons)}): {line}")
+                m = set_re.match(line)
+                if m:
+                    skipped_vars.add(m.group(1))
             else:
                 result_lines.append(re.sub(r'\$hook_(\w+)', replace_hook_var, line))
         processed = "\n".join(result_lines) + "\n"
