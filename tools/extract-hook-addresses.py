@@ -118,10 +118,16 @@ def main():
     user_elf = sys.argv[2]
     out_dir = Path(kernel_elf).parent
 
-    # Read board version from emulator config
+    # Board version for the hardware-version hook: 1=F7FeatherV1, 2=F7FeatherV2,
+    # 3=F7CoreComputeV2.  build-meadow.os-emulated.sh exports EMU_BOARD_VERSION
+    # from the config it was given (scripts/read-config.sh), which may be
+    # configs/<name>.yaml rather than the root emulator.config.yaml, so it wins.
+    # Run by hand without it, the root emulator.config.yaml is read as before.
     board_version = 2  # default: F7FeatherV2
     config_file = Path(__file__).parent.parent / "emulator.config.yaml"
-    if config_file.exists():
+    if os.environ.get("EMU_BOARD_VERSION", "").isdigit():
+        board_version = int(os.environ["EMU_BOARD_VERSION"])
+    elif config_file.exists():
         try:
             import yaml
             with open(config_file) as f:

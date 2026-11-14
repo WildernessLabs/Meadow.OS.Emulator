@@ -7,9 +7,12 @@
 # os: legacy
 os: meadow-os
 
-# Board to emulate
-board: F7FeatherV2
-# board: F7CoreComputeV2
+# Board to emulate.  F7CoreComputeV2 (CCM) matches the Meadow.OS test apps
+# (e.g. Rebase tests/managed/MiniTests is App<F7CoreComputeV2>).  The firmware
+# only starts the CCM's SD card and Ethernet when meadow.config.yaml asks for
+# them.
+board: F7CoreComputeV2
+# board: F7FeatherV2
 
 # ESP32 coprocessor mode
 #   stub         — EspcpStub (fast, no real ESP32 needed)
