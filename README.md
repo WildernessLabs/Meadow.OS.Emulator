@@ -35,6 +35,7 @@ configs for common setups are in `configs/`:
 | Config | OS | Runtime | Board | Coprocessor |
 |--------|----|---------|-------|-------------|
 | `configs/legacy.yaml` | Legacy NuttX | Legacy Mono 6.9 | F7FeatherV2 | Stub (EspcpStub) |
+| `configs/legacy-ccm.yaml` | Legacy NuttX (meadow-3.0, `SupportEmulator` branch) | .NET 10 Mono (built by the OS) | F7CoreComputeV2 | Stub |
 | `configs/meadow-os.yaml` | Meadow.OS rebase | .NET 10 Mono (built by the OS) | F7CoreComputeV2 | Stub |
 | `configs/legacy-os_modern-dotnet.yaml` | Legacy NuttX | .NET 10 Mono | F7FeatherV2 | Stub |
 

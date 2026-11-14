@@ -1,0 +1,46 @@
+# Meadow.OS Emulator Configuration — Legacy OS (meadow-3.0) on a Core Compute module
+#
+# Legacy NuttX-based Meadow OS from the Legacy repository's SupportEmulator branch
+# (meadow-3.0 + build.sh --emulator), which builds the .NET 10 Mono runtime from a
+# sibling ../runtime checkout (meadow-3.0 branch).  The board is an F7CoreComputeV2
+# (CCM), which Rebase's tests/managed/MiniTests targets (App<F7CoreComputeV2>).
+#
+# Build and run (run.sh needs the --config=<path> form):
+#   ./build-meadow.os-emulated.sh --config configs/legacy-ccm.yaml
+#   ./run.sh --config=configs/legacy-ccm.yaml
+#
+# Set MEADOW_EMULATOR_OS_DIR if the Legacy checkout is not ../Meadow or ../Legacy,
+# and MEADOW_RUNTIME_NO_SYNC=1 to stop Legacy's build-mono.sh switching the
+# runtime checkout's branch.  Verified 2026-11-14: MiniTests deployed with
+# Meadow.CLI gives 733 ran, 2 skipped, 1 known failure.
+
+# Which OS variant to build and run
+os: legacy
+# os: meadow-os
+
+# Board to emulate
+board: F7CoreComputeV2
+# board: F7FeatherV2
+
+# ESP32 coprocessor mode
+#   stub         — EspcpStub (fast, no real ESP32 needed)
+#   dual-machine — Real ESP32 firmware on emulated Xtensa (requires Meadow-ESP32 build)
+coprocessor: stub
+# coprocessor: dual-machine
+
+# Build configuration
+build:
+  # NuttX defconfig name (subdirectory under stm32f777zit6-meadow/)
+  defconfig: mono
+
+# Network ports
+ports:
+  hcom: 4242        # HCOM TCP socket (Meadow.CLI connects here)
+  monitor: 1234     # Renode monitor telnet
+  esp32ctrl: 4243   # ESP32 UART control channel
+  gdb: 0            # GDB server port (0 = disabled)
+
+# Debug options
+debug:
+  console_log: /tmp/renode-uart-legacy.txt
+  headless: true    # true = no GUI analyzer windows
