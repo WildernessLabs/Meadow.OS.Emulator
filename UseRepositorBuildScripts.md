@@ -23,7 +23,26 @@ build under it, and let the emulator repo's build scripts shrink to thin wrapper
 `build.sh --emulator`, then do only the Renode-specific packaging (ELF splitting, hook-address
 extraction) that has no business living in a production OS build script.
 
-**This document is a plan for review — no code changes have been made yet.**
+**This document was written as a plan for review.** The status sections below record what was
+done; the 2026-11-14 update supersedes them for Rebase.
+
+> **Status update, 2026-11-14 (Rebase).** The July `SupportEmulator` branch was 1205 commits
+> behind Rebase `main`, so its change was redone on the current `main` as branch
+> **`SupportEmulatorV2`** (the original branch is left as it was). On that branch:
+>
+> - `build.sh --emulator` applies the tweaks through `enable_emulator()` in
+>   `scripts/configuration_tweaks.sh` (the same pattern as `--nsh` / `--dualcdc`) rather than
+>   inline `kconfig-tweak` calls, and no longer runs `olddefconfig`. It also sets
+>   `SYSLOG_CONSOLE`/`SYSLOG_REGISTER` (needed in NuttX 12) and UART4 receive flow control.
+> - **Part 3 item 6 is now verified:** `./run.sh --rebase` boots in the WildernessLabs Renode
+>   fork, Meadow.CLI `device info` answers over `socket://localhost:4242`, apps deploy, and Mono
+>   runs Rebase's `tests/managed/MiniTests` (733 ran, 2 skipped, 1 known failure, the same as on
+>   a board).
+> - Getting there needed further emulator changes (memory layout, Mono image, NuttX 12 QSPI
+>   struct, hook filtering by `EMU_OS`, CCM board); see `README.md` "Meadow.OS (Rebase)" and
+>   `KnownIssues_and_Errata.md` §9. The Rebase side is documented in its
+>   `Documentation/Emulator.md`.
+> - Legacy (Parts 4-5) was not revisited.
 
 ## Rollout
 

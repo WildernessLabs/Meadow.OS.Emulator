@@ -11,6 +11,8 @@ Both modes support Meadow.CLI connection via TCP socket for `device info`, app d
 
 The legacy Meadow firmware boots with Mono JIT, loads .NET assemblies from LittleFS, and runs Meadow apps end-to-end. In dual-machine mode, ESPCP frames flow bidirectionally between STM32 and ESP32 — the firmware processes incoming frames and responds with device info ("MeadowF7").
 
+**Meadow.OS (Rebase, NuttX 12)** boots as an F7CoreComputeV2, answers Meadow.CLI over the socket, accepts app deployments, starts Mono (.NET 10) and runs managed apps. Rebase's `tests/managed/MiniTests` gives the same result as on a board: 733 ran, 2 skipped, 1 known failure. See [Meadow.OS (Rebase)](#meadowos-rebase).
+
 ## Quick Start
 
 ```bash
@@ -33,7 +35,7 @@ configs for common setups are in `configs/`:
 | Config | OS | Runtime | Board | Coprocessor |
 |--------|----|---------|-------|-------------|
 | `configs/legacy.yaml` | Legacy NuttX | Legacy Mono 6.9 | F7FeatherV2 | Stub (EspcpStub) |
-| `configs/meadow-os.yaml` | Meadow.OS rebase | — | F7FeatherV2 | Stub |
+| `configs/meadow-os.yaml` | Meadow.OS rebase | .NET 10 Mono (built by the OS) | F7CoreComputeV2 | Stub |
 | `configs/legacy-os_modern-dotnet.yaml` | Legacy NuttX | .NET 10 Mono | F7FeatherV2 | Stub |
 
 Switch configurations:
@@ -140,17 +142,20 @@ Key C# peripherals:
 
 ## Using Meadow.CLI
 
-The emulator connects via TCP socket instead of USB serial. This requires the `feature/TCP_Socket_Connection_for_EMU` branch of Meadow.CLI, built from source. The `../Meadow.CLI` path below is the default; override it with `MEADOW_EMULATOR_CLI_DIR` (and `../Meadow.Samples` with `MEADOW_EMULATOR_SAMPLES_DIR`):
+The emulator connects via TCP socket instead of USB serial. Socket routes (`socket://host:port`) are supported by the Meadow.CLI `meadow-3.0` branch (merged from `feature/TCP_Socket_Connection_for_EMU` in PR #649; that branch no longer exists) and by 3.0.x releases built from it. The `../Meadow.CLI` path below is the default; override it with `MEADOW_EMULATOR_CLI_DIR` (and `../Meadow.Samples` with `MEADOW_EMULATOR_SAMPLES_DIR`):
 
 ```bash
 # Build the CLI from source (one-time setup):
 cd ../Meadow.CLI
-git checkout feature/TCP_Socket_Connection_for_EMU
-cd Source
-dotnet build Meadow.CLI.sln
+git checkout meadow-3.0
+dotnet build Source/Meadow.CLI/Meadow.CLI.csproj -c Release
+# -> Source/Meadow.CLI/bin/Release/meadow.dll
 
-# Configure the socket route (persists across sessions):
-dotnet run --project Meadow.CLI -- config route socket://localhost:4242
+# Either pass the route on each command (leaves the saved route for a real board alone):
+dotnet Source/Meadow.CLI/bin/Release/meadow.dll device info -s socket://localhost:4242
+
+# or save it as the default route (persists across sessions):
+dotnet Source/Meadow.CLI/bin/Release/meadow.dll config route socket://localhost:4242
 ```
 
 Then with the emulator running:
@@ -166,7 +171,7 @@ dotnet run --project /path/to/Meadow.CLI/Source/Meadow.CLI -- app run
 dotnet run --project ../Meadow.CLI/Source/Meadow.CLI -- file write -f path/to/file.dll
 ```
 
-> **Important:** The globally-installed `meadow` CLI tool (`dotnet tool install`) does NOT support socket connections. You must build from the branch above. The `SocketConnection` class handles raw HCOM/COBS over TCP, which is how Renode exposes the UART.
+> **Important:** A globally installed `meadow` tool supports socket connections only if it is a 3.0.x build that includes PR #649 (`meadow --version` shows the commit; `meadow-3.0` has it). Older (2.x) tools do not. The `SocketConnection` class handles raw HCOM/COBS over TCP, which is how Renode exposes the UART.
 
 ### App Deployment
 
@@ -181,9 +186,47 @@ A full BlinkyCS deploy (36 trimmed files) takes ~2.5 minutes under emulation.
 File transfers use a UART RX bypass hook that gives ~30x speedup over the
 raw emulated UART path (see [KnownIssues §8.6](KnownIssues_and_Errata.md#86-hcom-file-download--uart-rx-bypass-hack)).
 
-The BlinkyCS sample requires `F7FeatherV2` board declaration (the emulator's
-default). The sample has both `V1App` and `V2App` classes — Meadow selects
-the correct one based on the device's reported hardware version.
+The BlinkyCS sample requires `F7FeatherV2` board declaration (the default for
+the legacy configs). The sample has both `V1App` and `V2App` classes — Meadow selects
+the correct one based on the device's reported hardware version. An app only
+runs if it targets the board the emulator reports (`board:` in the config):
+`configs/meadow-os.yaml` emulates an `F7CoreComputeV2`.
+
+## Meadow.OS (Rebase)
+
+The Meadow.OS repository builds the emulator image itself with `build.sh --emulator`
+(branch `SupportEmulatorV2`, until it is merged): HCOM on UART4 with receive flow
+control, no USB, the syslog on USART1 and no bootloader. Its
+`Documentation/Emulator.md` describes the OS side.
+
+```bash
+# Build (MEADOW_EMULATOR_OS_DIR only if the OS checkout is not ../Meadow.OS or ../Rebase)
+MEADOW_EMULATOR_OS_DIR=../Rebase MEADOW_RUNTIME_DIR=../runtime \
+  ./build-meadow.os-emulated.sh --config configs/meadow-os.yaml
+./run.sh --rebase                      # console: /tmp/renode-uart-meadow.txt
+
+# Talk to it and run Mono's mini tests (the 3.0 CLI, see Using Meadow.CLI)
+meadow device info -s socket://localhost:4242
+cd ../Rebase && MEADOW_RUNTIME_DIR=../runtime MEADOW_CORE_DIR=<meadow-3.0>/Meadow.Core \
+  meadow app run tests/managed/MiniTests -s socket://localhost:4242
+```
+
+- **Rebuild the OS and rerun the wrapper together.** Hook addresses are taken from
+  the ELFs, so they are only valid for the build they came from. After a normal
+  hardware build in the same OS checkout, build with `build.sh --emulator --clean`.
+- **Memory layout** is the same as Legacy: vectors at `0x08040000`, user code at
+  `0x08040200`, kernel at `0x08140000`. The wrapper loads split binaries, and
+  `nuttx_mono.bin` (the `.mono*` sections from `0xC0000000`, signature first) goes
+  into QSPI and SDRAM.
+- **Hooks that differ from Legacy** (all generated by `tools/extract-hook-addresses.py`,
+  chosen by `EMU_OS`): the QSPI DMA bypass parses the NuttX 12 `struct qspi_meminfo_s`
+  (layout 1); `qspi_waitstatusflags_timed()` returns at once; the hardware-version hook
+  writes `_meadowVersionKnown` / `_meadowVer` and returns the version in R0;
+  `wdog_skip` is on `hcom_host_watchdog_worker()`; `mono_ver_skip` and `mono_str_fix`
+  are not used (the firmware reads the real Mono signature from QSPI, and
+  `mono_str_fix` writes Legacy struct offsets).
+- **Deploy speed:** a 225 KB file takes a few seconds; MiniTests (about 70 trimmed
+  assemblies) deploys and runs in a few minutes. No UART RX bypass is needed.
 
 ## Prerequisites
 
@@ -202,7 +245,7 @@ wilderness_labs/
 ├── Meadow.OS/             # New Meadow.OS rebase (updated NuttX, unreleased)
 ├── runtime/               # .NET 10 Mono runtime (for legacy-os_modern-dotnet config)
 ├── Meadow-ESP32/          # ESP32 firmware source (for --esp32 mode, ESP-IDF 4.2.4)
-├── Meadow.CLI/            # Branch: feature/TCP_Socket_Connection_for_EMU (build from source)
+├── Meadow.CLI/            # Branch: meadow-3.0 (build from source; socket:// support)
 ├── Meadow.Samples/        # Sample apps (Blinky, etc.)
 └── renode/                # WildernessLabs/renode fork (branch: meadow-emulator-fixes)
 ```
@@ -287,7 +330,7 @@ Meadow.OS.Emulator/
 ./build-meadow.os-emulated.sh --config configs/legacy-os_modern-dotnet.yaml  # Build for .NET 10
 ```
 
-The build script reads `EMU_OS` from the config to select the source tree (`Meadow/` for legacy, `Meadow.OS/` for rebase), applies emulator-specific kconfig tweaks, and extracts hook addresses for Renode. Output directories: `build/legacy/`, `build/`, or `build/dotnet10/`.
+The build script reads `EMU_OS` from the config to select the source tree (`Meadow/` for legacy, `Meadow.OS/` for rebase), delegates the build to that tree's `build.sh --emulator` (which applies the emulator-specific kconfig tweaks), splits the images for Renode and extracts hook addresses. Output directories: `build/legacy/`, `build/`, or `build/dotnet10/`.
 
 ### ESP32 — required only for `--esp32` mode
 
@@ -393,7 +436,11 @@ See [KnownIssues_and_Errata.md](KnownIssues_and_Errata.md) for a full list. Key 
 
 - **UART RX bypass disabled (§8.6)** — The `UartRxBypass.cs` hook that sped up
   file deployment is currently disabled due to API incompatibility with Renode
-  1.16.1. File deploy via Meadow.CLI works but is very slow without the bypass.
+  1.16.1. File deploy via Meadow.CLI works but is very slow without the bypass
+  on Legacy. Meadow.OS does not need it (UART4 flow control and an hcom fix,
+  §9.5): a 225 KB file takes a few seconds.
+- **Meadow.OS (§9)** — the shared Legacy hooks are filtered for Meadow.OS by
+  `EMU_OS`; check what any other Legacy hook writes before enabling it there.
 - **Flash persistence (§4.4)** — QSPI flash is volatile across Renode sessions.
   A pre-built LittleFS image is loaded at boot so the filesystem is pre-populated,
   and deployed files persist across in-session resets, but everything is lost when
