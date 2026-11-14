@@ -387,14 +387,15 @@ Both MCUs have full platform definitions written from scratch (Renode has no sto
 
 ### Renode Fork Fixes
 
-The WildernessLabs/renode fork (`meadow-emulator-fixes` branch) contains 17 fixes across two areas. See [upstream_fixes.md](upstream_fixes.md) for PR status.
+The WildernessLabs/renode fork (`meadow-emulator-fixes` branch) contains 18 fixes across two areas. See [upstream_fixes.md](upstream_fixes.md) for PR status.
 
-### STM32/ARM (2 fixes in Infrastructure)
+### STM32/ARM (3 fixes in Infrastructure)
 
 | Fix | Impact |
 |-----|--------|
 | SVC/PRIMASK handling in NVIC | ARM spec says SVC with PRIMASK=1 should escalate to HardFault, not be silently skipped. Without this fix, per-address hooks on every SVC site are needed (~12,000x slower) |
 | RTC backup register count (20→32) | STM32F4_RTC `BackupEnd` only covers 20 registers; STM32F7 has 32 (BKP0R–BKP31R). Meadow uses BKP31R for runtime state persistence |
+| BackendTerminal batched write (`da6e499cb`) | The batched UART write path wrote zero bytes for the rest of a batch, and delivered the real bytes later out of order, if the UART reported Full part of the way through. It now writes only the bytes it takes from the buffer. See [KnownIssues §9.7](KnownIssues_and_Errata.md#97-renode-fork-backendterminalwritebuffertouart-zero-fill) |
 
 **Not yet fixed in fork (hook workaround):** STM32F4_RTC crashes with `ArgumentOutOfRangeException` when firmware writes BCD date register with partially-populated fields (intermediate zero month/day creates invalid DateTime). Worked around by skipping `hcom_nx_config_set_time_to_os_build_time` via hook.
 

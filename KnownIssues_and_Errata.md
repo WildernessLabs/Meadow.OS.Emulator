@@ -678,9 +678,16 @@ The Legacy sections above still apply unless noted; these are the differences.
 
 ### 9.7 Renode Fork: `BackendTerminal.WriteBufferToUART` Zero-Fill
 - **Severity:** Medium (latent)
-- **Status:** OPEN
-- **Description:** the batched write path stops dequeuing when the UART reports
-  `BufferState.Full` but still passes the whole `count` to `WriteChars`, so the rest of
-  the batch is written as zero bytes and the real bytes follow later, out of order.
-  `STM32F7_USART` never reports Full, so it is not hit today. Fix in the fork: write
-  only the bytes dequeued.
+- **Status:** FIXED in the fork (`meadow-emulator-fixes`): renode-infrastructure
+  `da6e499cb`, picked up by renode `f90313d0`. Update and rebuild `../renode`
+  (`./setup.sh`, or `git pull && git submodule update` then `build.sh`) to get it.
+- **Description:** the batched write path stopped dequeuing when the UART reported
+  `BufferState.Full` but still passed the whole `count` to `WriteChars`, so the rest of
+  the batch was written as zero bytes and the real bytes followed later, out of order.
+  `STM32F7_USART` never reports Full, so it was not hit by the Meadow configurations.
+- **Fix:** a bulk write updates the UART's buffer state only once the whole batch is in,
+  so for bulk UARTs nothing is written while the UART is Full (the bytes stay queued
+  and `BufferStateChanged` reschedules the write); otherwise exactly the dequeued bytes
+  are written. UARTs without bulk writes are written byte by byte, stopping as soon as
+  they report Full. Verified with Meadow.OS: device info, a 225 KB file write and
+  MiniTests (733 ran, 2 skipped, 1 known failure).
