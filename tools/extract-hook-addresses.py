@@ -280,8 +280,16 @@ def main():
     # -------------------------------------------------------------------------
     # mono_str_fix — first instruction at cbnz target after deep_copy_config call
     # Pattern: bl deep_copy_config → mov rN, r0 → cbnz r0, TARGET → ... TARGET: ldr ...
+    #
+    # Legacy only.  The hook writes the config struct at Legacy offsets
+    # (+0x54, +0x80); Meadow.OS's struct differs, and the same instruction
+    # pattern exists there, so the hook overwrote unrelated fields with a
+    # pointer to the firmware version string.  Freeing one of those fields
+    # later corrupted the kernel heap (seen after `meadow device info`).
     # -------------------------------------------------------------------------
-    if "HCOM_MONO_CTRL_START_MONO_MAIN" in addrs:
+    if meminfo_layout != 0:
+        print("  mono_str_fix skipped (Legacy config struct offsets; not valid for Meadow.OS)")
+    elif "HCOM_MONO_CTRL_START_MONO_MAIN" in addrs:
         insns = objdump_function(user_elf, addrs["HCOM_MONO_CTRL_START_MONO_MAIN"], 0x500)
         # Find bl to deep_copy_config, then the cbnz after it
         for i, (iaddr, text) in enumerate(insns):
