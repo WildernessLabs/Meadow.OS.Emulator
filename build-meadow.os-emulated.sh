@@ -120,9 +120,11 @@ echo "--- Delegating build to $MEADOW_SRC_DIR/build.sh --emulator ---"
 # -------------------------------------------------------------------------
 mkdir -p "$BUILD_DIR"
 
-if [ "$EMU_OS" = "legacy" ]; then
-    # Legacy memory layout requires split binaries:
-    # vectors at 0x08040000, kernel at 0x08140000, user at 0x08040200+
+# Legacy and Meadow.OS (Rebase) share the same memory layout, which requires
+# split binaries: vectors at 0x08040000, kernel at 0x08140000, user at
+# 0x08040200+.  A flat nuttx.bin zero-fills the 1MB gap between the vectors and
+# the kernel and would overwrite the user code (KnownIssues_and_Errata.md 6.3).
+{
 
     # 1. Kernel vectors (interrupt vector table)
     arm-none-eabi-objcopy --only-section=.vectors -O binary \
@@ -178,62 +180,20 @@ print(f'Signature: {sig[:4].hex()} version={int.from_bytes(sig[16:20], \"little\
     # Keep full nuttx.bin for reference
     cp "$NUTTX_DIR/nuttx.bin" "$BUILD_DIR/nuttx.bin"
 
-else
-    # Meadow.OS: kernel is a simple copy, but the user binary still needs the
-    # Mono/SDRAM sections stripped — same 3GB-zero-fill problem as legacy,
-    # since Renode's LoadFileChunks overflows a 32-bit count on files this size.
-    cp "$NUTTX_DIR/nuttx.bin" "$BUILD_DIR/"
-    echo "--- Copied nuttx.bin to $BUILD_DIR/"
+}
 
-    # User binary — strip Mono/SDRAM sections to avoid 3GB zero fill
-    arm-none-eabi-objcopy -O binary \
-        --remove-section=.mono_signature \
-        --remove-section=.mono \
-        --remove-section=.mono_data \
-        --remove-section=.mono_comment \
-        --remove-section=.mono_bss \
-        "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_user.bin"
-    echo "--- Created nuttx_user.bin (mono sections stripped)"
-
-    # Extract Mono runtime sections for SDRAM loading (0xC0000000)
-    if arm-none-eabi-objdump -h "$NUTTX_DIR/nuttx_user.elf" | grep -q '\.mono '; then
-        arm-none-eabi-objcopy -O binary \
-            --only-section=.mono \
-            --only-section=.mono_data \
-            --only-section=.mono_comment \
-            "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_mono_code.bin"
-
-        # Extract .mono_signature directly from ELF
-        SIG_OFFSET=$(arm-none-eabi-readelf -S "$NUTTX_DIR/nuttx_user.elf" | \
-            awk '/\.mono_signature/ {print "0x" $5}')
-        SIG_SIZE=$(arm-none-eabi-readelf -S "$NUTTX_DIR/nuttx_user.elf" | \
-            awk '/\.mono_signature/ {print "0x" $6}')
-        python3 -c "
-import sys
-with open('$NUTTX_DIR/nuttx_user.elf', 'rb') as f:
-    f.seek($SIG_OFFSET)
-    sig = f.read($SIG_SIZE)
-    sig = sig.ljust(0x20, b'\x00')
-    with open('$BUILD_DIR/nuttx_mono_sig.bin', 'wb') as out:
-        out.write(sig)
-print(f'Signature: {sig[:4].hex()} version={int.from_bytes(sig[16:20], \"little\")}.{int.from_bytes(sig[12:16], \"little\")}.{int.from_bytes(sig[8:12], \"little\")}.{int.from_bytes(sig[4:8], \"little\")}')
-"
-        cat "$BUILD_DIR/nuttx_mono_sig.bin" "$BUILD_DIR/nuttx_mono_code.bin" > "$BUILD_DIR/nuttx_mono.bin"
-        rm -f "$BUILD_DIR/nuttx_mono_code.bin" "$BUILD_DIR/nuttx_mono_sig.bin"
-        echo "--- Created nuttx_mono.bin (Mono runtime for SDRAM, $(du -h "$BUILD_DIR/nuttx_mono.bin" | cut -f1))"
-    else
-        echo "--- WARNING: No .mono sections found in nuttx_user.elf"
-    fi
-fi
-
-# Copy ELFs for GDB debugging
+# Copy ELFs for GDB debugging and hook-address extraction.  Always overwrite:
+# the hook addresses are taken from these copies, so a stale one makes every
+# hook land on the wrong address.  Prefer "nuttx" where the OS build makes one,
+# otherwise "nuttx.elf" (Meadow.OS only produces nuttx.elf).
 if [ -f "$NUTTX_DIR/nuttx" ]; then
     cp "$NUTTX_DIR/nuttx" "$BUILD_DIR/nuttx.elf"
     echo "--- Copied nuttx ELF to $BUILD_DIR/nuttx.elf"
-fi
-if [ -f "$NUTTX_DIR/nuttx.elf" ] && [ ! -f "$BUILD_DIR/nuttx.elf" ]; then
-    cp "$NUTTX_DIR/nuttx.elf" "$BUILD_DIR/nuttx.elf"
-    echo "--- Copied nuttx ELF to $BUILD_DIR/nuttx.elf"
+else
+    if [ -f "$NUTTX_DIR/nuttx.elf" ]; then
+        cp "$NUTTX_DIR/nuttx.elf" "$BUILD_DIR/nuttx.elf"
+        echo "--- Copied nuttx.elf to $BUILD_DIR/nuttx.elf"
+    fi
 fi
 if [ -f "$NUTTX_DIR/nuttx_user.elf" ]; then
     cp "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_user.elf"
@@ -243,7 +203,7 @@ fi
 # Extract hook addresses from ELF files
 if [ -f "$BUILD_DIR/nuttx.elf" ] && [ -f "$BUILD_DIR/nuttx_user.elf" ]; then
     echo "--- Extracting hook addresses for Renode ---"
-    python3 "$SCRIPT_DIR/tools/extract-hook-addresses.py" \
+    EMU_OS="$EMU_OS" python3 "$SCRIPT_DIR/tools/extract-hook-addresses.py" \
         "$BUILD_DIR/nuttx.elf" "$BUILD_DIR/nuttx_user.elf" || \
         echo "WARNING: Hook address extraction failed (non-fatal — new symbols may differ)"
 fi

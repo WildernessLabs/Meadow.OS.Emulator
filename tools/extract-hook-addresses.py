@@ -12,6 +12,7 @@ The generated files are included by meadow-legacy-*.resc scripts so that hook
 addresses and SDRAM patches stay in sync with the firmware build automatically.
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -146,6 +147,8 @@ def main():
         "MEADOW_HW_VERSION_FIND_DEVICE_VER": ("meadow_hw_version_find_device_ver", ksyms),
         "QSPI_WAITSTATUSFLAGS_CONSTPROP": ("qspi_waitstatusflags.constprop.0", ksyms),
         "QSPI_WAITSTATUSFLAGS_PART": ("qspi_waitstatusflags.part.0", ksyms),
+        # Meadow.OS only: the bounded waits (issue #753) all poll through this
+        "QSPI_WAITSTATUSFLAGS_TIMED": ("qspi_waitstatusflags_timed", ksyms),
         "QSPI_MEMORY": ("qspi_memory", ksyms),
         "HCOM_NX_CONFIG_REFRESH_MONO_VERSION": ("hcom_nx_config_refresh_mono_version", ksyms),
         "HCOM_NX_CONFIG_INIT": ("hcom_nx_config_init", ksyms),
@@ -168,7 +171,13 @@ def main():
         "HCOM_HOST_RECV_PTHREAD": ("hcom_host_recv_pthread", usyms),
     }
 
-    addrs: dict[str, int] = {"BOARD_VERSION": board_version}
+    # struct qspi_meminfo_s changed layout in NuttX 12 (Meadow.OS); the C# QSPI
+    # bypass needs to know which one to parse.  build-meadow.os-emulated.sh
+    # passes EMU_OS; anything other than "legacy" is Meadow.OS.
+    meminfo_layout = 0 if os.environ.get("EMU_OS", "legacy") == "legacy" else 1
+
+    addrs: dict[str, int] = {"BOARD_VERSION": board_version,
+                             "QSPI_MEMINFO_LAYOUT": meminfo_layout}
     missing = []
     for var_name, (sym_name, sym_table) in simple.items():
         addr = sym_table.get(sym_name)
@@ -206,6 +215,13 @@ def main():
             addrs["HW_VERSION_INITIALIZED"] = struct_addr  # offset 0: initialized byte
             addrs["HW_VERSION_VALUE"] = struct_addr + 4     # offset 4: version word
             print(f"  hw_version struct at 0x{struct_addr:08X}")
+        elif ("_meadowVersionKnown" in ksyms) and ("_meadowVer" in ksyms):
+            # Meadow.OS (Rebase) keeps the result in two file-scope statics in
+            # meadow_hw_version.c instead of Legacy's struct.
+            addrs["HW_VERSION_INITIALIZED"] = ksyms["_meadowVersionKnown"]
+            addrs["HW_VERSION_VALUE"] = ksyms["_meadowVer"]
+            print(f"  hw_version statics: _meadowVersionKnown at 0x{ksyms['_meadowVersionKnown']:08X}, "
+                  f"_meadowVer at 0x{ksyms['_meadowVer']:08X}")
         else:
             print("WARNING: Could not find hw_version struct address", file=sys.stderr)
 

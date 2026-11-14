@@ -13,20 +13,27 @@
 
 # Workaround: Force GPIO board version to F7FeatherV2 (2).
 # Hook meadow_hw_version_find_device_ver at entry.
-# Write initialized=1 and version=2 to hw_version struct.
+# Write initialized=1 and version=2 to hw_version struct (Legacy) or to the
+# _meadowVersionKnown/_meadowVer statics (Meadow.OS), and also return the
+# version in R0, which Meadow.OS's caller (stm32_boot.c) uses.
 # Values: 1=F7FeatherV1, 2=F7FeatherV2, 3=F7CoreComputeV2
-set gpio_ver_fix "machine.SystemBus.WriteByte($hook_HW_VERSION_INITIALIZED, 1); machine.SystemBus.WriteDoubleWord($hook_HW_VERSION_VALUE, $hook_BOARD_VERSION); cpu.PC = cpu.LR"
+set gpio_ver_fix "from Antmicro.Renode.Peripherals.CPU import RegisterValue; machine.SystemBus.WriteByte($hook_HW_VERSION_INITIALIZED, 1); machine.SystemBus.WriteDoubleWord($hook_HW_VERSION_VALUE, $hook_BOARD_VERSION); cpu.SetRegisterUnsafe(0, RegisterValue.Create($hook_BOARD_VERSION, 32)); cpu.PC = cpu.LR"
 cpu AddHook $hook_MEADOW_HW_VERSION_FIND_DEVICE_VER $gpio_ver_fix
 
 # Workaround: Renode's STM32H7_QuadSPI doesn't set TCF in SR.
 set qspi_wait_skip "cpu.PC = cpu.LR"
 cpu AddHook $hook_QSPI_WAITSTATUSFLAGS_CONSTPROP $qspi_wait_skip
 cpu AddHook $hook_QSPI_WAITSTATUSFLAGS_PART $qspi_wait_skip
+# Meadow.OS replaced the unbounded waits with qspi_waitstatusflags_timed()
+# (bounded, with abort/recovery).  Return true ("condition met") at once.
+set qspi_wait_timed_skip "from Antmicro.Renode.Peripherals.CPU import RegisterValue; cpu.SetRegisterUnsafe(0, RegisterValue.Create(1, 32)); cpu.PC = cpu.LR"
+cpu AddHook $hook_QSPI_WAITSTATUSFLAGS_TIMED $qspi_wait_timed_skip
 
 # Workaround: QUADSPI doesn't drive DMA requests — bypass qspi_memory with direct memcpy.
 # Uses compiled C# hook (QspiDmaBypass.cs) instead of IronPython for 10-100x speedup.
 # Critical for Mono JIT which makes millions of QSPI reads during assembly loading.
-cpu InstallQspiBypass $hook_QSPI_MEMORY 0x90000000
+# Last argument: struct qspi_meminfo_s layout, 0 = Legacy, 1 = Meadow.OS (NuttX 12)
+cpu InstallQspiBypass $hook_QSPI_MEMORY 0x90000000 $hook_QSPI_MEMINFO_LAYOUT
 
 # Workaround: Mono runtime binary is pre-loaded into SDRAM via LoadBinary, but the firmware
 # tries to copy it from QSPI flash (which is empty). Bypass the copy function to return 0 (success).

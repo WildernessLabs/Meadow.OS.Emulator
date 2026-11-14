@@ -9,18 +9,24 @@
 // This is 10-100x faster than the equivalent IronPython hook because it runs as
 // compiled .NET code rather than being interpreted on every invocation.
 //
-// Usage from .resc:   cpu InstallQspiBypass 0x0816136a 0x90000000
+// Usage from .resc:   cpu InstallQspiBypass 0x0816136a 0x90000000 [layout]
 //
-// struct qspi_meminfo_s layout (ARM32, from nuttx/include/nuttx/spi/qspi.h):
-//   +0   uint8_t  flags    (QSPIMEM_WRITE=0x04, QSPIMEM_READ=0x00)
-//   +1   uint8_t  addrlen
-//   +2   uint8_t  dummies
-//   +3   (1 byte padding)
-//   +4   uint16_t buflen
-//   +6   uint16_t cmd
-//   +8   uint32_t addr     (flash address)
-//   +12  uint32_t key
-//   +16  void *   buffer
+// struct qspi_meminfo_s layout (ARM32, from nuttx/include/nuttx/spi/qspi.h).
+// It differs between the NuttX versions, so `layout` selects it:
+//
+//   layout 0 - Legacy Meadow OS (default)    layout 1 - Meadow.OS (NuttX 12)
+//   +0   uint8_t  flags                      +0   uint8_t  flags
+//   +1   uint8_t  addrlen                    +1   uint8_t  addrlen
+//   +2   uint8_t  dummies                    +2   uint8_t  dummies
+//   +3   (1 byte padding)                    +3   (1 byte padding)
+//   +4   uint16_t buflen                     +4   uint16_t cmd
+//   +6   uint16_t cmd                        +6   (2 bytes padding)
+//   +8   uint32_t addr     (flash address)   +8   uint32_t buflen
+//   +12  uint32_t key                        +12  uint32_t addr (flash address)
+//   +16  void *   buffer                     +16  uint32_t key
+//                                            +20  void *   buffer
+//
+// flags: QSPIMEM_WRITE=0x04, QSPIMEM_READ=0x00 in both.
 
 using System;
 using System.Linq;
@@ -34,7 +40,7 @@ namespace Antmicro.Renode.Hooks
     public static class QspiDmaBypassExtension
     {
         public static void InstallQspiBypass(this ICPUWithHooks cpu,
-            [AutoParameter] Machine machine, ulong hookAddress, ulong flashBase)
+            [AutoParameter] Machine machine, ulong hookAddress, ulong flashBase, int layout = 0)
         {
             var arm = cpu as Arm;
             if(arm == null)
@@ -53,11 +59,23 @@ namespace Antmicro.Renode.Hooks
                 // R1 = pointer to struct qspi_meminfo_s
                 ulong meminfo = arm.GetRegister((int)ArmRegisters.R1).RawValue;
 
-                // Parse struct fields
+                // Parse struct fields (see the layout table above)
                 byte flags = bus.ReadByte(meminfo);
-                int buflen = (int)(bus.ReadDoubleWord(meminfo + 4) & 0xFFFF);
-                ulong faddr = bus.ReadDoubleWord(meminfo + 8);
-                ulong buf = bus.ReadDoubleWord(meminfo + 16);
+                int buflen;
+                ulong faddr;
+                ulong buf;
+                if(layout == 1)
+                {
+                    buflen = (int)bus.ReadDoubleWord(meminfo + 8);
+                    faddr = bus.ReadDoubleWord(meminfo + 12);
+                    buf = bus.ReadDoubleWord(meminfo + 20);
+                }
+                else
+                {
+                    buflen = (int)(bus.ReadDoubleWord(meminfo + 4) & 0xFFFF);
+                    faddr = bus.ReadDoubleWord(meminfo + 8);
+                    buf = bus.ReadDoubleWord(meminfo + 16);
+                }
 
                 if(buflen > 0)
                 {
@@ -86,13 +104,14 @@ namespace Antmicro.Renode.Hooks
                         callCount, totalBytes / 1024, elapsed, faddr, lr);
                 }
 
-                // Return from function — set PC = LR
+                // Return OK (0) from qspi_memory() — set R0 and PC = LR
+                arm.SetRegister((int)ArmRegisters.R0, 0);
                 arm.PC = arm.LR;
             });
 
             arm.Log(LogLevel.Info,
-                "QspiDmaBypass: C# hook installed at 0x{0:X8}, flash base 0x{1:X8}",
-                hookAddress, flashBase);
+                "QspiDmaBypass: C# hook installed at 0x{0:X8}, flash base 0x{1:X8}, meminfo layout {2}",
+                hookAddress, flashBase, layout);
         }
 
         private const byte QSPIMEM_WRITE = 0x04;
