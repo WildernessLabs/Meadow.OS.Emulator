@@ -63,7 +63,7 @@ echo "=== Building Legacy Meadow OS for Renode ==="
 # -------------------------------------------------------------------------
 if ! grep -q -- '--emulator' "$MEADOW_DIR/build.sh"; then
     echo "ERROR: $MEADOW_DIR/build.sh does not support --emulator."
-    echo "       Update your checkout to the SupportEmulator branch (or later, once merged)."
+    echo "       Update your Legacy checkout to its SupportEmulator branch (or later, once merged)."
     exit 1
 fi
 

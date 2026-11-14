@@ -108,7 +108,7 @@ echo "=== Building NuttX for Renode (os: $EMU_OS, runtime: ${EMU_RUNTIME:-defaul
 # -------------------------------------------------------------------------
 if ! grep -q -- '--emulator' "$MEADOW_SRC_DIR/build.sh"; then
     echo "ERROR: $MEADOW_SRC_DIR/build.sh does not support --emulator."
-    echo "       Update your checkout to the SupportEmulatorV2 branch (or later, once merged)."
+    echo "       Update your Meadow.OS (Rebase) checkout to its SupportEmulatorV2 branch (or later, once merged)."
     exit 1
 fi
 
@@ -152,9 +152,13 @@ mkdir -p "$BUILD_DIR"
         # One objcopy of all the Mono sections: objcopy places each section
         # at its link address relative to the lowest one (.mono_signature at
         # 0xC0000000), so the signature and the code land exactly where the
-        # firmware expects them whatever the signature's size (0x20 bytes on
-        # Legacy, 0x30 on Meadow.OS).  .mono_bss is NOBITS and not copied.
+        # firmware expects them whatever the signature's size and alignment
+        # (Legacy meadow-3.0 and Meadow.OS both start .mono at 0xC0000030;
+        # older builds used 0x20).  .mono_bss is NOBITS and not copied.
+        # Legacy links .mono_signature without the ALLOC flag, and objcopy
+        # -O binary leaves out non-allocated sections, so mark it allocated.
         arm-none-eabi-objcopy -O binary \
+            --set-section-flags .mono_signature=alloc,load,contents,data \
             --only-section=.mono_signature \
             --only-section=.mono \
             --only-section=.mono_data \
