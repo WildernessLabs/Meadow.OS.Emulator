@@ -171,10 +171,13 @@ def main():
         "HCOM_HOST_RECV_PTHREAD": ("hcom_host_recv_pthread", usyms),
     }
 
-    # struct qspi_meminfo_s changed layout in NuttX 12 (Meadow.OS); the C# QSPI
-    # bypass needs to know which one to parse.  build-meadow.os-emulated.sh
-    # passes EMU_OS; anything other than "legacy" is Meadow.OS.
-    meminfo_layout = 0 if os.environ.get("EMU_OS", "legacy") == "legacy" else 1
+    # build-meadow.os-emulated.sh passes EMU_OS; anything other than "legacy"
+    # is Meadow.OS (Rebase, NuttX 12).
+    is_meadow_os = os.environ.get("EMU_OS", "legacy") != "legacy"
+
+    # struct qspi_meminfo_s changed layout in NuttX 12; the C# QSPI bypass
+    # needs to know which one to parse.
+    meminfo_layout = 1 if is_meadow_os else 0
 
     addrs: dict[str, int] = {"BOARD_VERSION": board_version,
                              "QSPI_MEMINFO_LAYOUT": meminfo_layout}
@@ -185,6 +188,24 @@ def main():
             missing.append(f"  {var_name} ({sym_name})")
         else:
             addrs[var_name] = addr
+
+    # Legacy could not read the Mono signature from QSPI, so the mono_ver_skip
+    # hook skips hcom_nx_config_refresh_mono_version().  On Meadow.OS the QSPI
+    # reads work (QspiDmaBypass layout 1) and nuttx_mono.bin carries the real
+    # signature at QSPI offset 0, so let the firmware read it.
+    if is_meadow_os:
+        addrs.pop("HCOM_NX_CONFIG_REFRESH_MONO_VERSION", None)
+        print("  mono_ver_skip not used (Meadow.OS reads the Mono signature from QSPI)")
+
+    # The download watchdog must not fire in the emulator: Renode's virtual
+    # time runs ahead while the CPU waits for UART data, so the timer expires
+    # mid-download and the download is cancelled.  Legacy's handler is
+    # hcom_host_watchdog_timeout_expired(); Meadow.OS replaced it with the
+    # work-queue callback hcom_host_watchdog_worker(), which the wdog_skip
+    # hook can skip in the same way (it returns void).
+    if ("HCOM_HOST_WATCHDOG_TIMEOUT_EXPIRED" not in addrs) and ("hcom_host_watchdog_worker" in usyms):
+        addrs["HCOM_HOST_WATCHDOG_TIMEOUT_EXPIRED"] = usyms["hcom_host_watchdog_worker"]
+        print(f"  wdog_skip on hcom_host_watchdog_worker at 0x{usyms['hcom_host_watchdog_worker']:08X}")
 
     if missing:
         print(f"WARNING: Missing symbols (hooks using these will be skipped):", file=sys.stderr)
@@ -287,7 +308,7 @@ def main():
     # pointer to the firmware version string.  Freeing one of those fields
     # later corrupted the kernel heap (seen after `meadow device info`).
     # -------------------------------------------------------------------------
-    if meminfo_layout != 0:
+    if is_meadow_os:
         print("  mono_str_fix skipped (Legacy config struct offsets; not valid for Meadow.OS)")
     elif "HCOM_MONO_CTRL_START_MONO_MAIN" in addrs:
         insns = objdump_function(user_elf, addrs["HCOM_MONO_CTRL_START_MONO_MAIN"], 0x500)

@@ -149,29 +149,27 @@ mkdir -p "$BUILD_DIR"
 
     # 3a. Extract Mono runtime sections for SDRAM loading (0xC0000000)
     if arm-none-eabi-objdump -h "$NUTTX_DIR/nuttx_user.elf" | grep -q '\.mono '; then
+        # One objcopy of all the Mono sections: objcopy places each section
+        # at its link address relative to the lowest one (.mono_signature at
+        # 0xC0000000), so the signature and the code land exactly where the
+        # firmware expects them whatever the signature's size (0x20 bytes on
+        # Legacy, 0x30 on Meadow.OS).  .mono_bss is NOBITS and not copied.
         arm-none-eabi-objcopy -O binary \
+            --only-section=.mono_signature \
             --only-section=.mono \
             --only-section=.mono_data \
             --only-section=.mono_comment \
-            "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_mono_code.bin"
+            "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_mono.bin"
 
-        # Extract .mono_signature directly from ELF
-        SIG_OFFSET=$(arm-none-eabi-readelf -S "$NUTTX_DIR/nuttx_user.elf" | \
-            awk '/\.mono_signature/ {print "0x" $5}')
-        SIG_SIZE=$(arm-none-eabi-readelf -S "$NUTTX_DIR/nuttx_user.elf" | \
-            awk '/\.mono_signature/ {print "0x" $6}')
+        # Report the signature: magic AABBCCDD, then build, revision, minor,
+        # major as little-endian 32-bit words.
         python3 -c "
-import sys
-with open('$NUTTX_DIR/nuttx_user.elf', 'rb') as f:
-    f.seek($SIG_OFFSET)
-    sig = f.read($SIG_SIZE)
-    sig = sig.ljust(0x20, b'\x00')
-    with open('$BUILD_DIR/nuttx_mono_sig.bin', 'wb') as out:
-        out.write(sig)
-print(f'Signature: {sig[:4].hex()} version={int.from_bytes(sig[16:20], \"little\")}.{int.from_bytes(sig[12:16], \"little\")}.{int.from_bytes(sig[8:12], \"little\")}.{int.from_bytes(sig[4:8], \"little\")}')
+import struct
+with open('$BUILD_DIR/nuttx_mono.bin', 'rb') as f:
+    sig = f.read(20)
+magic, build, revision, minor, major = struct.unpack('<5I', sig)
+print(f'Signature: {magic:08X} version={major}.{minor}.{revision}.{build}')
 "
-        cat "$BUILD_DIR/nuttx_mono_sig.bin" "$BUILD_DIR/nuttx_mono_code.bin" > "$BUILD_DIR/nuttx_mono.bin"
-        rm -f "$BUILD_DIR/nuttx_mono_code.bin" "$BUILD_DIR/nuttx_mono_sig.bin"
         echo "--- Created nuttx_mono.bin (Mono runtime for SDRAM, $(du -h "$BUILD_DIR/nuttx_mono.bin" | cut -f1))"
     else
         echo "--- WARNING: No .mono sections found in nuttx_user.elf"
