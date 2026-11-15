@@ -85,7 +85,7 @@ echo "=== Building NuttX for Renode (os: $EMU_OS) ==="
 # -------------------------------------------------------------------------
 if ! grep -q -- '--emulator' "$MEADOW_SRC_DIR/build.sh"; then
     echo "ERROR: $MEADOW_SRC_DIR/build.sh does not support --emulator."
-    echo "       Update your Meadow.OS (Rebase) checkout to its SupportEmulatorV2 branch (or later, once merged)."
+    echo "       Update your Meadow.OS (Rebase) checkout to main (build.sh --emulator was merged in WildernessLabs/Meadow.OS#953)."
     exit 1
 fi
 

@@ -244,7 +244,7 @@ runs if it targets the board the emulator reports (`board:` in the config):
 ## Meadow.OS (Rebase)
 
 The Meadow.OS repository builds the emulator image itself with `build.sh --emulator`
-(branch `SupportEmulatorV2`, until it is merged): HCOM on UART4 with receive flow
+(on `main` since WildernessLabs/Meadow.OS#953): HCOM on UART4 with receive flow
 control, no USB, the syslog on USART1 and no bootloader. Its
 `Documentation/Emulator.md` describes the OS side.
 
