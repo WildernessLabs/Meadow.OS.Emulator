@@ -58,12 +58,23 @@ CONFIG_ARG=""
 SCRIPT=""
 CLI_OVERRIDES=""
 
-# Pre-scan for --config to pass to read-config.sh
+# Pre-scan for --config=FILE or --config FILE to pass to read-config.sh
+_next_is_config=false
 for arg in "$@"; do
+    if [ "$_next_is_config" = true ]; then
+        CONFIG_ARG="$arg"
+        _next_is_config=false
+        continue
+    fi
     case "$arg" in
         --config=*) CONFIG_ARG="${arg#--config=}" ;;
+        --config)   _next_is_config=true ;;
     esac
 done
+if [ "$_next_is_config" = true ]; then
+    echo "ERROR: --config needs a file: --config=FILE or --config FILE"
+    exit 1
+fi
 
 if [ -n "$CONFIG_ARG" ]; then
     source "$SCRIPT_DIR/scripts/read-config.sh" "$CONFIG_ARG"
@@ -108,11 +119,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --config=*)
             ;; # already handled above
+        --config)
+            shift ;; # already handled above; skip its FILE
         --help|-h)
             echo "Usage: ./run.sh [options] [script-name]"
             echo ""
             echo "Options:"
-            echo "  --config=FILE   Use a specific config file (default: emulator.config.yaml)"
+            echo "  --config=FILE   Use a specific config file (default: emulator.config.yaml);"
+            echo "                  --config FILE also works"
             echo "  --legacy        Override OS to legacy (same as os: legacy in config)"
             echo "  --rebase        Override OS to meadow-os (same as os: meadow-os in config)"
             echo "  --esp32         Override coprocessor to dual-machine"

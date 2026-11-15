@@ -78,7 +78,7 @@ CLI args override config values: `--legacy`, `--esp32`, `--port=N`.
 
 ```bash
 ./run.sh                                   # Uses emulator.config.yaml
-./run.sh --config=configs/meadow-os.yaml   # One-off config override (note the '=')
+./run.sh --config=configs/meadow-os.yaml   # One-off config override (--config FILE also works)
 ./run.sh --legacy --esp32                  # CLI overrides (dual-machine mode)
 ./run.sh --port=5555                       # Custom monitor port
 ./run.sh --rebase --mount=app.bin           # Boot with a file system image (tools/make-lfs-image.sh)

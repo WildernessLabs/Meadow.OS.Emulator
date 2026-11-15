@@ -31,23 +31,25 @@ else
     EMU_CONFIG_FILE="${_RC_REPO_DIR}/emulator.config.yaml"
 fi
 
-# Parse arguments
+# Parse arguments.  Only these name the config: --config=FILE, --config FILE,
+# or an argument ending in .yaml/.yml.  Anything else is ignored: a script
+# sourced with no arguments sees its caller's arguments, which can include
+# unrelated existing files (run.sh's .resc script, make-lfs-image.sh's output
+# image), and those must not be taken for the config.
+_rc_next_is_config=false
 for arg in "$@"; do
+    if [ "$_rc_next_is_config" = true ]; then
+        EMU_CONFIG_FILE="$arg"
+        _rc_next_is_config=false
+        continue
+    fi
     case "$arg" in
-        --config=*)
-            EMU_CONFIG_FILE="${arg#--config=}"
-            ;;
-        --config)
-            # Next arg is the path — handled by caller
-            ;;
-        *)
-            # Positional arg = config path
-            if [ -f "$arg" ]; then
-                EMU_CONFIG_FILE="$arg"
-            fi
-            ;;
+        --config=*)   EMU_CONFIG_FILE="${arg#--config=}" ;;
+        --config)     _rc_next_is_config=true ;;
+        *.yaml|*.yml) EMU_CONFIG_FILE="$arg" ;;
     esac
 done
+unset _rc_next_is_config
 
 if [ ! -f "$EMU_CONFIG_FILE" ]; then
     echo "ERROR: Config file not found: $EMU_CONFIG_FILE"

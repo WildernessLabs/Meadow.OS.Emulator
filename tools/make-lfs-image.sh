@@ -153,12 +153,8 @@ done
 # Pick the OS (as run.sh does) and its image builder
 # ---------------------------------------------------------------------------
 # read-config.sh and resolve-locations.sh test variables that may be unset,
-# so relax -u around them.  A sourced script sees this script's arguments when
-# given none, and read-config.sh takes any existing file among them as the
-# config (the publish folder's output.bin, say), so clear them first; they
-# have all been parsed above.
+# so relax -u around them
 set +u
-set --
 if [ -n "$CONFIG_ARG" ]; then
     source "$SCRIPT_DIR/scripts/read-config.sh" "$CONFIG_ARG" > /dev/null
 else
