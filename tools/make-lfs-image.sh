@@ -167,10 +167,6 @@ else
     source "$SCRIPT_DIR/scripts/resolve-locations.sh" rebase
 fi
 set -u
-if [ -n "${EMU_RUNTIME:-}" ] && [ -z "$OS_OVERRIDE" ]; then
-    echo "ERROR: run.sh --mount is not supported for build.runtime $EMU_RUNTIME." >&2
-    exit 1
-fi
 
 TOOL_DIR="$SCRIPT_DIR/build/tools"
 if [ "$TARGET_OS" = "legacy" ]; then

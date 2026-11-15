@@ -250,6 +250,11 @@ found...`) entirely — `Legacy/build.sh` now builds Mono itself.
 
 End-to-end test: build, then `./run.sh --legacy` and confirm Renode boots the image.
 
+> **Retired (2026-11-15):** the `legacy-os_modern-dotnet` config, its scripts
+> (`meadow-dotnet10-headless.resc`, `meadow-dotnet10-gdb.resc`) and its wrapper and `run.sh`
+> branches were removed. `configs/legacy-ccm.yaml` (Legacy meadow-3.0, whose `build.sh` builds
+> .NET 10 Mono itself) replaces it. The notes below are kept as history.
+
 **Out of scope / unchanged:** the `.NET 10 Mono` (`legacy-os_modern-dotnet`) runtime path is
 unique to the emulator (built from the separate `runtime/` sibling repo via
 `runtime/src/mono/build-nuttx.sh`) and has no equivalent in `Legacy/build.sh`'s `-m|--mono` flag

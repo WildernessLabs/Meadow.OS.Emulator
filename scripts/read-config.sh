@@ -11,7 +11,7 @@
 #   EMU_BOARD         — F7FeatherV2 | F7CoreComputeV2
 #   EMU_COPROCESSOR   — stub | dual-machine
 #   EMU_DEFCONFIG     — NuttX defconfig name (e.g., mono, meadow)
-#   EMU_RUNTIME       — (empty) | legacy-os_modern-dotnet
+#   EMU_RUNTIME       — (empty); build.runtime is retired (see the check below)
 #   EMU_HCOM_PORT     — HCOM TCP socket port
 #   EMU_MONITOR_PORT  — Renode monitor port
 #   EMU_ESP32CTRL_PORT — ESP32 control channel port
@@ -112,8 +112,13 @@ case "$EMU_COPROCESSOR" in
     *) echo "ERROR: Invalid coprocessor '$EMU_COPROCESSOR' in $EMU_CONFIG_FILE (valid: stub, dual-machine)"; _RC_VALID=false ;;
 esac
 case "$EMU_RUNTIME" in
-    ""|legacy-os_modern-dotnet) ;;
-    *) echo "ERROR: Invalid build.runtime '$EMU_RUNTIME' in $EMU_CONFIG_FILE (valid: (empty), legacy-os_modern-dotnet)"; _RC_VALID=false ;;
+    "") ;;
+    legacy-os_modern-dotnet)
+        echo "ERROR: build.runtime legacy-os_modern-dotnet in $EMU_CONFIG_FILE has been retired."
+        echo "       For .NET 10 Mono on Legacy, use configs/legacy-ccm.yaml (meadow-3.0 builds it"
+        echo "       itself); remove build.runtime from the config."
+        _RC_VALID=false ;;
+    *) echo "ERROR: Invalid build.runtime '$EMU_RUNTIME' in $EMU_CONFIG_FILE (build.runtime is retired; remove it)"; _RC_VALID=false ;;
 esac
 if ! [[ "$EMU_HCOM_PORT" =~ ^[0-9]+$ ]] || [ "$EMU_HCOM_PORT" -lt 1 ] || [ "$EMU_HCOM_PORT" -gt 65535 ]; then
     echo "ERROR: Invalid ports.hcom '$EMU_HCOM_PORT' (must be 1-65535)"; _RC_VALID=false

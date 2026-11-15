@@ -184,9 +184,7 @@ source "$SCRIPT_DIR/scripts/resolve-locations.sh" "$( [ "$LEGACY" = true ] && ec
 
 # Select default script based on config + overrides
 if [ -z "$SCRIPT" ]; then
-    if [ "$EMU_RUNTIME" = "legacy-os_modern-dotnet" ]; then
-        SCRIPT="meadow-dotnet10-headless"
-    elif [ "$LEGACY" = true ] && [ "$ESP32" = true ]; then
+    if [ "$LEGACY" = true ] && [ "$ESP32" = true ]; then
         SCRIPT="meadow-dual"
     elif [ "$LEGACY" = true ]; then
         SCRIPT="meadow-legacy-headless"
@@ -225,24 +223,6 @@ if [ "$LEGACY" = true ]; then
         echo "WARNING: ELF is newer than addresses.resc — regenerating hook addresses..."
         python3 "$SCRIPT_DIR/tools/extract-hook-addresses.py" \
             "$SCRIPT_DIR/build/legacy/nuttx.elf" "$SCRIPT_DIR/build/legacy/nuttx_user.elf"
-    fi
-elif [ "$EMU_RUNTIME" = "legacy-os_modern-dotnet" ]; then
-    if [ ! -f "$SCRIPT_DIR/build/dotnet10/nuttx.bin" ]; then
-        echo "ERROR: nuttx.bin not found in build/dotnet10/"
-        echo "       Run ./build-meadow.os-emulated.sh with configs/legacy-os_modern-dotnet.yaml first"
-        exit 1
-    fi
-    # Check hook addresses are generated and not stale
-    ADDR_FILE="$SCRIPT_DIR/build/dotnet10/addresses.resc"
-    ELF_FILE="$SCRIPT_DIR/build/dotnet10/nuttx.elf"
-    if [ ! -f "$ADDR_FILE" ]; then
-        echo "WARNING: Hook addresses not generated. Extracting now..."
-        python3 "$SCRIPT_DIR/tools/extract-hook-addresses.py" \
-            "$SCRIPT_DIR/build/dotnet10/nuttx.elf" "$SCRIPT_DIR/build/dotnet10/nuttx_user.elf"
-    elif [ -f "$ELF_FILE" ] && [ "$ELF_FILE" -nt "$ADDR_FILE" ]; then
-        echo "WARNING: ELF is newer than addresses.resc — regenerating hook addresses..."
-        python3 "$SCRIPT_DIR/tools/extract-hook-addresses.py" \
-            "$SCRIPT_DIR/build/dotnet10/nuttx.elf" "$SCRIPT_DIR/build/dotnet10/nuttx_user.elf"
     fi
 else
     if [ ! -f "$SCRIPT_DIR/build/nuttx.bin" ]; then
@@ -299,10 +279,7 @@ fi
 # -------------------------------------------------------------------------
 FS_PARTITION_OFFSET=0x500000     # QSPI offset of the file system partition
 FS_PARTITION_SIZE=61865984       # its size ("File System - Size" in the boot log)
-FS_IMAGE_RESC=""                 # set only for the configs whose scripts include it
-if [ "$EMU_RUNTIME" = "legacy-os_modern-dotnet" ]; then
-    :                            # its scripts have no file system include
-elif [ "$LEGACY" = true ]; then
+if [ "$LEGACY" = true ]; then
     FS_IMAGE_RESC="$SCRIPT_DIR/build/legacy/fs-image.resc"
     FS_LFS_MAJOR=1; FS_OS_NAME="Legacy"
 else
@@ -311,10 +288,6 @@ else
 fi
 
 if [ -n "$MOUNT_IMAGE" ]; then
-    if [ -z "$FS_IMAGE_RESC" ]; then
-        echo "ERROR: --mount is not supported for build.runtime legacy-os_modern-dotnet."
-        exit 1
-    fi
     if [ ! -f "$MOUNT_IMAGE" ]; then
         echo "ERROR: --mount image not found: $MOUNT_IMAGE"
         exit 1

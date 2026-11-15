@@ -3,7 +3,7 @@ set -e
 
 SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
 
-# Load config for EMU_OS, EMU_DEFCONFIG, EMU_RUNTIME, etc.
+# Load config for EMU_OS, EMU_DEFCONFIG, etc.
 source "$SCRIPT_DIR/scripts/read-config.sh" "$@" 2>/dev/null || true
 
 # Resolve sibling-repo locations (MEADOW_EMULATOR_OS_DIR, _CLI_DIR, _ESP_DIR, _SAMPLES_DIR)
@@ -16,9 +16,7 @@ MEADOW_SRC_DIR="$MEADOW_EMULATOR_OS_DIR"
 NUTTX_DIR="$MEADOW_SRC_DIR/nuttx"
 
 # Build output directory
-if [ "$EMU_RUNTIME" = "legacy-os_modern-dotnet" ]; then
-    BUILD_DIR="$SCRIPT_DIR/build/dotnet10"
-elif [ "$EMU_OS" = "legacy" ]; then
+if [ "$EMU_OS" = "legacy" ]; then
     BUILD_DIR="$SCRIPT_DIR/build/legacy"
 else
     BUILD_DIR="$SCRIPT_DIR/build"
@@ -71,33 +69,9 @@ if command -v ld.lld &> /dev/null; then
     echo "Linker: $(which ld.lld) — $(ld.lld --version 2>&1 | head -1)"
 fi
 
-# -------------------------------------------------------------------------
-# Mono runtime validation
-# -------------------------------------------------------------------------
-# Legacy no longer needs a manual pre-check — Legacy/build.sh builds Mono
-# itself as part of its normal flow.
-MONO_MAKE_VARS=""
-
-if [ "$EMU_OS" != "legacy" ]; then
-    # Meadow.OS: optionally link .NET 10 mono from ../runtime/
-    if [ "$EMU_RUNTIME" = "legacy-os_modern-dotnet" ]; then
-        RUNTIME_DIR="$SCRIPT_DIR/../runtime"
-        MONO_LIB="$RUNTIME_DIR/src/mono/build-nuttx-debug/mono/mini/libmonosgen-2.0.a"
-        if [ ! -f "$MONO_LIB" ]; then
-            echo "ERROR: .NET 10 Mono runtime library not found at:"
-            echo "       $MONO_LIB"
-            echo ""
-            echo "       Build it first:"
-            echo "         cd $RUNTIME_DIR/src/mono"
-            echo "         ./build-nuttx.sh Debug"
-            exit 1
-        fi
-        echo "--- .NET 10 Mono runtime: $MONO_LIB ($(du -h "$MONO_LIB" | cut -f1)) ---"
-        MONO_MAKE_VARS="MONO_AOBJS=$MONO_LIB"
-    fi
-fi
-
-echo "=== Building NuttX for Renode (os: $EMU_OS, runtime: ${EMU_RUNTIME:-default}) ==="
+# Mono: both OSes' build.sh --emulator build the Mono runtime themselves, so
+# there is nothing to check or link here.
+echo "=== Building NuttX for Renode (os: $EMU_OS) ==="
 
 # -------------------------------------------------------------------------
 # Delegate configure/kconfig-tweaks/version-injection/build to the OS repo's

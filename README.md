@@ -36,7 +36,6 @@ configs for common setups are in `configs/`:
 | `configs/legacy.yaml` | Legacy NuttX | Legacy Mono 6.9 | F7FeatherV2 | Stub (EspcpStub) |
 | `configs/legacy-ccm.yaml` | Legacy NuttX (meadow-3.0, `SupportEmulator` branch) | .NET 10 Mono (built by the OS) | F7CoreComputeV2 | Stub |
 | `configs/meadow-os.yaml` | Meadow.OS rebase | .NET 10 Mono (built by the OS) | F7CoreComputeV2 | Stub |
-| `configs/legacy-os_modern-dotnet.yaml` | Legacy NuttX | .NET 10 Mono | F7FeatherV2 | Stub |
 
 Switch configurations:
 ```bash
@@ -46,19 +45,14 @@ cp configs/meadow-os.yaml emulator.config.yaml    # Switch to Meadow.OS rebase
 ./run.sh --config configs/legacy.yaml              # One-off override
 ```
 
-### Building for .NET 10 Mono
+### .NET 10 Mono
 
-The `legacy-os_modern-dotnet` config builds from the same legacy NuttX source but outputs
-to `build/dotnet10/` and launches the `.NET 10` Renode script with monovm hosting API support:
-
-```bash
-./build-meadow.os-emulated.sh --config configs/legacy-os_modern-dotnet.yaml
-./run.sh --config configs/legacy-os_modern-dotnet.yaml
-```
-
-This requires the `runtime/` sibling repo with the .NET 10 Mono runtime built for NuttX
-(`runtime/src/mono/build-nuttx.sh`). The NuttX firmware itself is identical to the legacy
-build — the .NET 10 runtime swap happens via the Renode script.
+`configs/legacy-ccm.yaml` (Legacy meadow-3.0) and `configs/meadow-os.yaml` both
+run .NET 10 Mono, which each OS's `build.sh --emulator` builds from the `runtime/`
+sibling repo.  The older `legacy-os_modern-dotnet` config, which tried to link a
+separately built .NET 10 Mono into the old Legacy firmware, has been retired; a
+config that still sets `build.runtime` is refused with a pointer to
+`legacy-ccm.yaml`.
 
 Each config has commented-out alternatives for every setting:
 ```yaml
@@ -299,7 +293,7 @@ wilderness_labs/
 ├── Meadow.OS.Emulator/    # This repo
 ├── Meadow/                # Legacy NuttX-based Meadow OS (STM32 firmware source)
 ├── Meadow.OS/             # New Meadow.OS rebase (updated NuttX, unreleased)
-├── runtime/               # .NET 10 Mono runtime (for legacy-os_modern-dotnet config)
+├── runtime/               # .NET 10 Mono runtime (built by Legacy meadow-3.0 and Meadow.OS)
 ├── Meadow-ESP32/          # ESP32 firmware source (for --esp32 mode, ESP-IDF 4.2.4)
 ├── Meadow.CLI/            # Optional: only to work on the CLI (use the 3.0.3+ global tool)
 ├── Meadow.Samples/        # Sample apps (Blinky, etc.)
@@ -342,8 +336,7 @@ bash build.sh --host-arch aarch64    # Apple Silicon
 ```
 Meadow.OS.Emulator/
 ├── build/legacy/             # Build output (legacy OS)
-├── build/dotnet10/           # Build output (.NET 10 mono)
-├── build-meadow.os-emulated.sh  # Builds NuttX firmware (supports legacy, meadow-os, dotnet10)
+├── build-meadow.os-emulated.sh  # Builds NuttX firmware (legacy, meadow-os)
 ├── run.sh                    # Launches Renode (--legacy, --esp32 flags)
 ├── platforms/
 │   ├── stm32f777.repl        # STM32F777 chip-level platform
@@ -383,10 +376,10 @@ Meadow.OS.Emulator/
 ./build-meadow.os-emulated.sh                                          # Build using emulator.config.yaml
 ./build-meadow.os-emulated.sh --config configs/legacy.yaml             # Build legacy OS
 ./build-meadow.os-emulated.sh --config configs/meadow-os.yaml          # Build Meadow.OS rebase
-./build-meadow.os-emulated.sh --config configs/legacy-os_modern-dotnet.yaml  # Build for .NET 10
+./build-meadow.os-emulated.sh --config configs/legacy-ccm.yaml         # Build Legacy meadow-3.0 (CCM)
 ```
 
-The build script reads `EMU_OS` from the config to select the source tree (`Meadow/` for legacy, `Meadow.OS/` for rebase), delegates the build to that tree's `build.sh --emulator` (which applies the emulator-specific kconfig tweaks), splits the images for Renode and extracts hook addresses. Output directories: `build/legacy/`, `build/`, or `build/dotnet10/`.
+The build script reads `EMU_OS` from the config to select the source tree (`Meadow/` for legacy, `Meadow.OS/` for rebase), delegates the build to that tree's `build.sh --emulator` (which applies the emulator-specific kconfig tweaks), splits the images for Renode and extracts hook addresses. Output directories: `build/legacy/` or `build/`.
 
 ### ESP32 — required only for `--esp32` mode
 
