@@ -377,6 +377,7 @@ Meadow.OS.Emulator/
 ./build-meadow.os-emulated.sh --config configs/legacy.yaml             # Build legacy OS
 ./build-meadow.os-emulated.sh --config configs/meadow-os.yaml          # Build Meadow.OS rebase
 ./build-meadow.os-emulated.sh --config configs/legacy-ccm.yaml         # Build Legacy meadow-3.0 (CCM)
+./build-meadow.os-emulated.sh --config configs/meadow-os.yaml --clean  # Clean rebuild (passes --clean to the OS build.sh)
 ```
 
 The build script reads `EMU_OS` from the config to select the source tree (`Meadow/` for legacy, `Meadow.OS/` for rebase), delegates the build to that tree's `build.sh --emulator` (which applies the emulator-specific kconfig tweaks), splits the images for Renode and extracts hook addresses. Output directories: `build/legacy/` or `build/`.

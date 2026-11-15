@@ -3,6 +3,17 @@ set -e
 
 SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
 
+# --clean (or -c) is passed on to the OS repo's build.sh, which then rebuilds
+# from scratch.  Needed when the configuration changes under existing objects,
+# for example after a kconfig-tweak fix.  Any other argument is left for
+# read-config.sh (--config FILE).
+OS_BUILD_ARGS=""
+for arg in "$@"; do
+    case "$arg" in
+        -c|--clean) OS_BUILD_ARGS="--clean" ;;
+    esac
+done
+
 # Load config for EMU_OS, EMU_DEFCONFIG, etc.  Stop if it is missing or invalid
 # (read-config.sh prints why); building anyway would use whatever it had set.
 if ! source "$SCRIPT_DIR/scripts/read-config.sh" "$@"; then
@@ -89,8 +100,8 @@ if ! grep -q -- '--emulator' "$MEADOW_SRC_DIR/build.sh"; then
     exit 1
 fi
 
-echo "--- Delegating build to $MEADOW_SRC_DIR/build.sh --emulator ---"
-(cd "$MEADOW_SRC_DIR" && bash build.sh --emulator)
+echo "--- Delegating build to $MEADOW_SRC_DIR/build.sh --emulator $OS_BUILD_ARGS ---"
+(cd "$MEADOW_SRC_DIR" && bash build.sh --emulator $OS_BUILD_ARGS)
 
 # -------------------------------------------------------------------------
 # Copy artifacts
