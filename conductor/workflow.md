@@ -31,19 +31,19 @@ python3 tools/hcom_test.py
 Full end-to-end test using the real Meadow.CLI over the emulated HCOM socket.
 
 **Prerequisites:**
-- Meadow.CLI repo: `../Meadow.CLI` (branch `feature/TCP_Socket_Connection_for_EMU`)
-- Must be built from source until SocketConnection is published to NuGet
-- Build: `dotnet build Source/Meadow.CLI.sln`
+- Meadow.CLI 3.0.3 or later, the dotnet global tool (socket routes are in the
+  release from 3.0.3): `dotnet tool install -g WildernessLabs.Meadow.CLI`, or
+  `dotnet tool update -g WildernessLabs.Meadow.CLI`; `./setup.sh` does this
 
 ```bash
 # Start emulator (if not already running)
 ./run.sh --legacy &
 
 # Configure CLI to use emulator socket
-dotnet run --project ../Meadow.CLI/Source/Meadow.CLI -- config route socket://localhost:4242
+meadow config route socket://localhost:4242
 
 # Get device info
-dotnet run --project ../Meadow.CLI/Source/Meadow.CLI -- device info
+meadow device info
 ```
 
 **Pass criteria:** Output shows correct OSVersion, Hardware (F7FeatherV2), DeviceName (MeadowF7).
@@ -69,7 +69,7 @@ filesystem, and app lifecycle work end-to-end.
 cd "../Meadow.Samples/Source/Meadow F7/Blinky/BlinkyCS"
 
 # Build, trim, deploy, and run in one command:
-dotnet run --project /path/to/Meadow.CLI/Source/Meadow.CLI -- app run
+meadow app run
 
 # This will:
 # 1. Build the project (Release config)
@@ -128,7 +128,7 @@ persistence, W.10). Tier 3 becomes fully viable when BCL path is fixed.
 
 | Tool | Location | Branch | Notes |
 |------|----------|--------|-------|
-| Meadow.CLI | `../Meadow.CLI` | `feature/TCP_Socket_Connection_for_EMU` | Build from source; SocketConnection not yet on NuGet. Will merge to main eventually. |
+| Meadow.CLI | dotnet global tool | release 3.0.3+ | `dotnet tool install -g WildernessLabs.Meadow.CLI`; socket routes are in the release from 3.0.3. A `../Meadow.CLI` checkout is only needed to work on the CLI. |
 | Meadow.Samples | `../Meadow.Samples` | main | BlinkyCS at `Source/Meadow F7/Blinky/BlinkyCS/` |
 | Renode (fork) | `../renode` | `meadow-emulator-fixes` | Must be built; `./run.sh` auto-detects |
 | ARM GCC 10.3 | `/Applications/ARM/bin` | - | Required for legacy firmware builds only |

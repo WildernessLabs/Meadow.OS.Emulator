@@ -163,6 +163,38 @@ else
     fi
 fi
 
+# Meadow.CLI, the dotnet global tool.  The emulator's HCOM link is a TCP
+# socket (socket://localhost:4242); released Meadow.CLI supports socket routes
+# from 3.0.3, so no source build is needed.
+MEADOW_CLI_MIN="3.0.3"
+version_lt() {   # true if $1 is an older version than $2
+    [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]
+}
+if command -v dotnet &> /dev/null; then
+    MEADOW_CLI_VER=$(dotnet tool list -g 2>/dev/null \
+        | awk 'tolower($1) == "wildernesslabs.meadow.cli" { print $2 }')
+    if [ -z "$MEADOW_CLI_VER" ]; then
+        echo "  Installing Meadow.CLI (dotnet global tool)..."
+        if execute_command "dotnet tool install -g WildernessLabs.Meadow.CLI"; then
+            added "Meadow.CLI"
+        else
+            fail "Meadow.CLI — dotnet tool install -g WildernessLabs.Meadow.CLI failed"
+        fi
+    elif version_lt "$MEADOW_CLI_VER" "$MEADOW_CLI_MIN"; then
+        echo "  Updating Meadow.CLI $MEADOW_CLI_VER (socket:// routes need $MEADOW_CLI_MIN or later)..."
+        if execute_command "dotnet tool update -g WildernessLabs.Meadow.CLI"; then
+            added "Meadow.CLI (updated from $MEADOW_CLI_VER)"
+        else
+            fail "Meadow.CLI $MEADOW_CLI_VER — $MEADOW_CLI_MIN or later needed; dotnet tool update -g WildernessLabs.Meadow.CLI failed"
+        fi
+    else
+        ok "Meadow.CLI $MEADOW_CLI_VER"
+    fi
+    if ! command -v meadow &> /dev/null && [ "$DRYRUN" != true ]; then
+        warn "meadow is not on PATH — add ~/.dotnet/tools to PATH"
+    fi
+fi
+
 # ============================================================
 # 4. Sibling repos
 # ============================================================
@@ -193,7 +225,8 @@ check_repo() {
 }
 
 check_repo "$(basename "$MEADOW_DIR")" "$MEADOW_DIR"
-check_repo "Meadow.CLI" "$MEADOW_EMULATOR_CLI_DIR" "feature/TCP_Socket_Connection_for_EMU"
+# Meadow.CLI comes from the dotnet global tool (above); a source checkout in
+# $MEADOW_EMULATOR_CLI_DIR is only needed to work on the CLI itself.
 check_repo "Meadow.Samples" "$MEADOW_EMULATOR_SAMPLES_DIR"
 
 # ============================================================

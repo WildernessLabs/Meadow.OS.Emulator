@@ -21,10 +21,9 @@ The legacy Meadow firmware boots with Mono JIT, loads .NET assemblies from Littl
 ./run.sh                                   # Start emulator (uses emulator.config.yaml)
 ```
 
-Connect Meadow.CLI (requires building from source — see [Using Meadow.CLI](#using-meadowcli)):
+Connect Meadow.CLI (release 3.0.3 or later; see [Using Meadow.CLI](#using-meadowcli)):
 ```bash
-dotnet run --project ../Meadow.CLI/Source/Meadow.CLI -- config route socket://localhost:4242
-dotnet run --project ../Meadow.CLI/Source/Meadow.CLI -- device info
+meadow device info -s socket://localhost:4242
 ```
 
 ## Configuration
@@ -186,36 +185,47 @@ Key C# peripherals:
 
 ## Using Meadow.CLI
 
-The emulator connects via TCP socket instead of USB serial. Socket routes (`socket://host:port`) are supported by the Meadow.CLI `meadow-3.0` branch (merged from `feature/TCP_Socket_Connection_for_EMU` in PR #649; that branch no longer exists) and by 3.0.x releases built from it. The `../Meadow.CLI` path below is the default; override it with `MEADOW_EMULATOR_CLI_DIR` (and `../Meadow.Samples` with `MEADOW_EMULATOR_SAMPLES_DIR`):
+The emulator connects via TCP socket instead of USB serial: Renode exposes the
+HCOM UART as `socket://localhost:4242`.  Released Meadow.CLI supports socket
+routes from **3.0.3**, so the normal global tool works; no source build is
+needed.  `./setup.sh` installs it, or updates an older one.
 
 ```bash
-# Build the CLI from source (one-time setup):
-cd ../Meadow.CLI
-git checkout meadow-3.0
-dotnet build Source/Meadow.CLI/Meadow.CLI.csproj -c Release
-# -> Source/Meadow.CLI/bin/Release/meadow.dll
+# Install, or update to the latest release (3.0.3 or later):
+dotnet tool install -g WildernessLabs.Meadow.CLI
+dotnet tool update -g WildernessLabs.Meadow.CLI
+meadow --version                                  # 3.0.3 or later
 
 # Either pass the route on each command (leaves the saved route for a real board alone):
-dotnet Source/Meadow.CLI/bin/Release/meadow.dll device info -s socket://localhost:4242
+meadow device info -s socket://localhost:4242
 
 # or save it as the default route (persists across sessions):
-dotnet Source/Meadow.CLI/bin/Release/meadow.dll config route socket://localhost:4242
+meadow config route socket://localhost:4242
 ```
 
-Then with the emulator running:
+Then with the emulator running (add `-s socket://localhost:4242` unless the
+route is saved):
 ```bash
 # Device info
-dotnet run --project ../Meadow.CLI/Source/Meadow.CLI -- device info
+meadow device info
 
 # Deploy and run an app (builds, trims, deploys, enables Mono)
 cd "../Meadow.Samples/Source/Meadow F7/Blinky/BlinkyCS"
-dotnet run --project /path/to/Meadow.CLI/Source/Meadow.CLI -- app run
+meadow app run
 
 # Deploy a single file
-dotnet run --project ../Meadow.CLI/Source/Meadow.CLI -- file write -f path/to/file.dll
+meadow file write -f path/to/file.dll
+
+# Watch the app's output (for example after booting with run.sh --mount)
+meadow listen
 ```
 
-> **Important:** A globally installed `meadow` tool supports socket connections only if it is a 3.0.x build that includes PR #649 (`meadow --version` shows the commit; `meadow-3.0` has it). Older (2.x) tools do not. The `SocketConnection` class handles raw HCOM/COBS over TCP, which is how Renode exposes the UART.
+> **Note:** Older tools (2.x, and 3.0.x before 3.0.3) do not know `socket://`
+> routes. The `SocketConnection` class (Meadow.CLI PR #649) handles raw
+> HCOM/COBS over TCP, which is how Renode exposes the UART. To work on the CLI
+> itself, build it from a `../Meadow.CLI` checkout (override the path with
+> `MEADOW_EMULATOR_CLI_DIR`) and run it with
+> `dotnet run --project ../Meadow.CLI/Source/Meadow.CLI -- <args>`.
 
 ### App Deployment
 
@@ -277,6 +287,7 @@ cd ../Rebase && MEADOW_RUNTIME_DIR=../runtime MEADOW_CORE_DIR=<meadow-3.0>/Meado
 The `setup.sh` script handles all of this automatically. For manual setup:
 
 - **.NET SDK 8.0+** — `dotnet` must be on PATH
+- **Meadow.CLI 3.0.3+** — `dotnet tool install -g WildernessLabs.Meadow.CLI` (socket routes for the emulator)
 - **ARM toolchain** — `arm-none-eabi-gcc` (install via `brew install --cask gcc-arm-embedded`)
 - **GNU Make 4.x+** — macOS ships Make 3.81; install `gmake` via `brew install make`
 
@@ -289,7 +300,7 @@ wilderness_labs/
 ├── Meadow.OS/             # New Meadow.OS rebase (updated NuttX, unreleased)
 ├── runtime/               # .NET 10 Mono runtime (for legacy-os_modern-dotnet config)
 ├── Meadow-ESP32/          # ESP32 firmware source (for --esp32 mode, ESP-IDF 4.2.4)
-├── Meadow.CLI/            # Branch: meadow-3.0 (build from source; socket:// support)
+├── Meadow.CLI/            # Optional: only to work on the CLI (use the 3.0.3+ global tool)
 ├── Meadow.Samples/        # Sample apps (Blinky, etc.)
 └── renode/                # WildernessLabs/renode fork (branch: meadow-emulator-fixes)
 ```
