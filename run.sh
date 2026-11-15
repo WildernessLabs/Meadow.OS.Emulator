@@ -91,11 +91,19 @@ POSITIONAL_ARGS=()
 MOUNT_IMAGE=""   # --mount=FILE: LittleFS image for the QSPI file system (default: none)
 GDB_PORT="${EMU_GDB_PORT:-0}"   # ports.gdb in the config; --gdb / --gdb=PORT override (0 = off)
 
+# The removed '--legacy DIR' / '--rebase DIR' form: an existing directory after
+# the flag that is not a script.  A script name after the flag is fine
+# (./run.sh --legacy meadow-legacy).
+is_removed_os_dir_arg() {
+    [[ -n "$1" && "$1" != -* && -d "$1" && "$1" != *.resc \
+       && ! -f "$SCRIPT_DIR/scripts/$1.resc" ]]
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --legacy)
             LEGACY=true
-            if [[ -n "$2" && ! "$2" == -* ]]; then
+            if is_removed_os_dir_arg "$2"; then
                 echo "ERROR: '--legacy DIR' no longer accepts a directory argument."
                 echo "       Set MEADOW_EMULATOR_OS_DIR=DIR instead (see README)."
                 exit 1
@@ -103,7 +111,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --rebase)
             LEGACY=false
-            if [[ -n "$2" && ! "$2" == -* ]]; then
+            if is_removed_os_dir_arg "$2"; then
                 echo "ERROR: '--rebase DIR' no longer accepts a directory argument."
                 echo "       Set MEADOW_EMULATOR_OS_DIR=DIR instead (see README)."
                 exit 1
