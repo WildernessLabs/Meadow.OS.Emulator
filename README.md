@@ -83,7 +83,7 @@ CLI args override config values: `--legacy`, `--esp32`, `--port=N`.
 ./run.sh --port=5555                       # Custom monitor port
 ./run.sh --rebase --mount=app.bin           # Boot with a file system image (tools/make-lfs-image.sh)
 ./run.sh --gdb                             # GDB server on port 3333; the CPU waits at reset
-./run.sh meadow-legacy-debug               # Specific script from scripts/
+./run.sh --legacy meadow-legacy            # Specific script from scripts/
 ./run.sh --help                            # Show all options
 ```
 
@@ -367,7 +367,6 @@ Meadow.OS.Emulator/
 │   ├── meadow-dual.resc            # Dual-machine: STM32 + ESP32
 │   ├── meadow-legacy-headless.resc # Legacy OS — headless (recommended)
 │   ├── meadow-legacy.resc          # Legacy OS — interactive
-│   ├── meadow-legacy-debug.resc    # Legacy OS — without the UART RX bypass or reset macro
 │   ├── esp32-meadow-boot-no-retw-hooks.resc  # ESP32-only boot test
 │   └── ...
 ├── roms/                     # ESP32 ROM binary (not redistributable)
@@ -416,7 +415,7 @@ arm-none-eabi-gdb build/nuttx.elf
 ```
 
 - Works with `meadow-os.resc` and the single-machine Legacy scripts
-  (`meadow-legacy-headless`, `meadow-legacy`, `meadow-legacy-debug`), which
+  (`meadow-legacy-headless`, `meadow-legacy`), which
   include the `gdb.resc` that `run.sh` writes on every run.  `run.sh` refuses
   `--gdb` for scripts without it, such as `meadow-dual`.
 - After a `detach` the firmware carries on as normal (Meadow.CLI answers).
