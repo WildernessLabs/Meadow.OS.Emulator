@@ -37,12 +37,11 @@ sysbus LoadBinary @build/legacy/nuttx_kernel.bin 0x08140000
 sysbus LoadBinary @build/legacy/nuttx_mono.bin 0x90000000
 sysbus LoadBinary @build/legacy/nuttx_mono.bin 0xC0000000
 
-# LittleFS filesystem image — pre-populated with Mono BCL assemblies
-# File System partition starts at QSPI offset 0x500000 (see UART: "File System - Offset:0x00500000")
-# Built by: tools/build_lfs_v1_image (LFS v1.7.2 format, compatible with legacy firmware)
-# BCL assemblies go to /mono/4.5/ (where Mono's corlib loader expects them).
-# App assemblies are deployed on top via Meadow CLI.
-# sysbus LoadBinary @build/legacy/littlefs.bin 0x90500000
+# LittleFS file system image: run.sh --mount=FILE (default none, the firmware
+# formats an empty partition).  run.sh writes build/legacy/fs-image.resc on
+# every run.  Load it once here, never in the reset macro, or a reset would
+# overwrite files deployed by Meadow.CLI.
+include @build/legacy/fs-image.resc
 
 sysbus.cpu VectorTableOffset 0x08040000
 

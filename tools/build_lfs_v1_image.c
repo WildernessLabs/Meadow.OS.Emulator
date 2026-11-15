@@ -12,7 +12,9 @@
 #define FS_BLOCK_SIZE   4096
 #define FS_READ_SIZE    256
 #define FS_PROG_SIZE    256
-#define FS_BLOCK_COUNT  14336
+/* The firmware's file system partition: 61865984 bytes from QSPI offset
+ * 0x500000 ("File System - Size" in the boot log) = 15104 blocks. */
+#define FS_BLOCK_COUNT  15104
 
 static uint8_t *flash_image;
 
@@ -159,19 +161,30 @@ int main(int argc, char *argv[]) {
         printf("  %d app files (%zu KB)\n\n", app_count, app_size / 1024);
     }
 
-    /* Write meadow.config.yaml at filesystem root */
+    /* Write a default meadow.config.yaml at the file system root, but only if
+     * the app files did not supply one: an app's own config (for example a
+     * Meadow.CLI publish output) must be kept as it is.  The file is opened
+     * with LFS_O_TRUNC so that it never leaves the tail of a longer file. */
     static const char config_yaml[] =
         "MonoControl:\n"
         "    Options: --interp\n";
 
     lfs_file_t cfgfile;
-    err = lfs_file_open(&lfs, &cfgfile, "meadow.config.yaml", LFS_O_WRONLY | LFS_O_CREAT);
-    if (err) {
-        fprintf(stderr, "ERROR: open meadow.config.yaml failed: %d\n", err);
-    } else {
-        lfs_file_write(&lfs, &cfgfile, config_yaml, strlen(config_yaml));
+    if (lfs_file_open(&lfs, &cfgfile, "meadow.config.yaml", LFS_O_RDONLY) == 0) {
+        printf("  meadow.config.yaml: kept the app's own (%ld bytes)\n",
+               (long)lfs_file_size(&lfs, &cfgfile));
         lfs_file_close(&lfs, &cfgfile);
-        printf("  meadow.config.yaml: %zu bytes (MonoControl: --interp)\n", strlen(config_yaml));
+    } else {
+        err = lfs_file_open(&lfs, &cfgfile, "meadow.config.yaml",
+                            LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+        if (err) {
+            fprintf(stderr, "ERROR: open meadow.config.yaml failed: %d\n", err);
+        } else {
+            lfs_file_write(&lfs, &cfgfile, config_yaml, strlen(config_yaml));
+            lfs_file_close(&lfs, &cfgfile);
+            printf("  meadow.config.yaml: %zu bytes (default, MonoControl: --interp)\n",
+                   strlen(config_yaml));
+        }
     }
 
     lfs_unmount(&lfs);

@@ -79,9 +79,10 @@ CLI args override config values: `--legacy`, `--esp32`, `--port=N`.
 
 ```bash
 ./run.sh                                   # Uses emulator.config.yaml
-./run.sh --config configs/meadow-os.yaml   # One-off config override
+./run.sh --config=configs/meadow-os.yaml   # One-off config override (note the '=')
 ./run.sh --legacy --esp32                  # CLI overrides (dual-machine mode)
 ./run.sh --port=5555                       # Custom monitor port
+./run.sh --config=configs/legacy-ccm.yaml --mount=app.bin   # Legacy: boot with a file system image
 ./run.sh meadow-legacy-debug              # Specific script (GDB mode, port 3333)
 ./run.sh --help                            # Show all options
 ```
@@ -96,6 +97,37 @@ HCOM:    socket://localhost:4242
 ESP32:   dual-machine mode (real coprocessor)
          meadow config route socket://localhost:4242
 ```
+
+### Booting with a pre-built file system (Legacy)
+
+The emulated QSPI flash starts empty on every Renode start, so an app normally
+has to be deployed with Meadow.CLI each time.  For the Legacy OS an app can
+instead be baked into a LittleFS image of the file system partition and loaded
+at boot, with no deploy:
+
+```bash
+# Build the app once (creates its publish folder), then make the image
+tools/make-lfs-image.sh <app>/bin/Release/net10.0/publish app.bin
+
+# Boot with it; Mono starts the app straight away.  Watch its output with:
+./run.sh --config=configs/legacy-ccm.yaml --mount=app.bin
+meadow listen -s socket://localhost:4242
+```
+
+- `tools/make-lfs-image.sh` takes the same files Meadow.CLI's deploy would
+  (managed assemblies and config files; no native host files, `.pdb` or XML docs
+  unless `--pdbs` / `--xmldocs`), puts them at the root of `/meadow0`, and builds
+  `tools/build_lfs_v1_image.c` into `build/tools/` on first use against the Legacy
+  checkout's LittleFS v1 sources.  `--list` shows the files without building.
+- `run.sh --mount` refuses an image the firmware would not mount (larger than
+  the partition, no LittleFS superblock, or LittleFS v2).  Without `--mount` the
+  flash starts empty as before.  The image is loaded once before the machine
+  starts, never on a reset, so a later Meadow.CLI deploy is not overwritten.
+- Legacy only: Meadow.OS (Rebase) uses LittleFS v2, which this builder does not
+  write.
+- Example: Rebase's `tests/managed/MiniTests` from an image runs to
+  `TESTRUN END` in about 90 s from Renode start (733 ran, 2 skipped, 1 known
+  failure), against a few minutes with a Meadow.CLI deploy.
 
 ## ESP32 Coprocessor (Dual-Machine Mode)
 
