@@ -49,6 +49,12 @@ macro reset
 """
 runMacro $reset
 
+# LittleFS v2 file system image: run.sh --mount=FILE (default none, the firmware
+# formats an empty partition).  run.sh writes build/fs-image.resc on every run.
+# Load it once here, never in the reset macro, or a reset would overwrite files
+# deployed by Meadow.CLI.
+include @build/fs-image.resc
+
 # USART1: Console/syslog output to file (debug.console_log in configs/meadow-os.yaml)
 usart1 CreateFileBackend @/tmp/renode-uart-meadow.txt true
 

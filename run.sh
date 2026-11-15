@@ -117,9 +117,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --rebase        Override OS to meadow-os (same as os: meadow-os in config)"
             echo "  --esp32         Override coprocessor to dual-machine"
             echo "  --port=N        Override Renode monitor port"
-            echo "  --mount=FILE    Legacy only: boot with FILE (a LittleFS v1 image) in the QSPI"
-            echo "                  file system partition (0x500000).  Default: none, the flash"
-            echo "                  starts empty and the firmware formats it."
+            echo "  --mount=FILE    Boot with FILE, a LittleFS image (tools/make-lfs-image.sh), in the"
+            echo "                  QSPI file system partition (0x500000): LittleFS v1 for Legacy, v2"
+            echo "                  for Meadow.OS.  Default: none, the flash starts empty and the"
+            echo "                  firmware formats it."
             echo ""
             echo "Override sibling-repo locations with MEADOW_EMULATOR_OS_DIR,"
             echo "MEADOW_EMULATOR_CLI_DIR, MEADOW_EMULATOR_ESP_DIR, MEADOW_EMULATOR_SAMPLES_DIR"
@@ -253,22 +254,33 @@ if [ "$ESP32" = true ]; then
 fi
 
 # -------------------------------------------------------------------------
-# --mount: LittleFS image for the QSPI file system partition (Legacy only)
+# --mount: LittleFS image for the QSPI file system partition
 #
-# The Legacy scripts include build/legacy/fs-image.resc where they used to
-# load littlefs.bin.  It is regenerated on every run: a LoadBinary of the
+# Legacy and Meadow.OS both mount the partition at QSPI offset 0x500000 as
+# /meadow0, but in different LittleFS on-disk versions: Legacy v1, Meadow.OS v2.
+# Their scripts include a generated fs-image.resc (build/legacy/ for Legacy,
+# build/ for Meadow.OS) that is rewritten on every run: a LoadBinary of the
 # --mount image, or only a comment, so without --mount the flash starts empty
 # and the firmware formats it, as before.  The scripts load it once before
 # `start`, never in the reset macro, so a reset (for example the one before a
 # Meadow.CLI deploy) does not overwrite deployed files.
 # -------------------------------------------------------------------------
-FS_IMAGE_RESC="$SCRIPT_DIR/build/legacy/fs-image.resc"
 FS_PARTITION_OFFSET=0x500000     # QSPI offset of the file system partition
 FS_PARTITION_SIZE=61865984       # its size ("File System - Size" in the boot log)
+FS_IMAGE_RESC=""                 # set only for the configs whose scripts include it
+if [ "$EMU_RUNTIME" = "legacy-os_modern-dotnet" ]; then
+    :                            # its scripts have no file system include
+elif [ "$LEGACY" = true ]; then
+    FS_IMAGE_RESC="$SCRIPT_DIR/build/legacy/fs-image.resc"
+    FS_LFS_MAJOR=1; FS_OS_NAME="Legacy"
+else
+    FS_IMAGE_RESC="$SCRIPT_DIR/build/fs-image.resc"
+    FS_LFS_MAJOR=2; FS_OS_NAME="Meadow.OS"
+fi
 
 if [ -n "$MOUNT_IMAGE" ]; then
-    if [ "$LEGACY" != true ] || [ "$EMU_RUNTIME" = "legacy-os_modern-dotnet" ]; then
-        echo "ERROR: --mount is only supported for the Legacy OS (os: legacy, no build.runtime)."
+    if [ -z "$FS_IMAGE_RESC" ]; then
+        echo "ERROR: --mount is not supported for build.runtime legacy-os_modern-dotnet."
         exit 1
     fi
     if [ ! -f "$MOUNT_IMAGE" ]; then
@@ -280,10 +292,10 @@ if [ -n "$MOUNT_IMAGE" ]; then
 
     # Refuse an image the firmware would not mount (it would format over it
     # silently): too big for the partition, no LittleFS superblock, or not the
-    # on-disk version Legacy uses (LittleFS v1).
-    if ! python3 - "$MOUNT_IMAGE" "$FS_PARTITION_SIZE" <<'PYEOF'
+    # on-disk version this OS uses.
+    if ! python3 - "$MOUNT_IMAGE" "$FS_PARTITION_SIZE" "$FS_LFS_MAJOR" "$FS_OS_NAME" <<'PYEOF'
 import os, sys
-path, part_size = sys.argv[1], int(sys.argv[2])
+path, part_size, want, os_name = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 size = os.path.getsize(path)
 if size > part_size:
     sys.exit(f"ERROR: --mount image is {size} bytes, larger than the {part_size} byte partition.")
@@ -295,19 +307,20 @@ if pos < 0:
 # LittleFS v1 stores the version just before the magic; v2 after it (past a tag).
 v1 = int.from_bytes(head[pos - 4:pos], "little") if pos >= 4 else 0
 v2 = int.from_bytes(head[pos + 12:pos + 16], "little")
-if (v1 >> 16) == 1:
-    print(f"--mount image: LittleFS v{v1 >> 16}.{v1 & 0xffff}, {size} bytes")
-elif (v2 >> 16) == 2:
-    sys.exit(f"ERROR: --mount image is LittleFS v{v2 >> 16}.{v2 & 0xffff}; Legacy needs LittleFS v1.")
-else:
+found = v1 if (v1 >> 16) == 1 else v2 if (v2 >> 16) == 2 else None
+if found is None:
     sys.exit("ERROR: --mount image: cannot read the LittleFS version.")
+if (found >> 16) != want:
+    sys.exit(f"ERROR: --mount image is LittleFS v{found >> 16}.{found & 0xffff}; "
+             f"{os_name} needs LittleFS v{want} (tools/make-lfs-image.sh builds the right one).")
+print(f"--mount image: LittleFS v{found >> 16}.{found & 0xffff}, {size} bytes")
 PYEOF
     then
         exit 1
     fi
 fi
 
-if [ "$LEGACY" = true ]; then
+if [ -n "$FS_IMAGE_RESC" ]; then
     mkdir -p "$(dirname "$FS_IMAGE_RESC")"
     if [ -n "$MOUNT_IMAGE" ]; then
         printf '# Generated by run.sh --mount\nsysbus LoadBinary @%s %#x\n' \
@@ -320,7 +333,7 @@ fi
 echo "=== Starting Renode with $SCRIPT ==="
 echo "Monitor: telnet localhost $MONITOR_PORT"
 echo "HCOM:    socket://localhost:4242"
-if [ "$LEGACY" = true ]; then
+if [ -n "$FS_IMAGE_RESC" ]; then
     echo "FS:      ${MOUNT_IMAGE:-empty (firmware formats it)}"
 fi
 if [ "$ESP32" = true ]; then
