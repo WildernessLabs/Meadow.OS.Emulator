@@ -55,6 +55,10 @@ runMacro $reset
 # deployed by Meadow.CLI.
 include @build/fs-image.resc
 
+# GDB server: run.sh --gdb[=PORT] or ports.gdb in the config (default off).
+# run.sh writes this file on every run.
+include @build/gdb.resc
+
 # USART1: Console/syslog output to file (debug.console_log in configs/meadow-os.yaml)
 usart1 CreateFileBackend @/tmp/renode-uart-meadow.txt true
 
@@ -66,9 +70,6 @@ connector Connect sysbus.uart4 hcom
 # UART5: ESP32 control signal channel — exposed as TCP socket on port 4243
 emulation CreateServerSocketTerminal 4243 "esp32ctrl" false
 connector Connect sysbus.uart5 esp32ctrl
-
-# GDB server on port 3333 (uncomment to enable)
-# machine StartGdbServer 3333
 
 # =============================================================================
 # Hook definitions (auto-generated with resolved addresses)

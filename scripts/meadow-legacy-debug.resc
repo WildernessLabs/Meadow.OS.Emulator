@@ -35,6 +35,10 @@ sysbus LoadBinary @build/legacy/nuttx_mono.bin 0xC0000000
 # overwrite files deployed by Meadow.CLI.
 include @build/legacy/fs-image.resc
 
+# GDB server: run.sh --gdb[=PORT] or ports.gdb in the config (default off).
+# run.sh writes this file on every run.
+include @build/legacy/gdb.resc
+
 sysbus.cpu VectorTableOffset 0x08040000
 
 # USART1: Console/syslog output to file

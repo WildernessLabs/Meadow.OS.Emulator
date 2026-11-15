@@ -82,7 +82,8 @@ CLI args override config values: `--legacy`, `--esp32`, `--port=N`.
 ./run.sh --legacy --esp32                  # CLI overrides (dual-machine mode)
 ./run.sh --port=5555                       # Custom monitor port
 ./run.sh --rebase --mount=app.bin           # Boot with a file system image (tools/make-lfs-image.sh)
-./run.sh meadow-legacy-debug              # Specific script (GDB mode, port 3333)
+./run.sh --gdb                             # GDB server on port 3333; the CPU waits at reset
+./run.sh meadow-legacy-debug               # Specific script from scripts/
 ./run.sh --help                            # Show all options
 ```
 
@@ -362,10 +363,11 @@ Meadow.OS.Emulator/
 │   ├── MqReceiveIntercept.cs # ESPCP mq_receive interception
 │   └── UartRxBypass.cs       # UART RX bypass for fast file deploy (HACK — see §8.6)
 ├── scripts/
+│   ├── meadow-os.resc              # Meadow.OS (Rebase)
 │   ├── meadow-dual.resc            # Dual-machine: STM32 + ESP32
 │   ├── meadow-legacy-headless.resc # Legacy OS — headless (recommended)
 │   ├── meadow-legacy.resc          # Legacy OS — interactive
-│   ├── meadow-legacy-debug.resc    # Legacy OS — with GDB server
+│   ├── meadow-legacy-debug.resc    # Legacy OS — without the UART RX bypass or reset macro
 │   ├── esp32-meadow-boot-no-retw-hooks.resc  # ESP32-only boot test
 │   └── ...
 ├── roms/                     # ESP32 ROM binary (not redistributable)
@@ -399,13 +401,27 @@ Requires ESP-IDF 4.2.4 with the Xtensa toolchain. Output: `Meadow-ESP32/build/Me
 
 ## GDB Debugging
 
+`run.sh --gdb` starts Renode's GDB server on port 3333 (`--gdb=PORT` for
+another port; a non-zero `ports.gdb` in the config does the same without the
+flag).  The CPU waits at the reset entry point before running any firmware, so
+breakpoints can be set first; GDB's `continue` starts it.
+
 ```bash
-./run.sh --legacy meadow-legacy-debug
-# In another terminal:
-arm-none-eabi-gdb build/legacy/nuttx.elf
+./run.sh --config=configs/meadow-os.yaml --gdb       # or configs/legacy-ccm.yaml
+# In another terminal (build/legacy/nuttx.elf for Legacy):
+arm-none-eabi-gdb build/nuttx.elf
 (gdb) target remote :3333
+(gdb) break lfs_mount
 (gdb) continue
 ```
+
+- Works with `meadow-os.resc` and the single-machine Legacy scripts
+  (`meadow-legacy-headless`, `meadow-legacy`, `meadow-legacy-debug`), which
+  include the `gdb.resc` that `run.sh` writes on every run.  `run.sh` refuses
+  `--gdb` for scripts without it, such as `meadow-dual`.
+- After a `detach` the firmware carries on as normal (Meadow.CLI answers).
+- A `~/.gdbinit` dashboard can interfere with batch use (`gdb -batch -ex ...`);
+  add `-nx` to skip it.
 
 ## Renode Customizations
 
