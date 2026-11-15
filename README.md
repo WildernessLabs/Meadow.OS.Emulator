@@ -107,10 +107,10 @@ deploy.  This works for both OSes:
 ```bash
 # Build the app once (creates its publish folder), then make the image.  Give the
 # helper the same --config / --legacy / --rebase as run.sh, so the format matches.
-tools/make-lfs-image.sh --rebase <app>/bin/Release/net10.0/publish app.bin
+tools/make-lfs-image.sh --rebase <app>/bin/Release/net10.0/publish fs-images/app.bin
 
 # Boot with it; Mono starts the app straight away.  Watch its output with:
-./run.sh --rebase --mount=app.bin
+./run.sh --rebase --mount=fs-images/app.bin
 meadow listen -s socket://localhost:4242
 ```
 
@@ -119,7 +119,7 @@ meadow listen -s socket://localhost:4242
 | Legacy (meadow-3.0) | LittleFS v1, 4 KB blocks, 256 byte read/prog | `tools/build_lfs_v1_image.c` + the Legacy checkout's `nuttx/fs/littlefs/` |
 | Meadow.OS (Rebase) | LittleFS v2, 4 KB blocks, 1 KB read/prog | `tools/build_lfs_v2_image.c` + the Meadow.OS checkout's `nuttx/fs/littlefs/littlefs/` (unpacked by its first NuttX build) |
 
-Both are the whole 61,865,984-byte partition at QSPI offset `0x500000`
+Keep images in `fs-images/`, which git ignores.  Both are the whole 61,865,984-byte partition at QSPI offset `0x500000`
 (15,104 blocks), mounted as `/meadow0`.  The geometry is what each firmware
 passes to `lfs_mount`; an image that does not match is not mountable, and the
 firmware formats over it.

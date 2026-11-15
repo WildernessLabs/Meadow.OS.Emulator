@@ -420,6 +420,9 @@ FodyWeavers.xsd
 # Renode emulator build artifacts
 build/
 
+# LittleFS images for run.sh --mount (tools/make-lfs-image.sh), ~62 MB each
+fs-images/
+
 # Compiled native tools
 tools/build_littlefs_image_native
 tools/build_lfs_v1_image
