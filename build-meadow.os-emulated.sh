@@ -3,8 +3,11 @@ set -e
 
 SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
 
-# Load config for EMU_OS, EMU_DEFCONFIG, etc.
-source "$SCRIPT_DIR/scripts/read-config.sh" "$@" 2>/dev/null || true
+# Load config for EMU_OS, EMU_DEFCONFIG, etc.  Stop if it is missing or invalid
+# (read-config.sh prints why); building anyway would use whatever it had set.
+if ! source "$SCRIPT_DIR/scripts/read-config.sh" "$@"; then
+    exit 1
+fi
 
 # Resolve sibling-repo locations (MEADOW_EMULATOR_OS_DIR, _CLI_DIR, _ESP_DIR, _SAMPLES_DIR)
 source "$SCRIPT_DIR/scripts/resolve-locations.sh" "$EMU_OS"
