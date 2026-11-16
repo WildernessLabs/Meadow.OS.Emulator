@@ -3,33 +3,34 @@ set -e
 
 SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
 
-# Load config for EMU_OS, EMU_DEFCONFIG, EMU_RUNTIME, etc.
-source "$SCRIPT_DIR/scripts/read-config.sh" "$@" 2>/dev/null || true
+# --clean (or -c) is passed on to the OS repo's build.sh, which then rebuilds
+# from scratch.  Needed when the configuration changes under existing objects,
+# for example after a kconfig-tweak fix.  Any other argument is left for
+# read-config.sh (--config FILE).
+OS_BUILD_ARGS=""
+for arg in "$@"; do
+    case "$arg" in
+        -c|--clean) OS_BUILD_ARGS="--clean" ;;
+    esac
+done
+
+# Load config for EMU_OS, EMU_DEFCONFIG, etc.  Stop if it is missing or invalid
+# (read-config.sh prints why); building anyway would use whatever it had set.
+if ! source "$SCRIPT_DIR/scripts/read-config.sh" "$@"; then
+    exit 1
+fi
+
+# Resolve sibling-repo locations (MEADOW_EMULATOR_OS_DIR, _CLI_DIR, _ESP_DIR, _SAMPLES_DIR)
+source "$SCRIPT_DIR/scripts/resolve-locations.sh" "$EMU_OS"
 
 # -------------------------------------------------------------------------
 # OS-dependent path setup
 # -------------------------------------------------------------------------
-if [ "$EMU_OS" = "legacy" ]; then
-    MEADOW_SRC_DIR="$SCRIPT_DIR/../Meadow"
-    NUTTX_DIR="$MEADOW_SRC_DIR/nuttx"
-    CONFIG="${EMU_DEFCONFIG:-mono}"
-    CONFIGURE_SEP="/"
-    SHARED_HEADER="$NUTTX_DIR/include/meadow/hcom_nuttx_shared.h"
-    VERSION_SOURCE="$MEADOW_SRC_DIR/version.txt"
-else
-    # meadow-os (default)
-    MEADOW_SRC_DIR="$SCRIPT_DIR/../Meadow.OS"
-    NUTTX_DIR="$MEADOW_SRC_DIR/nuttx"
-    CONFIG="${EMU_DEFCONFIG:-meadow_os_emu}"
-    CONFIGURE_SEP=":"
-    SHARED_HEADER="$MEADOW_SRC_DIR/Meadow.OS/include/meadow/hcom_nuttx_shared.h"
-    VERSION_SOURCE="$MEADOW_SRC_DIR/version.txt"
-fi
+MEADOW_SRC_DIR="$MEADOW_EMULATOR_OS_DIR"
+NUTTX_DIR="$MEADOW_SRC_DIR/nuttx"
 
 # Build output directory
-if [ "$EMU_RUNTIME" = "legacy-os_modern-dotnet" ]; then
-    BUILD_DIR="$SCRIPT_DIR/build/dotnet10"
-elif [ "$EMU_OS" = "legacy" ]; then
+if [ "$EMU_OS" = "legacy" ]; then
     BUILD_DIR="$SCRIPT_DIR/build/legacy"
 else
     BUILD_DIR="$SCRIPT_DIR/build"
@@ -70,13 +71,6 @@ else
     fi
 fi
 
-# NuttX requires GNU Make 4.x+ (macOS ships 3.81)
-if command -v gmake &> /dev/null; then
-    MAKE=gmake
-else
-    MAKE=make
-fi
-
 # Check for ARM toolchain
 if ! command -v arm-none-eabi-gcc &> /dev/null; then
     echo "ERROR: arm-none-eabi-gcc not found"
@@ -89,293 +83,36 @@ if command -v ld.lld &> /dev/null; then
     echo "Linker: $(which ld.lld) — $(ld.lld --version 2>&1 | head -1)"
 fi
 
-# -------------------------------------------------------------------------
-# Mono runtime validation
-# -------------------------------------------------------------------------
-MONO_MAKE_VARS=""
+# Mono: both OSes' build.sh --emulator build the Mono runtime themselves, so
+# there is nothing to check or link here.
+echo "=== Building NuttX for Renode (os: $EMU_OS) ==="
 
-if [ "$EMU_OS" = "legacy" ]; then
-    MONO_DIR="$MEADOW_SRC_DIR/mono/mono"
-    if [ ! -f "$MONO_DIR/sgen/.libs/libmonosgen.a" ]; then
-        echo "ERROR: Mono runtime libraries not found at $MONO_DIR/sgen/.libs/"
-        echo "       Build Mono first: cd $MEADOW_SRC_DIR && ./build-mono.sh"
-        exit 1
-    fi
-    echo "--- Legacy Mono runtime libraries found ---"
-else
-    # Meadow.OS: optionally link .NET 10 mono from ../runtime/
-    if [ "$EMU_RUNTIME" = "legacy-os_modern-dotnet" ]; then
-        RUNTIME_DIR="$SCRIPT_DIR/../runtime"
-        MONO_LIB="$RUNTIME_DIR/src/mono/build-nuttx-debug/mono/mini/libmonosgen-2.0.a"
-        if [ ! -f "$MONO_LIB" ]; then
-            echo "ERROR: .NET 10 Mono runtime library not found at:"
-            echo "       $MONO_LIB"
-            echo ""
-            echo "       Build it first:"
-            echo "         cd $RUNTIME_DIR/src/mono"
-            echo "         ./build-nuttx.sh Debug"
-            exit 1
-        fi
-        echo "--- .NET 10 Mono runtime: $MONO_LIB ($(du -h "$MONO_LIB" | cut -f1)) ---"
-        MONO_MAKE_VARS="MONO_AOBJS=$MONO_LIB"
-    fi
+# -------------------------------------------------------------------------
+# Delegate configure/kconfig-tweaks/version-injection/build to the OS repo's
+# own build.sh --emulator (see UseRepositorBuildScripts.md Parts 3 & 5). It
+# reuses the existing defconfig as-is — no reconfigure, no defconfig
+# selection — and produces nuttx.elf/nuttx_user.elf/nuttx.bin/nuttx_user.bin
+# in $NUTTX_DIR exactly as before. Legacy also builds Mono itself.
+# -------------------------------------------------------------------------
+if ! grep -q -- '--emulator' "$MEADOW_SRC_DIR/build.sh"; then
+    echo "ERROR: $MEADOW_SRC_DIR/build.sh does not support --emulator."
+    echo "       Update your Meadow.OS (Rebase) checkout to main (build.sh --emulator was merged in WildernessLabs/Meadow.OS#953)."
+    exit 1
 fi
 
-echo "=== Building NuttX for Renode (os: $EMU_OS, config: $CONFIG, runtime: ${EMU_RUNTIME:-default}) ==="
-
-# -------------------------------------------------------------------------
-# Configure NuttX
-# -------------------------------------------------------------------------
-echo "--- Configuring NuttX with stm32f777zit6-meadow${CONFIGURE_SEP}$CONFIG ---"
-cd "$NUTTX_DIR"
-
-# Clean previous build if .config exists
-if [ -f ".config" ]; then
-    echo "--- Cleaning previous build ---"
-    $MAKE distclean 2>/dev/null || true
-fi
-
-if [ "$EMU_OS" = "legacy" ]; then
-    # Legacy NuttX distclean doesn't clean board config subdirectory objects
-    find "$NUTTX_DIR/configs/stm32f777zit6-meadow/src" -name "*.o" -delete 2>/dev/null || true
-
-    # Legacy NuttX uses slash separator
-    ./tools/configure.sh "stm32f777zit6-meadow/${CONFIG}"
-else
-    # Meadow.OS uses colon separator; configure.sh may exit non-zero due to
-    # cosmetic Kconfig warning — .config is written successfully before that.
-    ./tools/configure.sh "stm32f777zit6-meadow:${CONFIG}" || {
-        if [ -f "$NUTTX_DIR/.config" ]; then
-            echo "WARNING: configure.sh reported an error but .config was written — continuing"
-        else
-            echo "ERROR: configure.sh failed and no .config was produced"
-            exit 1
-        fi
-    }
-fi
-
-# -------------------------------------------------------------------------
-# Kconfig tweaks for emulator
-# -------------------------------------------------------------------------
-NUTTX_CONFIG="$NUTTX_DIR/.config"
-
-if [ "$EMU_OS" = "legacy" ]; then
-    echo "--- Applying emulator config tweaks (legacy) ---"
-
-    # Disable USB (Renode can't emulate USB device controllers)
-    # Keep CONFIG_STM32F7_OTGFS enabled — pwrmgmt code references OTG registers unconditionally
-    kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_CDCACM
-    kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_BOARDCTL_USBDEVCTRL
-    kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_USBDEV
-
-    # Redirect HCOM from USB CDC-ACM to UART4
-    # Device numbering: ttyS0=USART1 (console), ttyS1=UART4, ttyS2=UART5
-    kconfig-tweak --file "$NUTTX_CONFIG" --set-str CONFIG_HCOM_COMMS_DEVICE_NAME /dev/ttyS1
-
-    # Route syslog to serial console on USART1
-    # Keep RAMLOG buffer alive (fault handler needs ramlog_get_sysbuffer_pointer)
-    kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_DEV_CONSOLE
-    kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_USART1_SERIAL_CONSOLE
-    kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_RAMLOG_SYSLOG
-    kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_RAMLOG_CONSOLE
-    kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_SYSLOG_CONSOLE
-    kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_SYSLOG_SERIAL_CONSOLE
-    kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_SYSLOG_WRITE
-
-    # Prevent reset loops in emulator
-    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_BOARD_RESET_ON_ASSERT 0
-
-    # Enable tmpfs for assembly pre-caching (QSPI→RAM copy for fast Mono loading)
-    kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_FS_TMPFS
-    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_FS_TMPFS_BLOCKSIZE 512
-    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_FS_TMPFS_DIRECTORY_ALLOCGUARD 64
-    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_FS_TMPFS_DIRECTORY_FREEGUARD 64
-    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_FS_TMPFS_FILE_ALLOCGUARD 512
-    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_FS_TMPFS_FILE_FREEGUARD 512
-
-elif [[ "$CONFIG" != *_emu* ]]; then
-    echo "--- Applying emulator config tweaks (meadow-os) ---"
-
-    # Disable USB (Renode can't emulate USB device controllers)
-    kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_CDCACM
-    kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_BOARDCTL_USBDEVCTRL
-    kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_STM32F7_OTGFS
-    kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_USBDEV
-
-    # Enable UART4 for HCOM (replaces USB CDC-ACM)
-    kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_STM32F7_UART4
-    kconfig-tweak --file "$NUTTX_CONFIG" --set-str CONFIG_HCOM_COMMS_DEVICE_NAME /dev/ttyS1
-    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_BAUD 115200
-    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_BITS 8
-    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_PARITY 0
-    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_2STOP 0
-    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_RXBUFSIZE 512
-    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_UART4_TXBUFSIZE 512
-
-    # Route syslog to serial console instead of RAM log
-    kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_DEV_CONSOLE
-    kconfig-tweak --file "$NUTTX_CONFIG" --enable CONFIG_SYSLOG_SERIAL_CONSOLE
-    kconfig-tweak --file "$NUTTX_CONFIG" --disable CONFIG_RAMLOG_SYSLOG
-
-    # Prevent reset loops in emulator
-    kconfig-tweak --file "$NUTTX_CONFIG" --set-val CONFIG_BOARD_RESET_ON_ASSERT 0
-
-    # Resolve kconfig dependencies after tweaks
-    $MAKE olddefconfig 2>/dev/null || true
-else
-    echo "--- Using pre-configured emulator defconfig (skipping kconfig tweaks) ---"
-fi
-
-# -------------------------------------------------------------------------
-# Version injection
-# -------------------------------------------------------------------------
-if [ -n "$VERSION_SOURCE" ] && [ -f "$VERSION_SOURCE" ]; then
-    IFS='.' read -r EMU_VERSION_MAJOR EMU_VERSION_MINOR EMU_VERSION_REVISION <<< "$(cat "$VERSION_SOURCE")"
-else
-    EMU_VERSION_MAJOR=0; EMU_VERSION_MINOR=0; EMU_VERSION_REVISION=0
-fi
-EMU_VERSION_BUILD=${EMU_VERSION_BUILD:-0}
-echo "--- Version: $EMU_VERSION_MAJOR.$EMU_VERSION_MINOR.$EMU_VERSION_REVISION.$EMU_VERSION_BUILD ---"
-
-GIT_HASH=$(git -C "$MEADOW_SRC_DIR" rev-parse --short=8 HEAD 2>/dev/null || echo "00000000")
-GIT_HASH="${GIT_HASH:0:8}"
-
-# Inject version placeholders in hcom_nuttx_shared.h
-if grep -q '###VERSION_MAJOR###' "$SHARED_HEADER" 2>/dev/null; then
-    echo "--- Injecting version placeholders ---"
-    cp "$SHARED_HEADER" "$SHARED_HEADER.emubak"
-    sed -i.bak \
-        -e "s/###VERSION_MAJOR###/$EMU_VERSION_MAJOR/g" \
-        -e "s/###VERSION_MINOR###/$EMU_VERSION_MINOR/g" \
-        -e "s/###VERSION_REVISION###/$EMU_VERSION_REVISION/g" \
-        -e "s/###VERSION_BUILD###/$EMU_VERSION_BUILD/g" \
-        -e "s/###BUILD_DAY###/$((10#$(date -u +%d)))/g" \
-        -e "s/###BUILD_TWO_DIGIT_DAY###/$(date -u +%d)/g" \
-        -e "s/###BUILD_MONTH###/$((10#$(date -u +%m)))/g" \
-        -e "s/###BUILD_TWO_DIGIT_MONTH###/$(date -u +%m)/g" \
-        -e "s/###BUILD_MONTH_NAME###/$(date -u +%b)/g" \
-        -e "s/###BUILD_YEAR###/$((10#$(date -u +%y)))/g" \
-        -e "s/###BUILD_HOUR###/$((10#$(date -u +%H)))/g" \
-        -e "s/###BUILD_TWO_DIGIT_HOUR###/$(date -u +%H)/g" \
-        -e "s/###BUILD_MINUTE###/$((10#$(date -u +%M)))/g" \
-        -e "s/###BUILD_TWO_DIGIT_MINUTE###/$(date -u +%M)/g" \
-        -e "s/###BUILD_SECOND###/$((10#$(date -u +%S)))/g" \
-        -e "s/###BUILD_TWO_DIGIT_SECOND###/$(date -u +%S)/g" \
-        -e "s/###BUILD_HASH###/0x${GIT_HASH}/g" \
-        -e "s/###BUILD_HASH_STRING###/${GIT_HASH}/g" \
-        -e "s/###MEADOW_GIT_REF###/emulator/g" \
-        -e "s/###BUILD_EPOCH_TIME###/$(date -u +%s)/g" \
-        "$SHARED_HEADER"
-    rm -f "$SHARED_HEADER.bak"
-    RESTORE_SHARED_HEADER=true
-fi
-
-# Legacy-only: inject version placeholders in user-space linker script
-if [ "$EMU_OS" = "legacy" ]; then
-    USER_LD="$NUTTX_DIR/configs/stm32f777zit6-meadow/scripts/user-space.ld"
-    if grep -q '###VERSION_MAJOR###' "$USER_LD" 2>/dev/null; then
-        echo "--- Injecting version placeholders in user-space.ld ---"
-        cp "$USER_LD" "$USER_LD.emubak"
-        sed -i.bak \
-            -e "s/###VERSION_MAJOR###/$EMU_VERSION_MAJOR/g" \
-            -e "s/###VERSION_MINOR###/$EMU_VERSION_MINOR/g" \
-            -e "s/###VERSION_REVISION###/$EMU_VERSION_REVISION/g" \
-            -e "s/###VERSION_BUILD###/$EMU_VERSION_BUILD/g" \
-            -e "s/###BUILD_DAY###/$((10#$(date -u +%d)))/g" \
-            -e "s/###BUILD_MONTH###/$((10#$(date -u +%m)))/g" \
-            -e "s/###BUILD_YEAR###/$((10#$(date -u +%y)))/g" \
-            -e "s/###BUILD_HOUR###/$((10#$(date -u +%H)))/g" \
-            -e "s/###BUILD_MINUTE###/$((10#$(date -u +%M)))/g" \
-            -e "s/###BUILD_SECOND###/$((10#$(date -u +%S)))/g" \
-            -e "s/###BUILD_HASH###/0x${GIT_HASH:-00000000}/g" \
-            -e "s/###MONO_GIT_REF###/$(git -C "$MEADOW_SRC_DIR/mono" rev-parse --short HEAD 2>/dev/null || echo 'emulator')/g" \
-            "$USER_LD"
-        rm -f "$USER_LD.bak"
-        RESTORE_USER_LD=true
-    fi
-fi
-
-# Cleanup function to restore modified files
-cleanup() {
-    if [ "$RESTORE_SHARED_HEADER" = true ] && [ -f "$SHARED_HEADER.emubak" ]; then
-        mv "$SHARED_HEADER.emubak" "$SHARED_HEADER"
-    fi
-    if [ "$RESTORE_USER_LD" = true ] && [ -f "$USER_LD.emubak" ]; then
-        mv "$USER_LD.emubak" "$USER_LD"
-    fi
-}
-trap cleanup EXIT
-
-# Parallel job count
-JOBS="${MEADOW_ADDITIONAL_MAKE_OPTIONS:--j$(sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
-
-# -------------------------------------------------------------------------
-# Build
-# -------------------------------------------------------------------------
-if [ "$EMU_OS" = "legacy" ]; then
-    # Legacy: context → mbedtls → mksyscall → pass2 → pass1deps → pass1
-    echo "--- Generating NuttX headers (make context) ---"
-    $MAKE context
-
-    # Build mbedtls for NuttX (same flags as Meadow/build-mbedtls.sh)
-    MBEDTLS_DIR="$MEADOW_SRC_DIR/mbedtls"
-    if [ -d "$MBEDTLS_DIR/library" ] && [ ! -f "$MBEDTLS_DIR/library/libmbedcrypto.a" ]; then
-        echo "--- Building mbedtls ---"
-        make -C "$MBEDTLS_DIR/library" -j$(sysctl -n hw.ncpu 2>/dev/null || echo 4) \
-            CC="$(which arm-none-eabi-gcc)" \
-            AR="$(which arm-none-eabi-ar)" \
-            CFLAGS="-g -mthumb -mcpu=cortex-m7 -mfloat-abi=hard -mfpu=fpv5-d16 \
-                -D_POSIX_VERSION=201112L -D__NuttX__=1 -DSA_RESTART=0 \
-                -I$NUTTX_DIR/include -I$NUTTX_DIR/include/nuttx/lib \
-                -I$NUTTX_DIR/include/sys -nostdinc -nostdlib -fno-builtin -fno-common -Os"
-    fi
-
-    echo "--- Building mksyscall ---"
-    $MAKE -C "$NUTTX_DIR/tools" -f Makefile.host mksyscall 2>/dev/null || true
-
-    # pass2 and pass1deps use -j1 to avoid ar race conditions
-    echo "--- Building (PROTECTED mode, pass 2) ---"
-    $MAKE -j1 pass2
-
-    echo "--- Building pass1 dependencies ---"
-    $MAKE -j1 pass1deps
-
-    echo "--- Building (PROTECTED mode, pass 1) ---"
-    $MAKE $JOBS pass1
-
-else
-    # Meadow.OS: pass2 → mbedtls → pass1 → nuttx
-    if [ "$CONFIG" = "nsh" ]; then
-        echo "--- Building (FLAT mode) ---"
-        $MAKE $JOBS MEADOW_OS=1 $MONO_MAKE_VARS
-    else
-        echo "--- Building (PROTECTED mode, pass 2) ---"
-        $MAKE $JOBS MEADOW_OS=1 $MONO_MAKE_VARS pass2
-
-        # Build mbedTLS after pass2 (needs nuttx/config.h which pass2 generates)
-        if [ ! -f "$MEADOW_SRC_DIR/mbedtls/library/libmbedtls.a" ]; then
-            echo "--- Building mbedTLS ---"
-            cd "$MEADOW_SRC_DIR"
-            bash build-mbedtls.sh
-            cd "$NUTTX_DIR"
-        fi
-
-        echo "--- Building (PROTECTED mode, pass 1) ---"
-        $MAKE $JOBS MEADOW_OS=1 $MONO_MAKE_VARS pass1
-
-        echo "--- Building final image ---"
-        $MAKE $JOBS MEADOW_OS=1 $MONO_MAKE_VARS nuttx
-    fi
-fi
+echo "--- Delegating build to $MEADOW_SRC_DIR/build.sh --emulator $OS_BUILD_ARGS ---"
+(cd "$MEADOW_SRC_DIR" && bash build.sh --emulator $OS_BUILD_ARGS)
 
 # -------------------------------------------------------------------------
 # Copy artifacts
 # -------------------------------------------------------------------------
 mkdir -p "$BUILD_DIR"
 
-if [ "$EMU_OS" = "legacy" ]; then
-    # Legacy memory layout requires split binaries:
-    # vectors at 0x08040000, kernel at 0x08140000, user at 0x08040200+
+# Legacy and Meadow.OS (Rebase) share the same memory layout, which requires
+# split binaries: vectors at 0x08040000, kernel at 0x08140000, user at
+# 0x08040200+.  A flat nuttx.bin zero-fills the 1MB gap between the vectors and
+# the kernel and would overwrite the user code (KnownIssues_and_Errata.md 6.3).
+{
 
     # 1. Kernel vectors (interrupt vector table)
     arm-none-eabi-objcopy --only-section=.vectors -O binary \
@@ -400,29 +137,31 @@ if [ "$EMU_OS" = "legacy" ]; then
 
     # 3a. Extract Mono runtime sections for SDRAM loading (0xC0000000)
     if arm-none-eabi-objdump -h "$NUTTX_DIR/nuttx_user.elf" | grep -q '\.mono '; then
+        # One objcopy of all the Mono sections: objcopy places each section
+        # at its link address relative to the lowest one (.mono_signature at
+        # 0xC0000000), so the signature and the code land exactly where the
+        # firmware expects them whatever the signature's size and alignment
+        # (Legacy meadow-3.0 and Meadow.OS both start .mono at 0xC0000030;
+        # older builds used 0x20).  .mono_bss is NOBITS and not copied.
+        # Legacy links .mono_signature without the ALLOC flag, and objcopy
+        # -O binary leaves out non-allocated sections, so mark it allocated.
         arm-none-eabi-objcopy -O binary \
+            --set-section-flags .mono_signature=alloc,load,contents,data \
+            --only-section=.mono_signature \
             --only-section=.mono \
             --only-section=.mono_data \
             --only-section=.mono_comment \
-            "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_mono_code.bin"
+            "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_mono.bin"
 
-        # Extract .mono_signature directly from ELF
-        SIG_OFFSET=$(arm-none-eabi-readelf -S "$NUTTX_DIR/nuttx_user.elf" | \
-            awk '/\.mono_signature/ {print "0x" $5}')
-        SIG_SIZE=$(arm-none-eabi-readelf -S "$NUTTX_DIR/nuttx_user.elf" | \
-            awk '/\.mono_signature/ {print "0x" $6}')
+        # Report the signature: magic AABBCCDD, then build, revision, minor,
+        # major as little-endian 32-bit words.
         python3 -c "
-import sys
-with open('$NUTTX_DIR/nuttx_user.elf', 'rb') as f:
-    f.seek($SIG_OFFSET)
-    sig = f.read($SIG_SIZE)
-    sig = sig.ljust(0x20, b'\x00')
-    with open('$BUILD_DIR/nuttx_mono_sig.bin', 'wb') as out:
-        out.write(sig)
-print(f'Signature: {sig[:4].hex()} version={int.from_bytes(sig[16:20], \"little\")}.{int.from_bytes(sig[12:16], \"little\")}.{int.from_bytes(sig[8:12], \"little\")}.{int.from_bytes(sig[4:8], \"little\")}')
+import struct
+with open('$BUILD_DIR/nuttx_mono.bin', 'rb') as f:
+    sig = f.read(20)
+magic, build, revision, minor, major = struct.unpack('<5I', sig)
+print(f'Signature: {magic:08X} version={major}.{minor}.{revision}.{build}')
 "
-        cat "$BUILD_DIR/nuttx_mono_sig.bin" "$BUILD_DIR/nuttx_mono_code.bin" > "$BUILD_DIR/nuttx_mono.bin"
-        rm -f "$BUILD_DIR/nuttx_mono_code.bin" "$BUILD_DIR/nuttx_mono_sig.bin"
         echo "--- Created nuttx_mono.bin (Mono runtime for SDRAM, $(du -h "$BUILD_DIR/nuttx_mono.bin" | cut -f1))"
     else
         echo "--- WARNING: No .mono sections found in nuttx_user.elf"
@@ -431,25 +170,20 @@ print(f'Signature: {sig[:4].hex()} version={int.from_bytes(sig[16:20], \"little\
     # Keep full nuttx.bin for reference
     cp "$NUTTX_DIR/nuttx.bin" "$BUILD_DIR/nuttx.bin"
 
-else
-    # Meadow.OS: simple binary copy
-    cp "$NUTTX_DIR/nuttx.bin" "$BUILD_DIR/"
-    echo "--- Copied nuttx.bin to $BUILD_DIR/"
+}
 
-    if [ -f "$NUTTX_DIR/nuttx_user.bin" ]; then
-        cp "$NUTTX_DIR/nuttx_user.bin" "$BUILD_DIR/"
-        echo "--- Copied nuttx_user.bin to $BUILD_DIR/"
-    fi
-fi
-
-# Copy ELFs for GDB debugging
+# Copy ELFs for GDB debugging and hook-address extraction.  Always overwrite:
+# the hook addresses are taken from these copies, so a stale one makes every
+# hook land on the wrong address.  Prefer "nuttx" where the OS build makes one,
+# otherwise "nuttx.elf" (Meadow.OS only produces nuttx.elf).
 if [ -f "$NUTTX_DIR/nuttx" ]; then
     cp "$NUTTX_DIR/nuttx" "$BUILD_DIR/nuttx.elf"
     echo "--- Copied nuttx ELF to $BUILD_DIR/nuttx.elf"
-fi
-if [ -f "$NUTTX_DIR/nuttx.elf" ] && [ ! -f "$BUILD_DIR/nuttx.elf" ]; then
-    cp "$NUTTX_DIR/nuttx.elf" "$BUILD_DIR/nuttx.elf"
-    echo "--- Copied nuttx ELF to $BUILD_DIR/nuttx.elf"
+else
+    if [ -f "$NUTTX_DIR/nuttx.elf" ]; then
+        cp "$NUTTX_DIR/nuttx.elf" "$BUILD_DIR/nuttx.elf"
+        echo "--- Copied nuttx.elf to $BUILD_DIR/nuttx.elf"
+    fi
 fi
 if [ -f "$NUTTX_DIR/nuttx_user.elf" ]; then
     cp "$NUTTX_DIR/nuttx_user.elf" "$BUILD_DIR/nuttx_user.elf"
@@ -459,7 +193,7 @@ fi
 # Extract hook addresses from ELF files
 if [ -f "$BUILD_DIR/nuttx.elf" ] && [ -f "$BUILD_DIR/nuttx_user.elf" ]; then
     echo "--- Extracting hook addresses for Renode ---"
-    python3 "$SCRIPT_DIR/tools/extract-hook-addresses.py" \
+    EMU_OS="$EMU_OS" python3 "$SCRIPT_DIR/tools/extract-hook-addresses.py" \
         "$BUILD_DIR/nuttx.elf" "$BUILD_DIR/nuttx_user.elf" || \
         echo "WARNING: Hook address extraction failed (non-fatal — new symbols may differ)"
 fi

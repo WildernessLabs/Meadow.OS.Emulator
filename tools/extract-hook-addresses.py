@@ -12,6 +12,7 @@ The generated files are included by meadow-legacy-*.resc scripts so that hook
 addresses and SDRAM patches stay in sync with the firmware build automatically.
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -117,10 +118,16 @@ def main():
     user_elf = sys.argv[2]
     out_dir = Path(kernel_elf).parent
 
-    # Read board version from emulator config
+    # Board version for the hardware-version hook: 1=F7FeatherV1, 2=F7FeatherV2,
+    # 3=F7CoreComputeV2.  build-meadow.os-emulated.sh exports EMU_BOARD_VERSION
+    # from the config it was given (scripts/read-config.sh), which may be
+    # configs/<name>.yaml rather than the root emulator.config.yaml, so it wins.
+    # Run by hand without it, the root emulator.config.yaml is read as before.
     board_version = 2  # default: F7FeatherV2
     config_file = Path(__file__).parent.parent / "emulator.config.yaml"
-    if config_file.exists():
+    if os.environ.get("EMU_BOARD_VERSION", "").isdigit():
+        board_version = int(os.environ["EMU_BOARD_VERSION"])
+    elif config_file.exists():
         try:
             import yaml
             with open(config_file) as f:
@@ -146,6 +153,8 @@ def main():
         "MEADOW_HW_VERSION_FIND_DEVICE_VER": ("meadow_hw_version_find_device_ver", ksyms),
         "QSPI_WAITSTATUSFLAGS_CONSTPROP": ("qspi_waitstatusflags.constprop.0", ksyms),
         "QSPI_WAITSTATUSFLAGS_PART": ("qspi_waitstatusflags.part.0", ksyms),
+        # Meadow.OS only: the bounded waits (issue #753) all poll through this
+        "QSPI_WAITSTATUSFLAGS_TIMED": ("qspi_waitstatusflags_timed", ksyms),
         "QSPI_MEMORY": ("qspi_memory", ksyms),
         "HCOM_NX_CONFIG_REFRESH_MONO_VERSION": ("hcom_nx_config_refresh_mono_version", ksyms),
         "HCOM_NX_CONFIG_INIT": ("hcom_nx_config_init", ksyms),
@@ -168,7 +177,16 @@ def main():
         "HCOM_HOST_RECV_PTHREAD": ("hcom_host_recv_pthread", usyms),
     }
 
-    addrs: dict[str, int] = {"BOARD_VERSION": board_version}
+    # build-meadow.os-emulated.sh passes EMU_OS; anything other than "legacy"
+    # is Meadow.OS (Rebase, NuttX 12).
+    is_meadow_os = os.environ.get("EMU_OS", "legacy") != "legacy"
+
+    # struct qspi_meminfo_s changed layout in NuttX 12; the C# QSPI bypass
+    # needs to know which one to parse.
+    meminfo_layout = 1 if is_meadow_os else 0
+
+    addrs: dict[str, int] = {"BOARD_VERSION": board_version,
+                             "QSPI_MEMINFO_LAYOUT": meminfo_layout}
     missing = []
     for var_name, (sym_name, sym_table) in simple.items():
         addr = sym_table.get(sym_name)
@@ -176,6 +194,24 @@ def main():
             missing.append(f"  {var_name} ({sym_name})")
         else:
             addrs[var_name] = addr
+
+    # Legacy could not read the Mono signature from QSPI, so the mono_ver_skip
+    # hook skips hcom_nx_config_refresh_mono_version().  On Meadow.OS the QSPI
+    # reads work (QspiDmaBypass layout 1) and nuttx_mono.bin carries the real
+    # signature at QSPI offset 0, so let the firmware read it.
+    if is_meadow_os:
+        addrs.pop("HCOM_NX_CONFIG_REFRESH_MONO_VERSION", None)
+        print("  mono_ver_skip not used (Meadow.OS reads the Mono signature from QSPI)")
+
+    # The download watchdog must not fire in the emulator: Renode's virtual
+    # time runs ahead while the CPU waits for UART data, so the timer expires
+    # mid-download and the download is cancelled.  Legacy's handler is
+    # hcom_host_watchdog_timeout_expired(); Meadow.OS replaced it with the
+    # work-queue callback hcom_host_watchdog_worker(), which the wdog_skip
+    # hook can skip in the same way (it returns void).
+    if ("HCOM_HOST_WATCHDOG_TIMEOUT_EXPIRED" not in addrs) and ("hcom_host_watchdog_worker" in usyms):
+        addrs["HCOM_HOST_WATCHDOG_TIMEOUT_EXPIRED"] = usyms["hcom_host_watchdog_worker"]
+        print(f"  wdog_skip on hcom_host_watchdog_worker at 0x{usyms['hcom_host_watchdog_worker']:08X}")
 
     if missing:
         print(f"WARNING: Missing symbols (hooks using these will be skipped):", file=sys.stderr)
@@ -206,6 +242,13 @@ def main():
             addrs["HW_VERSION_INITIALIZED"] = struct_addr  # offset 0: initialized byte
             addrs["HW_VERSION_VALUE"] = struct_addr + 4     # offset 4: version word
             print(f"  hw_version struct at 0x{struct_addr:08X}")
+        elif ("_meadowVersionKnown" in ksyms) and ("_meadowVer" in ksyms):
+            # Meadow.OS (Rebase) keeps the result in two file-scope statics in
+            # meadow_hw_version.c instead of Legacy's struct.
+            addrs["HW_VERSION_INITIALIZED"] = ksyms["_meadowVersionKnown"]
+            addrs["HW_VERSION_VALUE"] = ksyms["_meadowVer"]
+            print(f"  hw_version statics: _meadowVersionKnown at 0x{ksyms['_meadowVersionKnown']:08X}, "
+                  f"_meadowVer at 0x{ksyms['_meadowVer']:08X}")
         else:
             print("WARNING: Could not find hw_version struct address", file=sys.stderr)
 
@@ -264,8 +307,16 @@ def main():
     # -------------------------------------------------------------------------
     # mono_str_fix — first instruction at cbnz target after deep_copy_config call
     # Pattern: bl deep_copy_config → mov rN, r0 → cbnz r0, TARGET → ... TARGET: ldr ...
+    #
+    # Legacy only.  The hook writes the config struct at Legacy offsets
+    # (+0x54, +0x80); Meadow.OS's struct differs, and the same instruction
+    # pattern exists there, so the hook overwrote unrelated fields with a
+    # pointer to the firmware version string.  Freeing one of those fields
+    # later corrupted the kernel heap (seen after `meadow device info`).
     # -------------------------------------------------------------------------
-    if "HCOM_MONO_CTRL_START_MONO_MAIN" in addrs:
+    if is_meadow_os:
+        print("  mono_str_fix skipped (Legacy config struct offsets; not valid for Meadow.OS)")
+    elif "HCOM_MONO_CTRL_START_MONO_MAIN" in addrs:
         insns = objdump_function(user_elf, addrs["HCOM_MONO_CTRL_START_MONO_MAIN"], 0x500)
         # Find bl to deep_copy_config, then the cbnz after it
         for i, (iaddr, text) in enumerate(insns):
@@ -382,14 +433,37 @@ def main():
         # Replace $hook_VARNAME with literal hex addresses, skipping comment lines
         def replace_hook_var(m):
             var_name = m.group(1)
-            if var_name in addrs:
-                return f"0x{addrs[var_name]:08X}"
-            return m.group(0)  # leave as-is (comments, disabled hooks, etc.)
+            return f"0x{addrs[var_name]:08X}"
 
+        set_re = re.compile(r'^\s*set\s+(\w+)\s+')
+        skipped_vars: set[str] = set()
         result_lines = []
         for line in template_text.splitlines():
             if line.lstrip().startswith("#"):
                 result_lines.append(line)  # preserve comment lines unchanged
+                continue
+            missing = [v for v in re.findall(r'\$hook_(\w+)', line) if v not in addrs]
+            # A line can also reference a plain `set`-defined variable (not
+            # $hook_*) whose own defining line was skipped above — e.g.
+            # `cpu AddHook $hook_X $some_fix` where `set some_fix ...` was
+            # itself skipped for missing a $hook_* symbol. That leaves
+            # $some_fix undefined, so cascade the skip.
+            other_refs = [v for v in re.findall(r'\$(\w+)', line) if not v.startswith('hook_')]
+            depends_on_skipped = [v for v in other_refs if v in skipped_vars]
+            if missing or depends_on_skipped:
+                # Renode can't use an unresolved $hook_* (or a $variable whose
+                # `set` line was skipped) as a command argument — comment the
+                # line out instead of emitting a broken reference. Missing
+                # symbols were already reported in the WARNING list above.
+                reasons = []
+                if missing:
+                    reasons.append(f"missing symbol: {', '.join(missing)}")
+                if depends_on_skipped:
+                    reasons.append(f"depends on skipped: {', '.join(depends_on_skipped)}")
+                result_lines.append(f"# SKIPPED ({'; '.join(reasons)}): {line}")
+                m = set_re.match(line)
+                if m:
+                    skipped_vars.add(m.group(1))
             else:
                 result_lines.append(re.sub(r'\$hook_(\w+)', replace_hook_var, line))
         processed = "\n".join(result_lines) + "\n"

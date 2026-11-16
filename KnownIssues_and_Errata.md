@@ -18,6 +18,7 @@ Last updated: 2026-03-17
 6. [Build and Toolchain](#6-build-and-toolchain)
 7. [Operational / Environment](#7-operational--environment)
 8. [Performance](#8-performance)
+9. [Meadow.OS (Rebase, NuttX 12)](#9-meadowos-rebase-nuttx-12)
 
 ---
 
@@ -377,8 +378,11 @@ Last updated: 2026-03-17
 - **Status:** HANDLED
 - **Description:** Legacy NuttX places vectors at 0x08040000 and kernel at
   0x08140000 (1MB gap). A flat `nuttx.bin` zero-fills the gap, overwriting user
-  code. Build script generates split binaries (vectors, kernel, user) loaded at
-  correct addresses:
+  code. Meadow.OS (Rebase) uses the same layout (user code from 0x08040200,
+  `CONFIG_NUTTX_USERSPACE`), so the build script splits the binaries for both
+  OSes; `scripts/meadow-os.resc` loads them from `build/` instead of
+  `build/legacy/`. Build script generates split binaries (vectors, kernel, user)
+  loaded at correct addresses:
   ```
   sysbus LoadBinary @build/legacy/nuttx_user.bin 0x08040000
   sysbus LoadBinary @build/legacy/nuttx_vectors.bin 0x08040000
@@ -595,3 +599,95 @@ Last updated: 2026-03-17
      translated native code).
   3. Enable CONFIG_UART4_RXDMA in the NuttX firmware defconfig (changes
      firmware behavior from real hardware — currently uses interrupt-driven RX).
+
+---
+
+## 9. Meadow.OS (Rebase, NuttX 12)
+
+Found while bringing up Meadow.OS (Rebase branch `SupportEmulatorV2`) in November 2026.
+The Legacy sections above still apply unless noted; these are the differences.
+
+### 9.1 Legacy Hooks Assume Legacy Code
+- **Severity:** High (silent corruption)
+- **Status:** HANDLED for the hooks below; others skipped
+- **Description:** `scripts/meadow-legacy-hooks.resc` is shared by both OSes, and
+  `tools/extract-hook-addresses.py` finds several addresses by matching Legacy
+  instruction patterns. A pattern that also matches Meadow.OS code installs a hook
+  that writes Legacy struct offsets. `mono_str_fix` did exactly that: device info
+  showed the OS version as the hardware version and device name, and freeing one of
+  the overwritten fields corrupted the kernel heap, so every HCOM request after the
+  first timed out.
+- **Handling:** the extractor gets `EMU_OS` from the build wrapper and, for Meadow.OS:
+  skips `mono_str_fix` and `mono_ver_skip`; points the hardware-version hook at
+  `_meadowVersionKnown` / `_meadowVer` (and returns the version in R0); points
+  `wdog_skip` at `hcom_host_watchdog_worker()`; and hooks
+  `qspi_waitstatusflags_timed()` (the bounded QSPI waits) to return at once.
+  `mono_ver_copy`, `espcp_force_init` and the `mq_receive` intercept do not match and
+  are skipped.
+- **Rule:** before enabling another Legacy hook for Meadow.OS, check what it writes.
+
+### 9.2 QSPI DMA Bypass and the NuttX 12 `qspi_meminfo_s`
+- **Severity:** High
+- **Status:** FIXED
+- **Description:** NuttX 12 moved and widened the fields of `struct qspi_meminfo_s`
+  (`cmd` at +4, `buflen` u32 at +8, `addr` at +12, `buffer` at +20). With the Legacy
+  layout every Meadow.OS flash read was copied to the wrong RAM, ending in a
+  MemManage fault in `w25qxxxjv_unlock`.
+- **Fix:** `InstallQspiBypass <addr> <flash base> <layout>`, layout 1 for Meadow.OS; it
+  also returns OK in R0.
+
+### 9.3 Stale Kernel ELF
+- **Severity:** High
+- **Status:** FIXED
+- **Description:** the wrapper copied `nuttx.elf` into `build/` only if there was no
+  copy yet, so after a rebuild every hook was generated for the old addresses.
+- **Fix:** the ELF is always copied. Rerun the wrapper after every OS rebuild.
+
+### 9.4 Mono Image Signature and Offset
+- **Severity:** High
+- **Status:** FIXED
+- **Description:** `nuttx_mono.bin` was assembled from the signature and the code
+  separately. The signature was read with readelf's Addr and Off columns as offset and
+  size (a section number below 10 splits into two awk fields), so it came out as
+  zeros ("mono version unavailable"), and it was padded to Legacy's 0x20 bytes when
+  Meadow.OS's is 0x30, which put the Mono code 16 bytes low.
+- **Fix:** one `objcopy` of `.mono_signature`, `.mono`, `.mono_data` and
+  `.mono_comment`.
+
+### 9.5 HCOM File Download Over the Emulated UART
+- **Severity:** High
+- **Status:** FIXED (in Meadow.OS)
+- **Description:** Renode delivers a Meadow.CLI download to UART4 as bursts of tens of
+  KB. Three problems stood between that and a working deploy:
+  1. The serial driver dropped everything past its 512 byte buffer. Meadow.OS
+     `build.sh --emulator` now sets UART4 receive flow control (no RTS pin; the
+     driver holds the RX interrupt off while the buffer is full).
+  2. The download watchdog fired mid-download because virtual time runs ahead while
+     the CPU waits for data (`wdog_skip`, see 9.1).
+  3. A race in hcom's receive buffer discarded good packets as "full with no
+     delimiter". Fixed in Meadow.OS `hcom_host_enq_deq.c`; it could happen on a
+     board too.
+- **Result:** a 225 KB file takes a few seconds; no UART RX bypass (8.6) is needed.
+
+### 9.6 Board Type
+- **Status:** HANDLED
+- **Description:** `configs/meadow-os.yaml` emulates an F7CoreComputeV2, which the
+  Meadow.OS test apps target. The board for the hardware-version hook now comes from
+  the selected config (`EMU_BOARD_VERSION`); before, only the root
+  `emulator.config.yaml` was read, and a missing PyYAML silently gave F7FeatherV2.
+
+### 9.7 Renode Fork: `BackendTerminal.WriteBufferToUART` Zero-Fill
+- **Severity:** Medium (latent)
+- **Status:** FIXED in the fork (`meadow-emulator-fixes`): renode-infrastructure
+  `da6e499cb`, picked up by renode `f90313d0`. Update and rebuild `../renode`
+  (`./setup.sh`, or `git pull && git submodule update` then `build.sh`) to get it.
+- **Description:** the batched write path stopped dequeuing when the UART reported
+  `BufferState.Full` but still passed the whole `count` to `WriteChars`, so the rest of
+  the batch was written as zero bytes and the real bytes followed later, out of order.
+  `STM32F7_USART` never reports Full, so it was not hit by the Meadow configurations.
+- **Fix:** a bulk write updates the UART's buffer state only once the whole batch is in,
+  so for bulk UARTs nothing is written while the UART is Full (the bytes stay queued
+  and `BufferStateChanged` reschedules the write); otherwise exactly the dequeued bytes
+  are written. UARTs without bulk writes are written byte by byte, stopping as soon as
+  they report Full. Verified with Meadow.OS: device info, a 225 KB file write and
+  MiniTests (733 ran, 2 skipped, 1 known failure).

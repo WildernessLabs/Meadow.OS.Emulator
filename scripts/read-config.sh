@@ -11,7 +11,7 @@
 #   EMU_BOARD         — F7FeatherV2 | F7CoreComputeV2
 #   EMU_COPROCESSOR   — stub | dual-machine
 #   EMU_DEFCONFIG     — NuttX defconfig name (e.g., mono, meadow)
-#   EMU_RUNTIME       — (empty) | legacy-os_modern-dotnet
+#   EMU_RUNTIME       — (empty); build.runtime is retired (see the check below)
 #   EMU_HCOM_PORT     — HCOM TCP socket port
 #   EMU_MONITOR_PORT  — Renode monitor port
 #   EMU_ESP32CTRL_PORT — ESP32 control channel port
@@ -31,23 +31,25 @@ else
     EMU_CONFIG_FILE="${_RC_REPO_DIR}/emulator.config.yaml"
 fi
 
-# Parse arguments
+# Parse arguments.  Only these name the config: --config=FILE, --config FILE,
+# or an argument ending in .yaml/.yml.  Anything else is ignored: a script
+# sourced with no arguments sees its caller's arguments, which can include
+# unrelated existing files (run.sh's .resc script, make-lfs-image.sh's output
+# image), and those must not be taken for the config.
+_rc_next_is_config=false
 for arg in "$@"; do
+    if [ "$_rc_next_is_config" = true ]; then
+        EMU_CONFIG_FILE="$arg"
+        _rc_next_is_config=false
+        continue
+    fi
     case "$arg" in
-        --config=*)
-            EMU_CONFIG_FILE="${arg#--config=}"
-            ;;
-        --config)
-            # Next arg is the path — handled by caller
-            ;;
-        *)
-            # Positional arg = config path
-            if [ -f "$arg" ]; then
-                EMU_CONFIG_FILE="$arg"
-            fi
-            ;;
+        --config=*)   EMU_CONFIG_FILE="${arg#--config=}" ;;
+        --config)     _rc_next_is_config=true ;;
+        *.yaml|*.yml) EMU_CONFIG_FILE="$arg" ;;
     esac
 done
+unset _rc_next_is_config
 
 if [ ! -f "$EMU_CONFIG_FILE" ]; then
     echo "ERROR: Config file not found: $EMU_CONFIG_FILE"
@@ -110,8 +112,13 @@ case "$EMU_COPROCESSOR" in
     *) echo "ERROR: Invalid coprocessor '$EMU_COPROCESSOR' in $EMU_CONFIG_FILE (valid: stub, dual-machine)"; _RC_VALID=false ;;
 esac
 case "$EMU_RUNTIME" in
-    ""|legacy-os_modern-dotnet) ;;
-    *) echo "ERROR: Invalid build.runtime '$EMU_RUNTIME' in $EMU_CONFIG_FILE (valid: (empty), legacy-os_modern-dotnet)"; _RC_VALID=false ;;
+    "") ;;
+    legacy-os_modern-dotnet)
+        echo "ERROR: build.runtime legacy-os_modern-dotnet in $EMU_CONFIG_FILE has been retired."
+        echo "       For .NET 10 Mono on Legacy, use configs/legacy-ccm.yaml (meadow-3.0 builds it"
+        echo "       itself); remove build.runtime from the config."
+        _RC_VALID=false ;;
+    *) echo "ERROR: Invalid build.runtime '$EMU_RUNTIME' in $EMU_CONFIG_FILE (build.runtime is retired; remove it)"; _RC_VALID=false ;;
 esac
 if ! [[ "$EMU_HCOM_PORT" =~ ^[0-9]+$ ]] || [ "$EMU_HCOM_PORT" -lt 1 ] || [ "$EMU_HCOM_PORT" -gt 65535 ]; then
     echo "ERROR: Invalid ports.hcom '$EMU_HCOM_PORT' (must be 1-65535)"; _RC_VALID=false

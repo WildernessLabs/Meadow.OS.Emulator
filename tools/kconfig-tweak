@@ -50,6 +50,15 @@ if [ -z "$FILE" ] || [ -z "$ACTION" ] || [ -z "$CONFIG" ]; then
     exit 0
 fi
 
+# Like the real kconfig-tweak, accept the option with or without its CONFIG_
+# prefix.  Meadow.OS's build.sh (ktweak) passes bare names such as DEV_CONSOLE;
+# without this they were appended to .config unprefixed, which Kconfig ignores,
+# so every emulator setting (console, HCOM on UART4) was silently dropped.
+case "$CONFIG" in
+    CONFIG_*) ;;
+    *) CONFIG="CONFIG_${CONFIG}" ;;
+esac
+
 set_config_value() {
     local key="$1"
     local val="$2"
