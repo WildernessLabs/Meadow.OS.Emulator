@@ -216,6 +216,17 @@ user-mode (NAT) network, `10.0.2.0/24`, with no host setup. An app that calls
 host, for both HTTP and HTTPS. Override with `ESPEMU_WIFI_SSID`,
 `ESPEMU_WIFI_PASSWORD` and `ESPEMU_NET`, which is passed to esp-emu's `--net`.
 
+Bluetooth LE: esp-emu needs the firmware's ELF, which `run.sh` passes
+(`build-esp32s3/MeadowComms.elf`, or `ESPEMU_ELF`). To talk to the ESP from a
+"phone", run `tools/ble-peer.py` (Bumble, `pip3 install "bumble>=0.0.220,<0.1"`)
+first and point esp-emu at it. It waits for a connectable device, connects,
+reads every characteristic, writes the writable ones and exits:
+
+```bash
+tools/ble-peer.py --timeout 900 &            # Bumble controller on port 9544
+ESPEMU_BLE_HCI=tcp:localhost:9544 ./run.sh --legacy --esp-emu
+```
+
 ## Using Meadow.CLI
 
 The emulator connects via TCP socket instead of USB serial: Renode exposes the

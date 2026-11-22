@@ -163,7 +163,40 @@ Start from Espressif's `EspEmuSpiBridge.cs` (Apache-2.0, keep the header) and ch
        as `WiFi event 48 not implemented`.
      - One `ioctl Esp32Command returned -1` / `SendingCommand returned: Failure` during
        `Connect`, which still succeeds.
-   - BLE still to do: esp-emu needs a peer (`--ble-hci tcp:...` to Bumble) and `--elf`.
+
+   **BLE done 2026-11-22** (not committed). A net10.0 copy of Meadow.Samples'
+   `Bluetooth_Basics` (device name `MeadowEmu`), booted from an image (`make-lfs-image.sh
+   --legacy`, `run.sh --mount`), with `tools/ble-peer.py` (Bumble) as the phone and
+   `ESPEMU_BLE_HCI=tcp:localhost:9544`: the ESP advertises service 0x00FD, the peer connects,
+   discovers the GATT table (Device Name reads `MeadowEmu`), reads all four characteristics and
+   writes the three writable ones with no errors; the app logs each write (`On_Off: True`,
+   `My Number` 42, `My Text` "emulator"). What it took:
+
+   - `run.sh` passes the firmware ELF (`--elf`, `build-esp32s3/MeadowComms.elf`, or
+     `ESPEMU_ELF`) so esp-emu can intercept the controller, and `--ble-hci $ESPEMU_BLE_HCI`
+     when set; unset, esp-emu's built-in controller is used.
+   - **Meadow-ESP32, S3 build only:** esp-emu replaces `esp_bt_controller_init/enable/
+     disable/deinit` but not `esp_bt_controller_get_status`, so Bluedroid saw an idle
+     controller and `esp_bluedroid_init` failed (`Controller not initialised`). IDF's own
+     Bluedroid `gatt_server` example fails the same way on the S3 (esp-emu documents Bluedroid
+     only for the S31). `main/EspEmuBtControllerStatus.c` keeps the status through linker
+     `--wrap`s; with it `gatt_server` and Meadow both work. Worth reporting upstream.
+   - **`tools/ble-peer.py`:** Bumble's virtual controller sends no Command Complete for
+     commands it does not parse. Bluedroid sends an Espressif vendor command (OGF 0x3F,
+     OCF 0x109) while Meadow's GATT server starts and waited on it for ever. The peer answers
+     vendor commands with success and other unknown commands with "unknown command". It also
+     scans with no time limit, so it can wait through a deploy.
+   - Seen on the way, Meadow.Core, not emulator problems:
+     - `UpdateDefinitionHandles` asks the ESP for the GATT handles a fixed 100 ms after
+       `Start` (`Esp32Coprocessor_IBlutoothAdapter.cs`, "yes. this is ugly."). While the
+       stack was stalled the answer was empty or short, and the app faulted with
+       `An item with the same key has already been added. Key: 0` or `Index was outside the
+       bounds of the array`. It can happen on a board whenever the stack is slow.
+     - Reads after a write return the old value (zeros); the write reaches the app, which
+       calls `SetValue`, but the read-back came first or the value is not pushed to the ESP.
+       Not investigated.
+     - The advertising data has no name (it carries flags, TX power, service 0x00FD and the
+       connection interval); the name is readable from Generic Access.
 5. Compare speed against today's dual-machine mode (0.57x) with `quantumUs` 100 / 1000 / 0.
 
 ### 5. Afterwards

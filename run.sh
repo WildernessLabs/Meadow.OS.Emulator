@@ -315,6 +315,20 @@ if [ "$ESPEMU" = true ]; then
         echo "       or set ESPEMU_FW_PATH to a merged flash image."
         exit 1
     fi
+    # The firmware's ELF lets esp-emu intercept the Bluetooth controller (VHCI)
+    # calls; without it BLE does not work.  ESPEMU_BLE_HCI=tcp:HOST:PORT sends the
+    # HCI traffic to an external controller, such as tools/ble-peer.py (Bumble),
+    # which must be listening first; unset, esp-emu's built-in controller is used.
+    ESPEMU_ELF="${ESPEMU_ELF:-$(dirname "$ESPEMU_FW")/MeadowComms.elf}"
+    ESPEMU_BT_ARGS=()
+    if [ -f "$ESPEMU_ELF" ]; then
+        ESPEMU_BT_ARGS+=(--elf "$ESPEMU_ELF")
+    else
+        echo "WARNING: no firmware ELF at $ESPEMU_ELF (set ESPEMU_ELF); Bluetooth will not work."
+    fi
+    if [ -n "${ESPEMU_BLE_HCI:-}" ]; then
+        ESPEMU_BT_ARGS+=(--ble-hci "$ESPEMU_BLE_HCI")
+    fi
     for port in $ESPEMU_COSIM_PORT $ESPEMU_UART_PORT; do
         if nc -z 127.0.0.1 "$port" 2>/dev/null; then
             echo "ERROR: port $port is already in use (an esp-emu left running?)."
@@ -446,6 +460,7 @@ if [ "$ESPEMU" = true ]; then
     echo "ESP32:   esp-emu (ESP32-S3 build of the real coprocessor firmware)"
     echo "         log: build/legacy/esp-emu.log"
     echo "         Wi-Fi: soft AP \"$ESPEMU_WIFI_SSID\", network $ESPEMU_NET"
+    echo "         BLE: ${ESPEMU_BLE_HCI:-built-in controller}"
 elif [ "$ESP32" = true ]; then
     echo "ESP32:   dual-machine mode (real coprocessor)"
     echo "         meadow config route socket://localhost:4242"
@@ -463,6 +478,7 @@ if [ "$ESPEMU" = true ]; then
     "$ESPEMU_CMD" --chip esp32s3 --firmware "$ESPEMU_FW" \
         --cosim-tcp "127.0.0.1:$ESPEMU_COSIM_PORT" --uart-tcp "127.0.0.1:$ESPEMU_UART_PORT" \
         --net "$ESPEMU_NET" --wifi-ssid "$ESPEMU_WIFI_SSID" --wifi-password "$ESPEMU_WIFI_PASSWORD" \
+        ${ESPEMU_BT_ARGS[@]+"${ESPEMU_BT_ARGS[@]}"} \
         > "$ESPEMU_LOG" 2>&1 &
     ESPEMU_PID=$!
     trap 'kill $ESPEMU_PID 2>/dev/null; wait $ESPEMU_PID 2>/dev/null' EXIT
