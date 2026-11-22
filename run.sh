@@ -287,6 +287,11 @@ fi
 ESPEMU_COSIM_PORT=5590          # also in platforms/meadow-f7-espemu.repl
 ESPEMU_UART_PORT=5591
 ESPEMU_MIN_VERSION=1.2.0        # the first with the chip as an SPI slave
+# esp-emu's network and the soft AP the ESP's Wi-Fi can join (its defaults are
+# myssid / mypassword).  "user" is slirp-style NAT to the host's network, no setup.
+ESPEMU_NET="${ESPEMU_NET:-user,net=10.0.2.0/24}"
+ESPEMU_WIFI_SSID="${ESPEMU_WIFI_SSID:-myssid}"
+ESPEMU_WIFI_PASSWORD="${ESPEMU_WIFI_PASSWORD-mypassword}"
 if [ "$ESPEMU" = true ]; then
     if [ "$LEGACY" != true ]; then
         echo "ERROR: --esp-emu (coprocessor: esp-emu) is only for Legacy so far."
@@ -440,6 +445,7 @@ fi
 if [ "$ESPEMU" = true ]; then
     echo "ESP32:   esp-emu (ESP32-S3 build of the real coprocessor firmware)"
     echo "         log: build/legacy/esp-emu.log"
+    echo "         Wi-Fi: soft AP \"$ESPEMU_WIFI_SSID\", network $ESPEMU_NET"
 elif [ "$ESP32" = true ]; then
     echo "ESP32:   dual-machine mode (real coprocessor)"
     echo "         meadow config route socket://localhost:4242"
@@ -456,6 +462,7 @@ if [ "$ESPEMU" = true ]; then
     ESPEMU_LOG="$SCRIPT_DIR/build/legacy/esp-emu.log"
     "$ESPEMU_CMD" --chip esp32s3 --firmware "$ESPEMU_FW" \
         --cosim-tcp "127.0.0.1:$ESPEMU_COSIM_PORT" --uart-tcp "127.0.0.1:$ESPEMU_UART_PORT" \
+        --net "$ESPEMU_NET" --wifi-ssid "$ESPEMU_WIFI_SSID" --wifi-password "$ESPEMU_WIFI_PASSWORD" \
         > "$ESPEMU_LOG" 2>&1 &
     ESPEMU_PID=$!
     trap 'kill $ESPEMU_PID 2>/dev/null; wait $ESPEMU_PID 2>/dev/null' EXIT

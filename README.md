@@ -210,6 +210,12 @@ ESP's `+++SIR` before each exchange, as the OS's SPI lock does on a board (the
 shared Legacy hooks skip that lock for the EspcpStub). Meadow.CLI `device info`
 reports the coprocessor's firmware version.
 
+Wi-Fi: esp-emu provides a soft AP, `myssid` with password `mypassword`, on a
+user-mode (NAT) network, `10.0.2.0/24`, with no host setup. An app that calls
+`Connect("myssid", "mypassword")` joins it and reaches the internet through the
+host, for both HTTP and HTTPS. Override with `ESPEMU_WIFI_SSID`,
+`ESPEMU_WIFI_PASSWORD` and `ESPEMU_NET`, which is passed to esp-emu's `--net`.
+
 ## Using Meadow.CLI
 
 The emulator connects via TCP socket instead of USB serial: Renode exposes the

@@ -144,6 +144,26 @@ Start from Espressif's `EspEmuSpiBridge.cs` (Apache-2.0, keep the header) and ch
      (`Encoders.cpp` lacks `SpiTransportProvider.hpp`; `AccessPoint.cpp` uses `MACSTR`).
 4. A BLE app from Meadow samples (esp-emu serves BLE GATT on S3), then Wi-Fi via
    `--net user` if the OS path supports it.
+
+   **Wi-Fi done 2026-11-22** (not committed). `run.sh` now starts esp-emu with
+   `--net user,net=10.0.2.0/24` and its soft AP (`myssid` / `mypassword`; override with
+   `ESPEMU_NET`, `ESPEMU_WIFI_SSID`, `ESPEMU_WIFI_PASSWORD`). A copy of Meadow.Samples'
+   `WiFi_Basics` retargeted to net10.0 against Meadow.Core meadow-3.0 (SSID/password changed,
+   one HTTP and one HTTPS GET instead of the loop), deployed with `meadow app run` on
+   `configs/legacy-ccm.yaml`:
+
+   - Scan lists `myssid`, -30 dBm, channel 1; `Connect` raises NetworkConnected.
+   - `GET http://example.com/` returns the page; `GET https://postman-echo.com/get?...` returns
+     its JSON echo (TLS through the ESP's sockets and esp-emu's NAT). About 50 s per request.
+   - Bridge after the run: 1510 exchanges, 62 KB, 2409 extra grants, no SPI-ready timeouts.
+   - Not emulator problems, as on a board with this ESP branch:
+     - The NetworkConnected event carries IP `255.255.255.255`, and `NetworkInterface` shows
+       wlan0 Down with MTU 0. The ESP raises it on `WIFI_EVENT_STA_CONNECTED`, before DHCP.
+     - The ESP's `NetworkGotIpEvent` (48, added 52ce1102, 2024-08) is logged by Meadow.Core
+       as `WiFi event 48 not implemented`.
+     - One `ioctl Esp32Command returned -1` / `SendingCommand returned: Failure` during
+       `Connect`, which still succeeds.
+   - BLE still to do: esp-emu needs a peer (`--ble-hci tcp:...` to Bumble) and `--elf`.
 5. Compare speed against today's dual-machine mode (0.57x) with `quantumUs` 100 / 1000 / 0.
 
 ### 5. Afterwards
