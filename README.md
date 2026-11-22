@@ -4,6 +4,7 @@ Full hardware emulation of Meadow.OS using [Renode](https://renode.io). Supports
 
 - **Single-machine** — STM32F777 (NuttX) with stubbed ESP32 coprocessor (EspcpStub)
 - **Dual-machine** — STM32F777 (NuttX) + real ESP32 (Meadow firmware) with bidirectional SPI bridge
+- **esp-emu** (Legacy) — STM32F777 (NuttX) + the real Meadow firmware's ESP32-S3 build running in Espressif's [esp-emu](https://github.com/espressif/esp-emulator), joined over SPI2, UART5 and EN
 
 Both modes support Meadow.CLI connection via TCP socket for `device info`, app deployment, and all standard HCOM commands.
 
@@ -64,9 +65,10 @@ board: F7FeatherV2
 
 coprocessor: stub
 # coprocessor: dual-machine
+# coprocessor: esp-emu
 ```
 
-CLI args override config values: `--legacy`, `--esp32`, `--port=N`.
+CLI args override config values: `--legacy`, `--esp32`, `--esp-emu`, `--port=N`.
 
 ## Running
 
@@ -74,6 +76,7 @@ CLI args override config values: `--legacy`, `--esp32`, `--port=N`.
 ./run.sh                                   # Uses emulator.config.yaml
 ./run.sh --config=configs/meadow-os.yaml   # One-off config override (--config FILE also works)
 ./run.sh --legacy --esp32                  # CLI overrides (dual-machine mode)
+./run.sh --legacy --esp-emu                # ESP in esp-emu (see below)
 ./run.sh --port=5555                       # Custom monitor port
 ./run.sh --rebase --mount=app.bin           # Boot with a file system image (tools/make-lfs-image.sh)
 ./run.sh --gdb                             # GDB server on port 3333; the CPU waits at reset
@@ -177,6 +180,35 @@ Key C# peripherals:
 - `peripherals/SpiBridge.cs` — ISPIPeripheral with cross-machine frame queues
 - `peripherals/ESP32_SPI.cs` — SPI3 register map, DMA descriptor chains, IRQ generation
 - `peripherals/ESP32_DPORT.cs` — 69-source interrupt matrix with level-OR routing
+
+## ESP32 Coprocessor in esp-emu (Legacy)
+
+`--esp-emu` (or `coprocessor: esp-emu`) runs the real Meadow-ESP32 firmware in
+Espressif's esp-emu, which emulates the chip (radio, timers, SPI, UART) rather
+than relying on hand-written peripherals and hooks. esp-emu has no original
+ESP32, so the firmware is its ESP32-S3 emulator build. See [UseEspEmu.md](UseEspEmu.md)
+for the design and test results.
+
+```
+STM32 (NuttX, Renode)                    ESP32-S3 (Meadow firmware, esp-emu)
+  espcp_send_data_over_spi ─ EspcpSpiBypass
+    │                                      │
+  EspEmuBridge (C#) on SPI2 ══ --cosim-tcp ══► spi_slave on SPI3 (CS GPIO 10)
+  UART5 (espcp_uart_monitor) ◄═ --uart-tcp ══ UART0: +++RST/RDY/SIR/MW, log
+  PF7 (ESP reset) ─────────── EnDrive ──────► EN
+                     clock held in 100 µs lockstep
+```
+
+Requirements: esp-emu 1.2.0 or later on `PATH` (or `ESP_EMU=path`), and the
+firmware built with `cd $MEADOW_EMULATOR_ESP_DIR && ./build.sh --emulator --build`
+(`build-esp32s3/merged_flash.bin`; `ESPEMU_FW_PATH` overrides). `run.sh` starts
+esp-emu first (log in `build/legacy/esp-emu.log`) and stops it on exit. The
+ESP's own UART output is copied to `/tmp/renode-esp-uart.txt`.
+
+The bridge holds the ESP in reset until the OS releases PF7, and waits for the
+ESP's `+++SIR` before each exchange, as the OS's SPI lock does on a board (the
+shared Legacy hooks skip that lock for the EspcpStub). Meadow.CLI `device info`
+reports the coprocessor's firmware version.
 
 ## Using Meadow.CLI
 

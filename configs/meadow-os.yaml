@@ -17,6 +17,8 @@ board: F7CoreComputeV2
 # ESP32 coprocessor mode
 #   stub         — EspcpStub (fast, no real ESP32 needed)
 #   dual-machine — Real ESP32 firmware on emulated Xtensa (requires Meadow-ESP32 build)
+#   esp-emu      — Real firmware (ESP32-S3 build) in Espressif's esp-emu (Legacy only;
+#                  build.sh --emulator in Meadow-ESP32, esp-emu 1.2.0+)
 coprocessor: stub
 # coprocessor: dual-machine
 

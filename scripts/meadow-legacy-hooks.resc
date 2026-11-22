@@ -76,7 +76,8 @@ cpu AddHook $hook_MONO_STR_FIX_ADDR $mono_str_fix
 
 # Workaround: STM32SPI doesn't drive DMA — bypass espcp_send_data_over_spi with direct
 # peripheral calls. Uses compiled C# hook (EspcpSpiBypass.cs) for 10-100x speedup.
-# Finds SpiBridge (dual-machine) or EspcpStub (single-machine) automatically.
+# Finds SpiBridge (dual-machine), EspEmuBridge (esp-emu) or EspcpStub (single-machine)
+# automatically.
 # R0 = tx buffer (0 for receive-only), R1 = rx buffer (0 for send-only), R2 = buffer length
 cpu InstallEspcpSpiBypass $hook_ESPCP_SEND_DATA_OVER_SPI
 
