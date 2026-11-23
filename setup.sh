@@ -509,7 +509,7 @@ if [ -f "$ESP_EMU_FW" ]; then
 elif [ -f "$MEADOW_EMULATOR_ESP_DIR/build.sh" ] && grep -q -- "--emulator" "$MEADOW_EMULATOR_ESP_DIR/build.sh"; then
     warn "ESP32-S3 firmware not built (needs ESP-IDF 6.1) — run: cd $MEADOW_EMULATOR_ESP_DIR && ./build.sh --emulator --build"
 else
-    warn "ESP32-S3 firmware — $MEADOW_EMULATOR_ESP_DIR has no build.sh --emulator; use Meadow-ESP32 branch SupportEspEmu (or set MEADOW_EMULATOR_ESP_DIR)"
+    warn "ESP32-S3 firmware — $MEADOW_EMULATOR_ESP_DIR has no build.sh --emulator; update it to Meadow-ESP32 develop (or set MEADOW_EMULATOR_ESP_DIR)"
 fi
 fi
 
