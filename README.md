@@ -4,7 +4,7 @@ Full hardware emulation of Meadow.OS using [Renode](https://renode.io). Supports
 
 - **Single-machine** — STM32F777 (NuttX) with stubbed ESP32 coprocessor (EspcpStub)
 - **Dual-machine** — STM32F777 (NuttX) + real ESP32 (Meadow firmware) with bidirectional SPI bridge
-- **esp-emu** (Legacy) — STM32F777 (NuttX) + the real Meadow firmware's ESP32-S3 build running in Espressif's [esp-emu](https://github.com/espressif/esp-emulator), joined over SPI2, UART5 and EN
+- **esp-emu** (Legacy and Meadow.OS) — STM32F777 (NuttX) + the real Meadow firmware's ESP32-S3 build running in Espressif's [esp-emu](https://github.com/espressif/esp-emulator), joined over SPI2, UART5 and EN
 
 Both modes support Meadow.CLI connection via TCP socket for `device info`, app deployment, and all standard HCOM commands.
 
@@ -77,6 +77,7 @@ CLI args override config values: `--legacy`, `--esp32`, `--esp-emu`, `--port=N`.
 ./run.sh --config=configs/meadow-os.yaml   # One-off config override (--config FILE also works)
 ./run.sh --legacy --esp32                  # CLI overrides (dual-machine mode)
 ./run.sh --legacy --esp-emu                # ESP in esp-emu (see below)
+./run.sh --rebase --esp-emu                # The same with Meadow.OS
 ./run.sh --port=5555                       # Custom monitor port
 ./run.sh --rebase --mount=app.bin           # Boot with a file system image (tools/make-lfs-image.sh)
 ./run.sh --gdb                             # GDB server on port 3333; the CPU waits at reset
@@ -181,7 +182,7 @@ Key C# peripherals:
 - `peripherals/ESP32_SPI.cs` — SPI3 register map, DMA descriptor chains, IRQ generation
 - `peripherals/ESP32_DPORT.cs` — 69-source interrupt matrix with level-OR routing
 
-## ESP32 Coprocessor in esp-emu (Legacy)
+## ESP32 Coprocessor in esp-emu
 
 `--esp-emu` (or `coprocessor: esp-emu`) runs the real Meadow-ESP32 firmware in
 Espressif's esp-emu, which emulates the chip (radio, timers, SPI, UART) rather
@@ -203,8 +204,9 @@ Requirements: esp-emu 1.2.0 or later on `PATH` (or `ESP_EMU=path`; `./setup.sh`
 installs it for Legacy, in `~/.local/bin`), and the firmware built with
 `cd $MEADOW_EMULATOR_ESP_DIR && ./build.sh --emulator --build`
 (`build-esp32s3/merged_flash.bin`; `ESPEMU_FW_PATH` overrides). `run.sh` starts
-esp-emu first (log in `build/legacy/esp-emu.log`) and stops it on exit. The
-ESP's own UART output is copied to `/tmp/renode-esp-uart.txt`.
+esp-emu first (log in `esp-emu.log` in `build/legacy/` for Legacy, `build/` for
+Meadow.OS) and stops it on exit. The ESP's own UART output is copied to
+`/tmp/renode-esp-uart.txt`.
 
 The bridge holds the ESP in reset until the OS releases PF7, and waits for the
 ESP's `+++SIR` before each exchange, as the OS's SPI lock does on a board (the
@@ -213,9 +215,36 @@ reports the coprocessor's firmware version.
 
 Clock: the ESP's clock is held to the STM32's in steps of `ESPEMU_QUANTUM_US`
 microseconds (default 100; 0 lets esp-emu run free). `run.sh` writes the
-bridge's settings to `build/legacy/espemu-bridge.repl` on each run. A Wi-Fi
+bridge's settings to `espemu-bridge.repl` in the same directory on each run. A Wi-Fi
 workload takes 145 s at 100 us, 150 s at 1000 us and 156 s free-running
 (UseEspEmu.md, step 5).
+
+UART: the ESP's bytes reach the STM32's UART5 at 115200 baud in emulated time.
+esp-emu sends a burst at once, and delivered that way, trace output overran the
+OS's 512-byte receive buffer and lost `+++` control lines, which stalled SPI.
+
+ESP logging: build with `./build.sh --emulator --debug=wifi,messages
+--tracemessages --build` and set this in the app's `meadow.config.yaml`:
+
+```yaml
+CoProcessor:
+    LogDestination: UART
+    LogComponents: WiFi
+InternalDebug:
+    Uart1Use: trace
+    TraceLevel: 2
+```
+
+On Meadow.OS the ESP's log appears as `ESP Log:` lines on USART1
+(`/tmp/renode-uart-meadow.txt`), with the app's output. On Legacy it is only in
+`/tmp/renode-esp-uart.txt`, because a Legacy hook skips `hcom_logging_syslog`.
+Adding `Messages` to `LogComponents` dumps every payload over the UART and slows
+a TLS handshake enough that a remote server closed the connection, so HTTPS
+failed with it on and worked with `WiFi` alone.
+
+To start an app at a chosen moment, boot with `--gdb=3334`, which holds the CPU
+at reset, then release it with
+`arm-none-eabi-gdb -q -batch -ex 'target remote localhost:3334' -ex detach`.
 
 Wi-Fi: esp-emu provides a soft AP, `myssid` with password `mypassword`, on a
 user-mode (NAT) network, `10.0.2.0/24`, with no host setup. An app that calls

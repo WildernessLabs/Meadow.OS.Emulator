@@ -20,6 +20,7 @@ w25q: SPI.Winbond_W25QXXXJV @ quadspi
     underlyingMemory: qspiFlashMem
 
 // The bridge to esp-emu (SPI.EspEmuBridge on spi2, and PF7 to the ESP's EN) is
-// in build/legacy/espemu-bridge.repl, which run.sh writes on every run so the
-// clock quantum (ESPEMU_QUANTUM_US) can change; scripts/meadow-espemu.resc loads
-// it straight after this file.
+// in espemu-bridge.repl (build/legacy/ for Legacy, build/ for Meadow.OS), which
+// run.sh writes on every run so the clock quantum (ESPEMU_QUANTUM_US) can change;
+// scripts/meadow-espemu.resc and meadow-os-espemu.resc load it straight after
+// this file.

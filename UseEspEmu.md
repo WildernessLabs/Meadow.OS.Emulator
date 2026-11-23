@@ -267,8 +267,28 @@ Start from Espressif's `EspEmuSpiBridge.cs` (Apache-2.0, keep the header) and ch
 
 ### 5. Afterwards
 
-Once the esp-emu path works for Legacy, add it for Rebase (no dual-machine mode exists for
-Rebase today), then decide whether to retire `meadow-dual.resc`, `meadow-esp32.repl` and the
+Rebase now runs with esp-emu: `./run.sh --rebase --esp-emu` (`scripts/meadow-os-espemu.resc`).
+Measured with the `--debug=wifi,messages --tracemessages` S3 firmware:
+
+- Rebase, `LogComponents: WiFi`: HTTP and HTTPS work, with the ESP's log on USART1.
+  `meadow runtime disable`/`enable` reset the board and the ESP answers afterwards.
+  `meadow app run` of the Wi-Fi app deploys and runs in 254 s.
+- Rebase, `LogComponents: WiFi;Messages`: HTTP works. HTTPS fails: the server closes the
+  connection after the client's 85-byte handshake reply, which took 2.4 s of emulated time
+  against 0.6 s with `WiFi` alone. A server timeout is inferred, not confirmed.
+- Before this, trace output stalled SPI on both OSes (`espcp: 3 consecutive response timeouts`,
+  `no SPI ready signal`), and on Legacy a board reset left HCOM unanswered. The bridge now
+  delivers the ESP's UART bytes at 115200 baud in emulated time, and neither happens.
+  Lost control lines from an overrun of the 512-byte UART5 receive buffer are the likely
+  cause; the overrun itself was not observed.
+- Legacy with pacing: Wi-Fi 149 s (145 s before), BLE passes, and resets work with and
+  without the trace. Legacy's ESP log stays off USART1 because a hook skips
+  `hcom_logging_syslog`.
+- Not done: BLE on Rebase; `setup.sh` still installs esp-emu only for Legacy; a Rebase app
+  must not call `NetworkInterface.GetAllNetworkInterfaces()`, which throws without
+  `/etc/resolv.conf`.
+
+Then decide whether to retire `meadow-dual.resc`, `meadow-esp32.repl` and the
 `ESP32_*.cs` / Xtensa hook files.
 
 ## Open questions
