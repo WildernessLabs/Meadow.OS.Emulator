@@ -9,7 +9,7 @@
 # Exports:
 #   EMU_OS            — legacy | meadow-os
 #   EMU_BOARD         — F7FeatherV2 | F7CoreComputeV2
-#   EMU_COPROCESSOR   — stub | dual-machine
+#   EMU_COPROCESSOR   — stub | dual-machine | esp-emu
 #   EMU_DEFCONFIG     — NuttX defconfig name (e.g., mono, meadow)
 #   EMU_RUNTIME       — (empty); build.runtime is retired (see the check below)
 #   EMU_HCOM_PORT     — HCOM TCP socket port
@@ -108,8 +108,8 @@ case "$EMU_BOARD" in
     *) echo "ERROR: Invalid board '$EMU_BOARD' in $EMU_CONFIG_FILE (valid: F7FeatherV1, F7FeatherV2, F7CoreComputeV2)"; _RC_VALID=false ;;
 esac
 case "$EMU_COPROCESSOR" in
-    stub|dual-machine) ;;
-    *) echo "ERROR: Invalid coprocessor '$EMU_COPROCESSOR' in $EMU_CONFIG_FILE (valid: stub, dual-machine)"; _RC_VALID=false ;;
+    stub|dual-machine|esp-emu) ;;
+    *) echo "ERROR: Invalid coprocessor '$EMU_COPROCESSOR' in $EMU_CONFIG_FILE (valid: stub, dual-machine, esp-emu)"; _RC_VALID=false ;;
 esac
 case "$EMU_RUNTIME" in
     "") ;;

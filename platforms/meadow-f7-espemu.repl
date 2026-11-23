@@ -1,0 +1,26 @@
+// Meadow F7 Micro board — STM32F777ZIT6 + external peripherals
+// esp-emu variant: the ESP32 coprocessor is Meadow-ESP32's ESP32-S3 emulator
+// build running in esp-emu, joined to SPI2 by EspEmuBridge. See UseEspEmu.md.
+
+using "stm32f777.repl"
+
+// --- Board-Level External Peripherals ---
+
+// External SDRAM via FMC — 32MB (matches CONFIG_HEAP2_SIZE)
+sdram: Memory.MappedMemory @ sysbus 0xC0000000
+    size: 0x2000000
+
+// QSPI flash — 64MB Winbond W25QXXXJV (external, on Meadow board)
+// Backing memory at 0x90000000 for memory-mapped read access.
+// W25Q connects to the on-chip QUADSPI controller.
+qspiFlashMem: Memory.MappedMemory @ sysbus 0x90000000
+    size: 0x4000000
+
+w25q: SPI.Winbond_W25QXXXJV @ quadspi
+    underlyingMemory: qspiFlashMem
+
+// The bridge to esp-emu (SPI.EspEmuBridge on spi2, and PF7 to the ESP's EN) is
+// in espemu-bridge.repl (build/legacy/ for Legacy, build/ for Meadow.OS), which
+// run.sh writes on every run so the clock quantum (ESPEMU_QUANTUM_US) can change;
+// scripts/meadow-espemu.resc and meadow-os-espemu.resc load it straight after
+// this file.

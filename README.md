@@ -4,6 +4,7 @@ Full hardware emulation of Meadow.OS using [Renode](https://renode.io). Supports
 
 - **Single-machine** — STM32F777 (NuttX) with stubbed ESP32 coprocessor (EspcpStub)
 - **Dual-machine** — STM32F777 (NuttX) + real ESP32 (Meadow firmware) with bidirectional SPI bridge
+- **esp-emu** (Legacy and Meadow.OS) — STM32F777 (NuttX) + the real Meadow firmware's ESP32-S3 build running in Espressif's [esp-emu](https://github.com/espressif/esp-emulator), joined over SPI2, UART5 and EN
 
 Both modes support Meadow.CLI connection via TCP socket for `device info`, app deployment, and all standard HCOM commands.
 
@@ -64,9 +65,10 @@ board: F7FeatherV2
 
 coprocessor: stub
 # coprocessor: dual-machine
+# coprocessor: esp-emu
 ```
 
-CLI args override config values: `--legacy`, `--esp32`, `--port=N`.
+CLI args override config values: `--legacy`, `--esp32`, `--esp-emu`, `--port=N`.
 
 ## Running
 
@@ -74,6 +76,8 @@ CLI args override config values: `--legacy`, `--esp32`, `--port=N`.
 ./run.sh                                   # Uses emulator.config.yaml
 ./run.sh --config=configs/meadow-os.yaml   # One-off config override (--config FILE also works)
 ./run.sh --legacy --esp32                  # CLI overrides (dual-machine mode)
+./run.sh --legacy --esp-emu                # ESP in esp-emu (see below)
+./run.sh --rebase --esp-emu                # The same with Meadow.OS
 ./run.sh --port=5555                       # Custom monitor port
 ./run.sh --rebase --mount=app.bin           # Boot with a file system image (tools/make-lfs-image.sh)
 ./run.sh --gdb                             # GDB server on port 3333; the CPU waits at reset
@@ -177,6 +181,87 @@ Key C# peripherals:
 - `peripherals/SpiBridge.cs` — ISPIPeripheral with cross-machine frame queues
 - `peripherals/ESP32_SPI.cs` — SPI3 register map, DMA descriptor chains, IRQ generation
 - `peripherals/ESP32_DPORT.cs` — 69-source interrupt matrix with level-OR routing
+
+## ESP32 Coprocessor in esp-emu
+
+`--esp-emu` (or `coprocessor: esp-emu`) runs the real Meadow-ESP32 firmware in
+Espressif's esp-emu, which emulates the chip (radio, timers, SPI, UART) rather
+than relying on hand-written peripherals and hooks. esp-emu has no original
+ESP32, so the firmware is its ESP32-S3 emulator build. See [UseEspEmu.md](UseEspEmu.md)
+for the design and test results.
+
+```
+STM32 (NuttX, Renode)                    ESP32-S3 (Meadow firmware, esp-emu)
+  espcp_send_data_over_spi ─ EspcpSpiBypass
+    │                                      │
+  EspEmuBridge (C#) on SPI2 ══ --cosim-tcp ══► spi_slave on SPI3 (CS GPIO 10)
+  UART5 (espcp_uart_monitor) ◄═ --uart-tcp ══ UART0: +++RST/RDY/SIR/MW, log
+  PF7 (ESP reset) ─────────── EnDrive ──────► EN
+                     clock held in 100 µs lockstep
+```
+
+Requirements: esp-emu 1.2.0 or later on `PATH` (or `ESP_EMU=path`; `./setup.sh`
+installs it, in `~/.local/bin`), and the firmware built with
+`cd $MEADOW_EMULATOR_ESP_DIR && ./build.sh --emulator --build`
+(`build-esp32s3/merged_flash.bin`; `ESPEMU_FW_PATH` overrides). `run.sh` starts
+esp-emu first (log in `esp-emu.log` in `build/legacy/` for Legacy, `build/` for
+Meadow.OS) and stops it on exit. The ESP's own UART output is copied to
+`/tmp/renode-esp-uart.txt`.
+
+The bridge holds the ESP in reset until the OS releases PF7, and waits for the
+ESP's `+++SIR` before each exchange, as the OS's SPI lock does on a board (the
+shared Legacy hooks skip that lock for the EspcpStub). Meadow.CLI `device info`
+reports the coprocessor's firmware version.
+
+Clock: the ESP's clock is held to the STM32's in steps of `ESPEMU_QUANTUM_US`
+microseconds (default 100; 0 lets esp-emu run free). `run.sh` writes the
+bridge's settings to `espemu-bridge.repl` in the same directory on each run. A Wi-Fi
+workload takes 145 s at 100 us, 150 s at 1000 us and 156 s free-running
+(UseEspEmu.md, step 5).
+
+UART: the ESP's bytes reach the STM32's UART5 at 115200 baud in emulated time.
+esp-emu sends a burst at once, and delivered that way, trace output overran the
+OS's 512-byte receive buffer and lost `+++` control lines, which stalled SPI.
+
+ESP logging: build with `./build.sh --emulator --debug=wifi,messages
+--tracemessages --build` and set this in the app's `meadow.config.yaml`:
+
+```yaml
+CoProcessor:
+    LogDestination: UART
+    LogComponents: WiFi
+InternalDebug:
+    Uart1Use: trace
+    TraceLevel: 2
+```
+
+On Meadow.OS the ESP's log appears as `ESP Log:` lines on USART1
+(`/tmp/renode-uart-meadow.txt`), with the app's output. On Legacy it is only in
+`/tmp/renode-esp-uart.txt`, because a Legacy hook skips `hcom_logging_syslog`.
+Adding `Messages` to `LogComponents` dumps every payload over the UART and slows
+a TLS handshake enough that a remote server closed the connection, so HTTPS
+failed with it on and worked with `WiFi` alone.
+
+To start an app at a chosen moment, boot with `--gdb=3334`, which holds the CPU
+at reset, then release it with
+`arm-none-eabi-gdb -q -batch -ex 'target remote localhost:3334' -ex detach`.
+
+Wi-Fi: esp-emu provides a soft AP, `myssid` with password `mypassword`, on a
+user-mode (NAT) network, `10.0.2.0/24`, with no host setup. An app that calls
+`Connect("myssid", "mypassword")` joins it and reaches the internet through the
+host, for both HTTP and HTTPS. Override with `ESPEMU_WIFI_SSID`,
+`ESPEMU_WIFI_PASSWORD` and `ESPEMU_NET`, which is passed to esp-emu's `--net`.
+
+Bluetooth LE: esp-emu needs the firmware's ELF, which `run.sh` passes
+(`build-esp32s3/MeadowComms.elf`, or `ESPEMU_ELF`). To talk to the ESP from a
+"phone", run `tools/ble-peer.py` (Bumble, which `./setup.sh` installs in
+`build/ble-venv`) first and point esp-emu at it. It waits for a connectable device, connects,
+reads every characteristic, writes the writable ones and exits:
+
+```bash
+build/ble-venv/bin/python tools/ble-peer.py --timeout 900 &   # Bumble controller on port 9544
+ESPEMU_BLE_HCI=tcp:localhost:9544 ./run.sh --legacy --esp-emu
+```
 
 ## Using Meadow.CLI
 
@@ -443,6 +528,7 @@ Both MCUs have full platform definitions written from scratch (Renode has no sto
 | `ESP32_TimerGroup.cs` | Timer group with calibration ready bit |
 | `QspiDmaBypass.cs` | C# hook: QSPI DMA memory copy bypass (22K+ calls during assembly load) |
 | `EspcpSpiBypass.cs` | C# hook: ESPCP SPI DMA bypass |
+| `SysTickFromReload.cs` | Sets the SysTick rate from the firmware's RELOAD value (Renode ignores CLKSOURCE = HCLK/8) |
 | `SvcPrimaskFix.cs` | C# hook: PRIMASK clearing at SVC (fallback if fork not available) |
 | `MqReceiveIntercept.cs` | C# hook: mq_receive interception for ESPCP polling |
 | `UartRxBypass.cs` | C# hook: UART RX bypass for fast file deploy (currently disabled — Renode 1.16.1 API change) |

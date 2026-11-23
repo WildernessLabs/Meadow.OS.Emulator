@@ -85,6 +85,7 @@ fi
 # Apply CLI overrides on top of config values
 LEGACY=$( [ "$EMU_OS" = "legacy" ] && echo true || echo false )
 ESP32=$( [ "$EMU_COPROCESSOR" = "dual-machine" ] && echo true || echo false )
+ESPEMU=$( [ "$EMU_COPROCESSOR" = "esp-emu" ] && echo true || echo false )
 MONITOR_PORT="$EMU_MONITOR_PORT"
 
 POSITIONAL_ARGS=()
@@ -119,6 +120,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --esp32)
             ESP32=true
+            ESPEMU=false
+            ;;
+        --esp-emu)
+            ESPEMU=true
+            ESP32=false
             ;;
         --port=*)
             MONITOR_PORT="${1#--port=}"
@@ -145,6 +151,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --legacy        Override OS to legacy (same as os: legacy in config)"
             echo "  --rebase        Override OS to meadow-os (same as os: meadow-os in config)"
             echo "  --esp32         Override coprocessor to dual-machine"
+            echo "  --esp-emu       Override coprocessor to esp-emu: Meadow-ESP32's ESP32-S3 build"
+            echo "                  (build.sh --emulator) in Espressif's esp-emu"
             echo "  --port=N        Override Renode monitor port"
             echo "  --gdb[=PORT]    Start a GDB server (default port: ports.gdb in the config, else"
             echo "                  3333); the CPU waits at reset until GDB continues.  A non-zero"
@@ -166,6 +174,7 @@ while [[ $# -gt 0 ]]; do
             echo "  ./run.sh                                        # Uses emulator.config.yaml"
             echo "  ./run.sh --config configs/meadow-os.yaml        # Use specific config"
             echo "  ./run.sh --legacy --esp32                       # Override config"
+            echo "  ./run.sh --legacy --esp-emu                     # ESP in esp-emu"
             exit 0
             ;;
         *)
@@ -184,10 +193,14 @@ source "$SCRIPT_DIR/scripts/resolve-locations.sh" "$( [ "$LEGACY" = true ] && ec
 
 # Select default script based on config + overrides
 if [ -z "$SCRIPT" ]; then
-    if [ "$LEGACY" = true ] && [ "$ESP32" = true ]; then
+    if [ "$LEGACY" = true ] && [ "$ESPEMU" = true ]; then
+        SCRIPT="meadow-espemu"
+    elif [ "$LEGACY" = true ] && [ "$ESP32" = true ]; then
         SCRIPT="meadow-dual"
     elif [ "$LEGACY" = true ]; then
         SCRIPT="meadow-legacy-headless"
+    elif [ "$ESPEMU" = true ]; then
+        SCRIPT="meadow-os-espemu"
     else
         SCRIPT="meadow-os"
     fi
@@ -263,6 +276,89 @@ if [ "$ESP32" = true ]; then
         echo "       See roms/README.md for download instructions"
         exit 1
     fi
+fi
+
+# -------------------------------------------------------------------------
+# esp-emu (coprocessor: esp-emu, or --esp-emu)
+#
+# The ESP runs Meadow-ESP32's ESP32-S3 emulator build (build.sh --emulator) in
+# Espressif's esp-emu, started here before Renode: EspEmuBridge
+# (platforms/meadow-f7-espemu.repl) connects to its co-simulation port when the
+# platform loads, and to its UART0 port for UART5.  See UseEspEmu.md.
+# -------------------------------------------------------------------------
+ESPEMU_COSIM_PORT=5590          # written into espemu-bridge.repl
+# The ESP's clock is held to the STM32's this many microseconds at a time
+# (esp-emu lockstep); 0 lets esp-emu run free.  See UseEspEmu.md, step 5.
+ESPEMU_QUANTUM_US="${ESPEMU_QUANTUM_US:-100}"
+ESPEMU_UART_PORT=5591
+ESPEMU_MIN_VERSION=1.2.0        # the first with the chip as an SPI slave
+# esp-emu's network and the soft AP the ESP's Wi-Fi can join (its defaults are
+# myssid / mypassword).  "user" is slirp-style NAT to the host's network, no setup.
+ESPEMU_NET="${ESPEMU_NET:-user,net=10.0.2.0/24}"
+ESPEMU_WIFI_SSID="${ESPEMU_WIFI_SSID:-myssid}"
+ESPEMU_WIFI_PASSWORD="${ESPEMU_WIFI_PASSWORD-mypassword}"
+if [ "$LEGACY" = true ]; then ESPEMU_BUILD_DIR="$SCRIPT_DIR/build/legacy"; else ESPEMU_BUILD_DIR="$SCRIPT_DIR/build"; fi
+if [ "$ESPEMU" = true ]; then
+    ESPEMU_CMD="${ESP_EMU:-$(command -v esp-emu || true)}"
+    if [ -z "$ESPEMU_CMD" ] || [ ! -x "$ESPEMU_CMD" ]; then
+        echo "ERROR: esp-emu not found on PATH (or set ESP_EMU to its path)."
+        echo "       Install it from https://github.com/espressif/esp-emulator/releases"
+        exit 1
+    fi
+    ESPEMU_VERSION=$("$ESPEMU_CMD" --version 2>/dev/null | grep -o -E '[0-9]+\.[0-9]+\.[0-9]+' | tail -1)
+    if [ -z "$ESPEMU_VERSION" ] || [ "$(printf '%s\n%s\n' "$ESPEMU_MIN_VERSION" "$ESPEMU_VERSION" | sort -V | head -1)" != "$ESPEMU_MIN_VERSION" ]; then
+        echo "ERROR: esp-emu ${ESPEMU_VERSION:-(unknown version)} at $ESPEMU_CMD; $ESPEMU_MIN_VERSION or later is needed."
+        exit 1
+    fi
+    ESPEMU_FW="${ESPEMU_FW_PATH:-$MEADOW_EMULATOR_ESP_DIR/build-esp32s3/merged_flash.bin}"
+    if [ ! -f "$ESPEMU_FW" ]; then
+        echo "ERROR: ESP32-S3 firmware not found: $ESPEMU_FW"
+        echo "       Build it:  cd $MEADOW_EMULATOR_ESP_DIR && ./build.sh --emulator --build"
+        echo "       or set ESPEMU_FW_PATH to a merged flash image."
+        exit 1
+    fi
+    # The firmware's ELF lets esp-emu intercept the Bluetooth controller (VHCI)
+    # calls; without it BLE does not work.  ESPEMU_BLE_HCI=tcp:HOST:PORT sends the
+    # HCI traffic to an external controller, such as tools/ble-peer.py (Bumble),
+    # which must be listening first; unset, esp-emu's built-in controller is used.
+    ESPEMU_ELF="${ESPEMU_ELF:-$(dirname "$ESPEMU_FW")/MeadowComms.elf}"
+    ESPEMU_BT_ARGS=()
+    if [ -f "$ESPEMU_ELF" ]; then
+        ESPEMU_BT_ARGS+=(--elf "$ESPEMU_ELF")
+    else
+        echo "WARNING: no firmware ELF at $ESPEMU_ELF (set ESPEMU_ELF); Bluetooth will not work."
+    fi
+    if [ -n "${ESPEMU_BLE_HCI:-}" ]; then
+        ESPEMU_BT_ARGS+=(--ble-hci "$ESPEMU_BLE_HCI")
+    fi
+    for port in $ESPEMU_COSIM_PORT $ESPEMU_UART_PORT; do
+        if nc -z 127.0.0.1 "$port" 2>/dev/null; then
+            echo "ERROR: port $port is already in use (an esp-emu left running?)."
+            exit 1
+        fi
+    done
+    if ! [[ "$ESPEMU_QUANTUM_US" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: ESPEMU_QUANTUM_US must be a whole number of microseconds: $ESPEMU_QUANTUM_US"
+        exit 1
+    fi
+    # The bridge's platform entries, loaded by scripts/meadow-espemu.resc
+    # after platforms/meadow-f7-espemu.repl.  csPin is the S3 build's chip
+    # select (Meadow-ESP32 Gpio.hpp).  PF7 drives the ESP's EN on the board
+    # (open drain, low holds it in reset); syscfg#5@7 is the EXTI line from
+    # stm32f777.repl, kept.
+    mkdir -p "$ESPEMU_BUILD_DIR"
+    cat > "$ESPEMU_BUILD_DIR/espemu-bridge.repl" <<EOF
+// Generated by run.sh on every run; do not edit.
+espEmu: SPI.EspEmuBridge @ spi2
+    port: $ESPEMU_COSIM_PORT
+    csPin: 10
+    quantumUs: $ESPEMU_QUANTUM_US
+
+gpioPortF:
+    7 -> syscfg#5@7 | espEmu@1
+EOF
+    echo "esp-emu: $ESPEMU_CMD ($ESPEMU_VERSION)"
+    echo "ESP32-S3 firmware: $ESPEMU_FW"
 fi
 
 # -------------------------------------------------------------------------
@@ -382,7 +478,17 @@ fi
 if [ "$GDB_PORT" != 0 ]; then
     echo "GDB:     target remote :$GDB_PORT  (the CPU waits at reset; GDB 'continue' starts it)"
 fi
-if [ "$ESP32" = true ]; then
+if [ "$ESPEMU" = true ]; then
+    echo "ESP32:   esp-emu (ESP32-S3 build of the real coprocessor firmware)"
+    echo "         log: ${ESPEMU_BUILD_DIR#$SCRIPT_DIR/}/esp-emu.log"
+    echo "         Wi-Fi: soft AP \"$ESPEMU_WIFI_SSID\", network $ESPEMU_NET"
+    echo "         BLE: ${ESPEMU_BLE_HCI:-built-in controller}"
+    if [ "$ESPEMU_QUANTUM_US" = 0 ]; then
+        echo "         clock: free-running (ESPEMU_QUANTUM_US=0)"
+    else
+        echo "         clock: lockstep, ${ESPEMU_QUANTUM_US} us quantum"
+    fi
+elif [ "$ESP32" = true ]; then
     echo "ESP32:   dual-machine mode (real coprocessor)"
     echo "         meadow config route socket://localhost:4242"
 else
@@ -392,8 +498,36 @@ echo "Press Ctrl+C to stop."
 echo ""
 cd "$SCRIPT_DIR"
 
+# esp-emu first: the bridge connects to it when Renode loads the platform.  It
+# is stopped when this script exits.
+if [ "$ESPEMU" = true ]; then
+    ESPEMU_LOG="$ESPEMU_BUILD_DIR/esp-emu.log"
+    "$ESPEMU_CMD" --chip esp32s3 --firmware "$ESPEMU_FW" \
+        --cosim-tcp "127.0.0.1:$ESPEMU_COSIM_PORT" --uart-tcp "127.0.0.1:$ESPEMU_UART_PORT" \
+        --net "$ESPEMU_NET" --wifi-ssid "$ESPEMU_WIFI_SSID" --wifi-password "$ESPEMU_WIFI_PASSWORD" \
+        ${ESPEMU_BT_ARGS[@]+"${ESPEMU_BT_ARGS[@]}"} \
+        > "$ESPEMU_LOG" 2>&1 &
+    ESPEMU_PID=$!
+    trap 'kill $ESPEMU_PID 2>/dev/null; wait $ESPEMU_PID 2>/dev/null' EXIT
+    # Wait for both servers by esp-emu's log, not by connecting: a probe would be
+    # taken for a client.
+    for _ in $(seq 1 100); do
+        if grep -q "cosim\] tcp: listening" "$ESPEMU_LOG" && grep -q "UART TCP server listening" "$ESPEMU_LOG"; then
+            break
+        fi
+        if ! kill -0 $ESPEMU_PID 2>/dev/null; then
+            echo "ERROR: esp-emu stopped; see $ESPEMU_LOG"
+            exit 1
+        fi
+        sleep 0.1
+    done
+fi
+
 # For dual-machine mode, pass the ESP32 firmware path as a Renode variable
-if [ "$ESP32" = true ]; then
+if [ "$ESPEMU" = true ]; then
+    $RENODE_CMD --disable-xwt --port "$MONITOR_PORT" \
+        --execute "set espemu_uart_port $ESPEMU_UART_PORT; include @$SCRIPT"
+elif [ "$ESP32" = true ]; then
     $RENODE_CMD --disable-xwt --port "$MONITOR_PORT" \
         --execute "set esp32_fw @$ESP32_FW; include @$SCRIPT"
 else
