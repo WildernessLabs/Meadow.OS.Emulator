@@ -31,6 +31,7 @@ write errors, 1 otherwise.
 
 import argparse
 import asyncio
+import dataclasses
 import logging
 import sys
 
@@ -111,6 +112,37 @@ def patch_controller(Controller, hci):
     Controller.on_hci_command = on_hci_command
 
 
+def deliver_scan_responses(scanner, advertiser, hci):
+    """Give the scanner the advertiser's real scan response data.
+
+    Bumble 0.0.236's virtual controller fills its scan response reports with
+    the advertising data and never uses the stored scan response.  Meadow's
+    firmware advertises its name only in the scan response, so without this a
+    scan cannot find the device by name.
+    """
+    extended = hci.HCI_LE_Extended_Advertising_Report_Event
+    legacy = hci.HCI_LE_Advertising_Report_Event
+    send = scanner.send_hci_packet
+
+    def is_scan_response(packet, report):
+        if isinstance(packet, extended):
+            return bool(report.event_type & extended.EventType.SCAN_RESPONSE)
+        return report.event_type == legacy.EventType.SCAN_RSP
+
+    def send_hci_packet(packet):
+        if isinstance(packet, (extended, legacy)):
+            data = bytes(advertiser.le_legacy_advertiser.scan_response_data)
+            packet = type(packet)(
+                [
+                    dataclasses.replace(report, data=data) if is_scan_response(packet, report) else report
+                    for report in packet.reports
+                ]
+            )
+        send(packet)
+
+    scanner.send_hci_packet = send_hci_packet
+
+
 def write_value_for(current):
     if len(current) == 4:
         return (42).to_bytes(4, "little")
@@ -148,6 +180,7 @@ async def run(args):
     emu_controller.random_address = hci.Address("00:11:22:33:44:55", hci.Address.PUBLIC_DEVICE_ADDRESS)
 
     phone_controller = Controller("phone-controller", link=link, public_address="AA:BB:CC:DD:EE:FF")
+    deliver_scan_responses(phone_controller, emu_controller, hci)
     phone_host = Host()
     phone_host.controller = phone_controller
     phone_controller.host = phone_host
