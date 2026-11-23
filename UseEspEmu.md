@@ -284,8 +284,9 @@ Measured with the `--debug=wifi,messages --tracemessages` S3 firmware:
 - Legacy with pacing: Wi-Fi 149 s (145 s before), BLE passes, and resets work with and
   without the trace. Legacy's ESP log stays off USART1 because a hook skips
   `hcom_logging_syslog`.
-- Not done: BLE on Rebase; `setup.sh` still installs esp-emu only for Legacy; a Rebase app
-  must not call `NetworkInterface.GetAllNetworkInterfaces()`, which throws without
+- BLE on Rebase with the normal S3 build: `--name MeadowEmu` connects, 0 GATT errors, and the
+  app receives the writes. `setup.sh` now installs esp-emu and Bumble for both OSes.
+- A Rebase app must not call `NetworkInterface.GetAllNetworkInterfaces()`, which throws without
   `/etc/resolv.conf`.
 
 Then decide whether to retire `meadow-dual.resc`, `meadow-esp32.repl` and the

@@ -72,8 +72,8 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Checks and installs all prerequisites for building and running"
             echo "the Meadow.OS Emulator, including firmware build tools, custom"
-            echo "Renode fork, .NET SDK, and Meadow CLI.  For Legacy it also installs"
-            echo "esp-emu and Bumble (optional, for ./run.sh --esp-emu)."
+            echo "Renode fork, .NET SDK, and Meadow CLI.  It also installs esp-emu"
+            echo "and Bumble (optional, for ./run.sh --esp-emu)."
             exit 0
             ;;
         *)
@@ -434,12 +434,11 @@ else
 fi
 
 # ============================================================
-# 9. esp-emu coprocessor (Legacy, ./run.sh --esp-emu)
+# 9. esp-emu coprocessor (./run.sh --esp-emu)
 #
 # Optional: everything else works without it, so a problem here is a
 # warning and does not fail setup.
 # ============================================================
-if [ "$MODE" = "legacy" ]; then
 section "esp-emu Coprocessor (optional)"
 
 ESP_EMU_MIN="1.2.0"             # the first with the chip as an SPI slave
@@ -510,7 +509,6 @@ elif [ -f "$MEADOW_EMULATOR_ESP_DIR/build.sh" ] && grep -q -- "--emulator" "$MEA
     warn "ESP32-S3 firmware not built (needs ESP-IDF 6.1) — run: cd $MEADOW_EMULATOR_ESP_DIR && ./build.sh --emulator --build"
 else
     warn "ESP32-S3 firmware — $MEADOW_EMULATOR_ESP_DIR has no build.sh --emulator; update it to Meadow-ESP32 develop (or set MEADOW_EMULATOR_ESP_DIR)"
-fi
 fi
 
 # ============================================================

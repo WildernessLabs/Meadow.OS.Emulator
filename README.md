@@ -201,7 +201,7 @@ STM32 (NuttX, Renode)                    ESP32-S3 (Meadow firmware, esp-emu)
 ```
 
 Requirements: esp-emu 1.2.0 or later on `PATH` (or `ESP_EMU=path`; `./setup.sh`
-installs it for Legacy, in `~/.local/bin`), and the firmware built with
+installs it, in `~/.local/bin`), and the firmware built with
 `cd $MEADOW_EMULATOR_ESP_DIR && ./build.sh --emulator --build`
 (`build-esp32s3/merged_flash.bin`; `ESPEMU_FW_PATH` overrides). `run.sh` starts
 esp-emu first (log in `esp-emu.log` in `build/legacy/` for Legacy, `build/` for
