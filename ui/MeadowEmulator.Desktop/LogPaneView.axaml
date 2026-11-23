@@ -1,0 +1,41 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:MeadowEmulator.Desktop"
+             x:Class="MeadowEmulator.Desktop.LogPaneView"
+             x:DataType="local:LogPane">
+  <DockPanel>
+    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4">
+      <TextBlock DockPanel.Dock="Left" Text="{Binding Title}" FontWeight="SemiBold"
+                 VerticalAlignment="Center" Margin="4,0,10,0" />
+      <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="4">
+        <ToggleButton Content="Pause" IsChecked="{Binding IsPaused}" />
+        <Button Content="Copy" Click="OnCopy" ToolTip.Tip="Copy the selected lines" />
+        <Button Content="Save" Click="OnSave" />
+        <Button Content="Clear" Command="{Binding ClearCommand}" />
+      </StackPanel>
+      <TextBox Text="{Binding Filter}" PlaceholderText="Filter" Margin="0,0,6,0" />
+    </DockPanel>
+    <Border BorderBrush="Gray" BorderThickness="1" CornerRadius="3">
+      <ListBox x:Name="LinesList" ItemsSource="{Binding Lines}" SelectionMode="Multiple"
+               FontFamily="Menlo,DejaVu Sans Mono,monospace" FontSize="12"
+               ScrollViewer.HorizontalScrollBarVisibility="Auto">
+        <ListBox.ItemsPanel>
+          <ItemsPanelTemplate>
+            <VirtualizingStackPanel />
+          </ItemsPanelTemplate>
+        </ListBox.ItemsPanel>
+        <ListBox.Styles>
+          <Style Selector="ListBoxItem">
+            <Setter Property="Padding" Value="4,0" />
+            <Setter Property="MinHeight" Value="0" />
+          </Style>
+        </ListBox.Styles>
+        <ListBox.ItemTemplate>
+          <DataTemplate x:DataType="x:String">
+            <TextBlock Text="{Binding}" />
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+      </ListBox>
+    </Border>
+  </DockPanel>
+</UserControl>
