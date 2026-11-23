@@ -72,7 +72,8 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Checks and installs all prerequisites for building and running"
             echo "the Meadow.OS Emulator, including firmware build tools, custom"
-            echo "Renode fork, .NET SDK, and Meadow CLI."
+            echo "Renode fork, .NET SDK, and Meadow CLI.  For Legacy it also installs"
+            echo "esp-emu and Bumble (optional, for ./run.sh --esp-emu)."
             exit 0
             ;;
         *)
@@ -433,7 +434,87 @@ else
 fi
 
 # ============================================================
-# 9. Firmware build output
+# 9. esp-emu coprocessor (Legacy, ./run.sh --esp-emu)
+#
+# Optional: everything else works without it, so a problem here is a
+# warning and does not fail setup.
+# ============================================================
+if [ "$MODE" = "legacy" ]; then
+section "esp-emu Coprocessor (optional)"
+
+ESP_EMU_MIN="1.2.0"             # the first with the chip as an SPI slave
+ESP_EMU_INSTALL="1.2.0"         # the version tested with this repo
+ESP_EMU_BIN_DIR="${ESP_EMU_BIN_DIR:-$HOME/.local/bin}"
+BLE_VENV="$SCRIPT_DIR/build/ble-venv"
+BUMBLE_SPEC="bumble>=0.0.220,<0.1"
+
+esp_emu_path() {
+    if [ -n "${ESP_EMU:-}" ]; then
+        echo "$ESP_EMU"
+    elif command -v esp-emu &> /dev/null; then
+        command -v esp-emu
+    elif [ -x "$ESP_EMU_BIN_DIR/esp-emu" ]; then
+        echo "$ESP_EMU_BIN_DIR/esp-emu"
+    fi
+}
+esp_emu_version() {
+    "$1" --version 2>/dev/null | grep -o -E '[0-9]+\.[0-9]+\.[0-9]+' | tail -1
+}
+
+ESP_EMU_PATH="$(esp_emu_path)"
+ESP_EMU_VER=""
+if [ -n "$ESP_EMU_PATH" ] && [ -x "$ESP_EMU_PATH" ]; then
+    ESP_EMU_VER="$(esp_emu_version "$ESP_EMU_PATH")"
+fi
+
+if [ -n "$ESP_EMU_VER" ] && ! version_lt "$ESP_EMU_VER" "$ESP_EMU_MIN"; then
+    ok "esp-emu $ESP_EMU_VER ($ESP_EMU_PATH)"
+elif [ -n "${ESP_EMU:-}" ]; then
+    # The user chose this binary, so do not install another beside it.
+    warn "esp-emu at ESP_EMU=$ESP_EMU is ${ESP_EMU_VER:-not usable}; $ESP_EMU_MIN or later is needed"
+elif [ "$PLATFORM" = "macos" ] && [ "$ARCH" != "arm64" ]; then
+    warn "esp-emu — no release for Intel Macs; --esp-emu is not available here"
+else
+    echo "  Installing esp-emu $ESP_EMU_INSTALL to $ESP_EMU_BIN_DIR..."
+    # The installer from the same tag as the release, not from main.
+    ESP_EMU_URL="https://raw.githubusercontent.com/espressif/esp-emulator/v$ESP_EMU_INSTALL/install.sh"
+    if execute_command "curl -fsSL \"$ESP_EMU_URL\" | sh -s -- --version \"$ESP_EMU_INSTALL\" --bin-dir \"$ESP_EMU_BIN_DIR\" --quiet"; then
+        added "esp-emu $ESP_EMU_INSTALL"
+    else
+        warn "esp-emu install failed — see https://github.com/espressif/esp-emulator/releases"
+    fi
+fi
+if [ "$DRYRUN" != true ] && [ -x "$ESP_EMU_BIN_DIR/esp-emu" ] && [ -z "${ESP_EMU:-}" ] && ! command -v esp-emu &> /dev/null; then
+    warn "esp-emu is not on PATH — add $ESP_EMU_BIN_DIR to PATH, or set ESP_EMU=$ESP_EMU_BIN_DIR/esp-emu"
+fi
+
+# Bumble, for tools/ble-peer.py, in its own venv (build/ is not tracked).
+if [ -x "$BLE_VENV/bin/python" ] && "$BLE_VENV/bin/python" -c "import bumble" &> /dev/null; then
+    ok "Bumble (build/ble-venv)"
+elif ! command -v python3 &> /dev/null; then
+    warn "Bumble — python3 not found; tools/ble-peer.py needs it"
+else
+    echo "  Installing Bumble into build/ble-venv..."
+    if execute_command "mkdir -p \"$SCRIPT_DIR/build\" && python3 -m venv \"$BLE_VENV\" && \"$BLE_VENV/bin/python\" -m pip install -q --disable-pip-version-check \"$BUMBLE_SPEC\""; then
+        added "Bumble (build/ble-venv)"
+    else
+        warn "Bumble install failed — tools/ble-peer.py will not run"
+    fi
+fi
+
+# The firmware is not built here: it needs ESP-IDF 6.1 and takes some minutes.
+ESP_EMU_FW="${ESPEMU_FW_PATH:-$MEADOW_EMULATOR_ESP_DIR/build-esp32s3/merged_flash.bin}"
+if [ -f "$ESP_EMU_FW" ]; then
+    ok "ESP32-S3 firmware ($ESP_EMU_FW)"
+elif [ -f "$MEADOW_EMULATOR_ESP_DIR/build.sh" ] && grep -q -- "--emulator" "$MEADOW_EMULATOR_ESP_DIR/build.sh"; then
+    warn "ESP32-S3 firmware not built (needs ESP-IDF 6.1) — run: cd $MEADOW_EMULATOR_ESP_DIR && ./build.sh --emulator --build"
+else
+    warn "ESP32-S3 firmware — $MEADOW_EMULATOR_ESP_DIR has no build.sh --emulator; use Meadow-ESP32 branch SupportEspEmu (or set MEADOW_EMULATOR_ESP_DIR)"
+fi
+fi
+
+# ============================================================
+# 10. Firmware build output
 # ============================================================
 section "Firmware Build"
 

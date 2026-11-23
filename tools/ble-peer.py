@@ -17,9 +17,9 @@ readable characteristic, writes the writable ones and reads them back, then
 disconnects and exits.  The scan has no fixed length, so the peer can wait
 while the Meadow app is deployed.
 
-Usage, with Bumble installed (pip3 install "bumble>=0.0.220,<0.1"):
+Usage, with Bumble from ./setup.sh (in build/ble-venv):
 
-    tools/ble-peer.py [--port 9544] [--name NAME] [--timeout SECONDS] &
+    build/ble-venv/bin/python tools/ble-peer.py [--port 9544] [--name NAME] [--timeout SECONDS] &
     ESPEMU_BLE_HCI=tcp:localhost:9544 ./run.sh --esp-emu ...
 
 Write values: 4-byte characteristics get the int32 42, 1-byte ones 0x01, and
@@ -128,7 +128,7 @@ async def run(args):
         from bumble.link import LocalLink
         from bumble.transport import open_transport
     except ImportError:
-        print('ERROR: Bumble is not installed: pip3 install "bumble>=0.0.220,<0.1"')
+        print("ERROR: Bumble is not available. Run ./setup.sh, then: build/ble-venv/bin/python tools/ble-peer.py")
         return 1
 
     patch_controller(Controller, hci)

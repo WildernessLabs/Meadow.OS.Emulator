@@ -199,8 +199,9 @@ STM32 (NuttX, Renode)                    ESP32-S3 (Meadow firmware, esp-emu)
                      clock held in 100 µs lockstep
 ```
 
-Requirements: esp-emu 1.2.0 or later on `PATH` (or `ESP_EMU=path`), and the
-firmware built with `cd $MEADOW_EMULATOR_ESP_DIR && ./build.sh --emulator --build`
+Requirements: esp-emu 1.2.0 or later on `PATH` (or `ESP_EMU=path`; `./setup.sh`
+installs it for Legacy, in `~/.local/bin`), and the firmware built with
+`cd $MEADOW_EMULATOR_ESP_DIR && ./build.sh --emulator --build`
 (`build-esp32s3/merged_flash.bin`; `ESPEMU_FW_PATH` overrides). `run.sh` starts
 esp-emu first (log in `build/legacy/esp-emu.log`) and stops it on exit. The
 ESP's own UART output is copied to `/tmp/renode-esp-uart.txt`.
@@ -224,12 +225,12 @@ host, for both HTTP and HTTPS. Override with `ESPEMU_WIFI_SSID`,
 
 Bluetooth LE: esp-emu needs the firmware's ELF, which `run.sh` passes
 (`build-esp32s3/MeadowComms.elf`, or `ESPEMU_ELF`). To talk to the ESP from a
-"phone", run `tools/ble-peer.py` (Bumble, `pip3 install "bumble>=0.0.220,<0.1"`)
-first and point esp-emu at it. It waits for a connectable device, connects,
+"phone", run `tools/ble-peer.py` (Bumble, which `./setup.sh` installs in
+`build/ble-venv`) first and point esp-emu at it. It waits for a connectable device, connects,
 reads every characteristic, writes the writable ones and exits:
 
 ```bash
-tools/ble-peer.py --timeout 900 &            # Bumble controller on port 9544
+build/ble-venv/bin/python tools/ble-peer.py --timeout 900 &   # Bumble controller on port 9544
 ESPEMU_BLE_HCI=tcp:localhost:9544 ./run.sh --legacy --esp-emu
 ```
 
