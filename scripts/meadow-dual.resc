@@ -14,6 +14,7 @@
 # Compile shared C# peripherals (must be before any machine creation)
 # =============================================================================
 include @peripherals/Winbond_W25QXXXJV.cs
+include @peripherals/SysTickFromReload.cs
 include @peripherals/SpiBridge.cs
 include @peripherals/QspiDmaBypass.cs
 include @peripherals/MqReceiveIntercept.cs
@@ -30,6 +31,8 @@ include @peripherals/EspcpSpiBypass.cs
 include @peripherals/STM32F7_RCC_Custom.cs
 mach create "stm32"
 machine LoadPlatformDescription @platforms/meadow-f7-dual.repl
+# SysTick rate from the firmware's reload value (Renode ignores CLKSOURCE = HCLK/8).
+sysbus.nvic FollowSysTickReload
 
 # STM32 needs enough virtual time to boot NuttX and start the HCOM handler.
 # Without this, the ESP32 machine consumes all execution time (heavy Python

@@ -212,9 +212,9 @@ reports the coprocessor's firmware version.
 
 Clock: the ESP's clock is held to the STM32's in steps of `ESPEMU_QUANTUM_US`
 microseconds (default 100; 0 lets esp-emu run free). `run.sh` writes the
-bridge's settings to `build/legacy/espemu-bridge.repl` on each run. 100 and
-1000 us run a Wi-Fi workload in the same time, and free-running is about 15%
-slower (UseEspEmu.md, step 5).
+bridge's settings to `build/legacy/espemu-bridge.repl` on each run. A Wi-Fi
+workload takes 145 s at 100 us, 150 s at 1000 us and 156 s free-running
+(UseEspEmu.md, step 5).
 
 Wi-Fi: esp-emu provides a soft AP, `myssid` with password `mypassword`, on a
 user-mode (NAT) network, `10.0.2.0/24`, with no host setup. An app that calls
@@ -498,6 +498,7 @@ Both MCUs have full platform definitions written from scratch (Renode has no sto
 | `ESP32_TimerGroup.cs` | Timer group with calibration ready bit |
 | `QspiDmaBypass.cs` | C# hook: QSPI DMA memory copy bypass (22K+ calls during assembly load) |
 | `EspcpSpiBypass.cs` | C# hook: ESPCP SPI DMA bypass |
+| `SysTickFromReload.cs` | Sets the SysTick rate from the firmware's RELOAD value (Renode ignores CLKSOURCE = HCLK/8) |
 | `SvcPrimaskFix.cs` | C# hook: PRIMASK clearing at SVC (fallback if fork not available) |
 | `MqReceiveIntercept.cs` | C# hook: mq_receive interception for ESPCP polling |
 | `UartRxBypass.cs` | C# hook: UART RX bypass for fast file deploy (currently disabled — Renode 1.16.1 API change) |

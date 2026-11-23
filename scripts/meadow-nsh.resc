@@ -1,7 +1,10 @@
 using sysbus
 include @peripherals/Winbond_W25QXXXJV.cs
+include @peripherals/SysTickFromReload.cs
 mach create "meadow"
 machine LoadPlatformDescription @platforms/meadow-f7.repl
+# SysTick rate from the firmware's reload value (Renode ignores CLKSOURCE = HCLK/8).
+sysbus.nvic FollowSysTickReload
 
 sysbus LoadBinary @build/nuttx.bin 0x08000000
 sysbus.cpu VectorTableOffset 0x08000000

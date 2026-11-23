@@ -1,5 +1,6 @@
 using sysbus
 include @peripherals/Winbond_W25QXXXJV.cs
+include @peripherals/SysTickFromReload.cs
 include @peripherals/EspcpStub.cs
 include @peripherals/QspiDmaBypass.cs
 include @peripherals/EspcpSpiBypass.cs
@@ -8,6 +9,8 @@ include @peripherals/UartRxBypass.cs
 include @peripherals/STM32F7_RCC_Custom.cs
 mach create "meadow-legacy"
 machine LoadPlatformDescription @platforms/meadow-f7.repl
+# SysTick rate from the firmware's reload value (Renode ignores CLKSOURCE = HCLK/8).
+sysbus.nvic FollowSysTickReload
 
 # RCC peripheral with proper clock ready bit handling
 machine LoadPlatformDescriptionFromString "rcc: Miscellaneous.STM32F7_RCC_Custom @ sysbus 0x40023800"
