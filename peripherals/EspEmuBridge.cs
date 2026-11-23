@@ -177,6 +177,7 @@ namespace Antmicro.Renode.Peripherals.SPI
             }
             var client = new TcpClient(host, uartPort) { NoDelay = true };
             uartStream = client.GetStream();
+            attachedUart = uart;
             uart.CharReceived += b =>
             {
                 try
@@ -293,6 +294,11 @@ namespace Antmicro.Renode.Peripherals.SPI
         {
             selected = false;
             held = false;
+            // Bytes from before the reset belong to the ESP's previous run.
+            while(uartReceive.TryDequeue(out _))
+            {
+            }
+            uartCreditNs = 0;
         }
 
         private void DriveEn(bool level)
@@ -395,7 +401,27 @@ namespace Antmicro.Renode.Peripherals.SPI
                 LongestTickNs = (long)(now - lastTickNs);
             }
             lastTickNs = now;
+            DeliverUartBytes();
             Grant(quantumNs);
+        }
+
+        // Hand the STM32 the ESP's UART bytes that one quantum of 115200 baud carries.
+        private void DeliverUartBytes()
+        {
+            if(attachedUart == null)
+            {
+                return;
+            }
+            uartCreditNs += quantumNs;
+            while(uartCreditNs >= UartByteNs && uartReceive.TryDequeue(out var b))
+            {
+                attachedUart.WriteChar(b);
+                uartCreditNs -= UartByteNs;
+            }
+            if(uartReceive.IsEmpty && uartCreditNs > UartByteNs)
+            {
+                uartCreditNs = UartByteNs;
+            }
         }
 
         private void Grant(ulong ns)
@@ -432,8 +458,18 @@ namespace Antmicro.Renode.Peripherals.SPI
                     for(var i = 0; i < n; i++)
                     {
                         var b = buf[i];
-                        // From outside the machine's time domain, as a socket terminal's bytes are.
-                        machine.HandleTimeDomainEvent(uart.WriteChar, b, false);
+                        if(quantumNs > 0)
+                        {
+                            // Delivered at the UART's baud rate by OnQuantum: esp-emu sends
+                            // a burst at once, and a burst of log output would overrun the
+                            // OS's receive buffer and lose the control lines in it.
+                            uartReceive.Enqueue(b);
+                        }
+                        else
+                        {
+                            // From outside the machine's time domain, as a socket terminal's bytes are.
+                            machine.HandleTimeDomainEvent(uart.WriteChar, b, false);
+                        }
                         if(b == (byte)'\n')
                         {
                             var text = line.ToString().TrimEnd('\r');
@@ -725,6 +761,11 @@ namespace Antmicro.Renode.Peripherals.SPI
         private readonly LimitTimer quantum;
         private readonly BlockingCollection<Result> results = new BlockingCollection<Result>();
         private readonly ManualResetEventSlim espWaiting = new ManualResetEventSlim(false);
+        private const ulong UartByteNs = 86806; // 10 bits at 115200 baud
+
+        private readonly ConcurrentQueue<byte> uartReceive = new ConcurrentQueue<byte>();
+        private IUART attachedUart;
+        private ulong uartCreditNs;
         private NetworkStream uartStream;
         private FileStream espLog;
         private bool espSpiReady;
