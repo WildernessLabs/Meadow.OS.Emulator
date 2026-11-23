@@ -199,6 +199,17 @@ Start from Espressif's `EspEmuSpiBridge.cs` (Apache-2.0, keep the header) and ch
        connection interval); the name is readable from Generic Access.
 5. Compare speed against today's dual-machine mode (0.57x) with `quantumUs` 100 / 1000 / 0.
 
+   **Superseded 2026-11-23:** the table below was measured with SysTick running 9x fast (see
+   "SysTick fix" after it). Corrected timings, same workload:
+
+   | Mode | Wi-Fi workload (wall) | SPI exchanges |
+   |---|---|---|
+   | esp-emu, 100 us quantum (default) | 145 s, 146 s (two runs) | 610 |
+   | esp-emu, 1000 us quantum | 150 s | 686 |
+   | esp-emu, free-running (0) | 156 s | 634 |
+
+   Lockstep at 100 us is still the best choice; the three are within about 8%.
+
    **Done 2026-11-22.** `ESPEMU_QUANTUM_US` (default 100, 0 = free-running) sets the bridge's
    quantum: `run.sh` writes the bridge's platform entries to `build/legacy/espemu-bridge.repl`
    on each run. The workload is the Wi-Fi app booted from an image (`--mount`), from power-on
@@ -233,6 +244,26 @@ Start from Espressif's `EspEmuSpiBridge.cs` (Apache-2.0, keep the header) and ch
      has no effect on this Legacy build (`stdout → /dev/monostdout (HCOM)` in the console), so
      app output cannot be moved to USART1. The scripts used: a host-time stamper on the USART1
      console and `meadow listen` only for the final `WIFIEMU DONE`.
+
+   **SysTick fix, 2026-11-23.** The gap above was exactly 9.0x once NuttX's tick counter
+   (`g_system_timer`) was read directly; the drifting ratios came from sampling the syslog.
+   Both OSes run SysTick from HCLK/8 (`CLKSOURCE = 0`), Renode's NVIC ignores that bit and
+   counted at the platform's 216 MHz, and Legacy's reload (23999) expects 24 MHz.
+   `peripherals/SysTickFromReload.cs` (`sysbus.nvic FollowSysTickReload`, in every Meadow
+   script) sets the count rate from the firmware's RELOAD write, because it differs by build:
+   24 MHz on Legacy, 27 MHz on Rebase (reload 26999). Measured after it:
+
+   - NuttX time equals Renode's virtual time (117.63 s against 117.63 s). While the CPU is
+     busy the STM32 runs at about 0.1x real time; once idle, virtual time follows host time.
+   - MiniTests from an image: Legacy 77 s, Rebase 99 s, both 736 cases with the one known
+     failure (`exceptions.test_0_ldflda_null_pointer`).
+   - esp-emu: Wi-Fi HTTP and HTTPS complete, and BLE connects with 0 GATT errors and all
+     three writes reach the app.
+   - Dual-machine: the script still loads and applies the rate; it still does not answer
+     `device info`. `meadow-legacy.resc` and `meadow-nsh.resc` got the same two lines and were
+     not run.
+   - Not reviewed: hooks and timeouts tuned while the clock ran 9x fast, such as the ESPCP
+     polling throttle's `usleep(10ms)`, which was really about 1.1 ms before this.
 
 ### 5. Afterwards
 
