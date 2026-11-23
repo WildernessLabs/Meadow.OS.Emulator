@@ -1,0 +1,94 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:MeadowEmulator.Desktop"
+        xmlns:core="clr-namespace:MeadowEmulator.Core;assembly=MeadowEmulator.Core"
+        x:Class="MeadowEmulator.Desktop.MainWindow"
+        x:DataType="local:MainViewModel"
+        Title="Meadow Emulator" Width="1280" Height="800" MinWidth="900" MinHeight="560">
+  <DockPanel Margin="10">
+
+    <!-- Run controls -->
+    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10">
+      <TextBlock DockPanel.Dock="Right" Text="{Binding StatusText}" FontWeight="SemiBold"
+                 VerticalAlignment="Center" MaxWidth="420" TextTrimming="CharacterEllipsis"
+                 ToolTip.Tip="{Binding StatusText}" />
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <TextBlock Text="OS" VerticalAlignment="Center" />
+        <ComboBox ItemsSource="{Binding OsChoices}" SelectedItem="{Binding SelectedOs}"
+                  IsEnabled="{Binding CanChangeSetup}" MinWidth="100" />
+        <TextBlock Text="Config" VerticalAlignment="Center" />
+        <ComboBox ItemsSource="{Binding Profiles}" SelectedItem="{Binding SelectedProfile}"
+                  IsEnabled="{Binding CanChangeSetup}" MinWidth="230">
+          <ComboBox.ItemTemplate>
+            <DataTemplate x:DataType="core:EmulatorProfile">
+              <TextBlock>
+                <Run Text="{Binding Name}" /><Run Text="  (" /><Run Text="{Binding Board}" /><Run Text=")" />
+              </TextBlock>
+            </DataTemplate>
+          </ComboBox.ItemTemplate>
+        </ComboBox>
+        <CheckBox Content="esp-emu" IsChecked="{Binding UseEspEmu}" IsEnabled="{Binding CanChangeSetup}" />
+        <Button Content="Start" Command="{Binding StartCommand}" Classes="accent" />
+        <Button Content="Stop" Command="{Binding StopCommand}" />
+        <Button Content="Reset" Command="{Binding ResetCommand}" />
+      </StackPanel>
+    </DockPanel>
+
+    <!-- Image, app and firmware -->
+    <ScrollViewer DockPanel.Dock="Left" Width="300" Margin="0,0,10,0">
+      <StackPanel Spacing="8" Margin="0,0,12,0">
+        <TextBlock Text="File system image" FontWeight="SemiBold" />
+        <ComboBox ItemsSource="{Binding Images}" SelectedItem="{Binding SelectedImage}"
+                  IsEnabled="{Binding CanChangeSetup}" HorizontalAlignment="Stretch">
+          <ComboBox.ItemTemplate>
+            <DataTemplate x:DataType="local:ImageChoice">
+              <TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis" />
+            </DataTemplate>
+          </ComboBox.ItemTemplate>
+        </ComboBox>
+        <Button Content="Browse for image…" Click="OnBrowseImage" IsEnabled="{Binding CanChangeSetup}" />
+
+        <Separator />
+        <TextBlock Text="Application" FontWeight="SemiBold" />
+        <TextBox Text="{Binding ProjectPath}" PlaceholderText="Path to the app's .csproj" />
+        <Button Content="Browse for project…" Click="OnBrowseProject" />
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <Button Content="Deploy live" Command="{Binding DeployLiveCommand}"
+                  ToolTip.Tip="Build, deploy over HCOM to the running emulator, and stream output" />
+          <Button Content="Detach" Command="{Binding DetachCommand}"
+                  ToolTip.Tip="Stop `meadow app run`. Detaching during a deploy can leave the runtime disabled." />
+        </StackPanel>
+        <Button Content="Bake into image…" Click="OnBakeImage" IsEnabled="{Binding CanBake}"
+                ToolTip.Tip="Pack the app's last live deploy into a LittleFS image for the selected OS" />
+
+        <Separator />
+        <TextBlock Text="Firmware" FontWeight="SemiBold" />
+        <CheckBox Content="Clean build" IsChecked="{Binding CleanBuild}" />
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <Button Content="Build firmware" Command="{Binding BuildFirmwareCommand}" />
+          <Button Content="Cancel" Command="{Binding CancelBuildCommand}" />
+        </StackPanel>
+
+        <Separator />
+        <TextBlock Text="{Binding Notice}" TextWrapping="Wrap" FontSize="12" Opacity="0.8" />
+      </StackPanel>
+    </ScrollViewer>
+
+    <!-- Output -->
+    <TabControl>
+      <TabItem Header="App + Syslog">
+        <Grid ColumnDefinitions="*,6,*">
+          <local:LogPaneView Grid.Column="0" DataContext="{Binding AppLog}" />
+          <GridSplitter Grid.Column="1" ResizeDirection="Columns" Background="Transparent" />
+          <local:LogPaneView Grid.Column="2" DataContext="{Binding SysLog}" />
+        </Grid>
+      </TabItem>
+      <TabItem Header="ESP">
+        <local:LogPaneView DataContext="{Binding EspLog}" />
+      </TabItem>
+      <TabItem Header="Emulator">
+        <local:LogPaneView DataContext="{Binding EmulatorLog}" />
+      </TabItem>
+    </TabControl>
+  </DockPanel>
+</Window>

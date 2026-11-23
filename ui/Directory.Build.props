@@ -1,0 +1,12 @@
+<Project>
+  <ItemGroup>
+    <!-- The emulator supports macOS and Linux only. -->
+    <AssemblyAttribute Include="System.Runtime.Versioning.UnsupportedOSPlatformAttribute">
+      <_Parameter1>windows</_Parameter1>
+    </AssemblyAttribute>
+
+    <!-- Renode is a .NET process that holds its UART logs open with an advisory
+         lock, which would otherwise block this app from reading them. -->
+    <RuntimeHostConfigurationOption Include="System.IO.DisableFileLocking" Value="true" />
+  </ItemGroup>
+</Project>

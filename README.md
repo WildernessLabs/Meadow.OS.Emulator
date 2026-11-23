@@ -96,6 +96,24 @@ ESP32:   dual-machine mode (real coprocessor)
          meadow config route socket://localhost:4242
 ```
 
+### Desktop app
+
+`ui/` holds an Avalonia desktop front end for macOS and Linux. It wraps `run.sh`,
+`build-meadow.os-emulated.sh`, `tools/make-lfs-image.sh` and Meadow.CLI:
+
+```bash
+dotnet run --project ui/MeadowEmulator.Desktop
+dotnet test ui/MeadowEmulator.slnx
+```
+
+- Choose Rebase or Legacy, a config, and a file system image compatible with that OS.
+- **Deploy live** runs `meadow app run` against the running emulator.
+- **Bake into image** packs the app's last live deploy into a LittleFS image, so
+  deploy the app once first. `meadow app build` does not create the publish folder.
+- Application output, syslog, ESP logs and emulator output have separate panes.
+
+Only one emulator can run at a time, because its ports and generated files are shared.
+
 ### Booting with a pre-built file system
 
 The emulated QSPI flash starts empty on every Renode start, so an app normally

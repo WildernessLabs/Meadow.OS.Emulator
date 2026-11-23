@@ -90,6 +90,7 @@ MONITOR_PORT="$EMU_MONITOR_PORT"
 
 POSITIONAL_ARGS=()
 MOUNT_IMAGE=""   # --mount=FILE: LittleFS image for the QSPI file system (default: none)
+PID_FILE=""      # --pid-file=FILE: Renode writes its process ID here
 GDB_PORT="${EMU_GDB_PORT:-0}"   # ports.gdb in the config; --gdb / --gdb=PORT override (0 = off)
 
 # The removed '--legacy DIR' / '--rebase DIR' form: an existing directory after
@@ -138,6 +139,9 @@ while [[ $# -gt 0 ]]; do
         --mount=*)
             MOUNT_IMAGE="${1#--mount=}"
             ;;
+        --pid-file=*)
+            PID_FILE="${1#--pid-file=}"
+            ;;
         --config=*)
             ;; # already handled above
         --config)
@@ -161,6 +165,7 @@ while [[ $# -gt 0 ]]; do
             echo "                  QSPI file system partition (0x500000): LittleFS v1 for Legacy, v2"
             echo "                  for Meadow.OS.  Default: none, the flash starts empty and the"
             echo "                  firmware formats it."
+            echo "  --pid-file=FILE Write Renode's process ID to FILE, for tools that stop it."
             echo ""
             echo "Override sibling-repo locations with MEADOW_EMULATOR_OS_DIR,"
             echo "MEADOW_EMULATOR_CLI_DIR, MEADOW_EMULATOR_ESP_DIR, MEADOW_EMULATOR_SAMPLES_DIR"
@@ -391,6 +396,20 @@ if [ -n "$MOUNT_IMAGE" ]; then
     # Absolute path: Renode runs from $SCRIPT_DIR, not the caller's directory
     MOUNT_IMAGE="$(cd "$(dirname "$MOUNT_IMAGE")" && pwd)/$(basename "$MOUNT_IMAGE")"
 
+    # The path is written unquoted into fs-image.resc below.
+    case "$MOUNT_IMAGE" in
+        *[[:space:]\"\']*)
+            echo "ERROR: --mount path cannot contain spaces or quotes: $MOUNT_IMAGE"
+            exit 1
+            ;;
+    esac
+
+    # A script without the fs-image.resc include would ignore the image.
+    if ! grep -q "include @build/.*fs-image.resc" "$SCRIPT_DIR/$SCRIPT"; then
+        echo "ERROR: $SCRIPT does not support --mount; it has no fs-image.resc include."
+        exit 1
+    fi
+
     # Refuse an image the firmware would not mount (it would format over it
     # silently): too big for the partition, no LittleFS superblock, or not the
     # on-disk version this OS uses.
@@ -523,13 +542,18 @@ if [ "$ESPEMU" = true ]; then
     done
 fi
 
+RENODE_ARGS=(--disable-xwt --port "$MONITOR_PORT")
+if [ -n "$PID_FILE" ]; then
+    RENODE_ARGS+=(--pid-file "$PID_FILE")
+fi
+
 # For dual-machine mode, pass the ESP32 firmware path as a Renode variable
 if [ "$ESPEMU" = true ]; then
-    $RENODE_CMD --disable-xwt --port "$MONITOR_PORT" \
+    $RENODE_CMD "${RENODE_ARGS[@]}" \
         --execute "set espemu_uart_port $ESPEMU_UART_PORT; include @$SCRIPT"
 elif [ "$ESP32" = true ]; then
-    $RENODE_CMD --disable-xwt --port "$MONITOR_PORT" \
+    $RENODE_CMD "${RENODE_ARGS[@]}" \
         --execute "set esp32_fw @$ESP32_FW; include @$SCRIPT"
 else
-    $RENODE_CMD --disable-xwt --port "$MONITOR_PORT" --execute "include @$SCRIPT"
+    $RENODE_CMD "${RENODE_ARGS[@]}" --execute "include @$SCRIPT"
 fi
