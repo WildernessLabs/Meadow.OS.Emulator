@@ -199,6 +199,41 @@ Start from Espressif's `EspEmuSpiBridge.cs` (Apache-2.0, keep the header) and ch
        connection interval); the name is readable from Generic Access.
 5. Compare speed against today's dual-machine mode (0.57x) with `quantumUs` 100 / 1000 / 0.
 
+   **Done 2026-11-22.** `ESPEMU_QUANTUM_US` (default 100, 0 = free-running) sets the bridge's
+   quantum: `run.sh` writes the bridge's platform entries to `build/legacy/espemu-bridge.repl`
+   on each run. The workload is the Wi-Fi app booted from an image (`--mount`), from power-on
+   to `WIFIEMU DONE` after one HTTP and one HTTPS GET, on `configs/legacy-ccm.yaml`:
+
+   | Mode | Wi-Fi workload (wall) | `device info` with coprocessor version |
+   |---|---|---|
+   | esp-emu, 100 us quantum (default) | 183 s, 185 s (two runs) | 8 s |
+   | esp-emu, 1000 us quantum | 182 s | 8 s |
+   | esp-emu, free-running (0) | 212 s | 5 s |
+   | Stub | n/a (no Wi-Fi) | never (the stub reports no version) |
+   | Dual-machine (`--esp32`) | n/a (no Wi-Fi) | no reply within 300 s |
+
+   - Lockstep costs nothing measurable: 100 and 1000 us take the same time, so the STM32 sets
+     the pace. Free-running is about 15% slower, mostly in the HTTPS part. Keep 100 us.
+   - Dual-machine mode does not answer `device info` with today's ESP32 build (its Xtensa
+     hooks were written for an older firmware), so there is no like-for-like comparison. The
+     0.57x in `ESP_Emu_Perf.md` is a real-time ratio, not comparable with these wall times.
+   - **Wall times only, because the clocks disagree.** NuttX's uptime (the syslog stamps) runs
+     ahead of Renode's virtual time by a ratio that drifts: in stub mode 5.1 s against 2.5 s at
+     30 s of host time, 43.2 s against 5.3 s at 60 s, 95.6 s against 32.3 s at 90 s; over the
+     esp-emu runs about 5x (185 s of uptime against 36 s of virtual time). It happens without
+     esp-emu, so the bridge is not the cause; not found yet. So the real-time ratios noted
+     earlier (step 3's 0.9x) are not reliable. The ESP follows Renode's virtual time, so it
+     sees about a fifth of the time the STM32 firmware thinks has passed: timeouts on the two
+     sides do not agree.
+   - The bridge's quantum timer is never late: `LongestTickNs` (new, with `MachineTimeNs` and
+     `EspTimeGrantedNs`) reads exactly one quantum, and granted ESP time matches virtual time
+     to within the extra grants.
+   - Measuring: `meadow listen` drops characters now and then (`Re…uesting`), and
+     `device info` cannot run while it holds HCOM. `InternalDebug.CopyApplicationOutputToUart`
+     has no effect on this Legacy build (`stdout → /dev/monostdout (HCOM)` in the console), so
+     app output cannot be moved to USART1. The scripts used: a host-time stamper on the USART1
+     console and `meadow listen` only for the final `WIFIEMU DONE`.
+
 ### 5. Afterwards
 
 Once the esp-emu path works for Legacy, add it for Rebase (no dual-machine mode exists for

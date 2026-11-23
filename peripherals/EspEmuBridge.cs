@@ -116,7 +116,8 @@ namespace Antmicro.Renode.Peripherals.SPI
                     this.Log(LogLevel.Error, "esp-emu did not stop for this machine's clock within {0} ms", ReplyTimeoutMs);
                 }
                 EspTimeAtAttachNs = Interlocked.Read(ref espTimeNs);
-                Grant();
+                machineAtAttachNs = MachineNs();
+                Grant(quantumNs);
                 quantum = new LimitTimer(machine.ClockSource, 1000000, this, "quantum", limit: quantumUs,
                     enabled: true, eventEnabled: true);
                 quantum.LimitReached += OnQuantum;
@@ -133,6 +134,15 @@ namespace Antmicro.Renode.Peripherals.SPI
 
         // Quanta granted while a transfer waited, beyond this machine's own.
         public long ExtraGrants { get; private set; }
+
+        // ESP time granted since attach, and this machine's virtual time since
+        // attach, in nanoseconds: they differ by the extra grants. And the
+        // longest stretch of this machine's time between two quantum ticks.
+        public long EspTimeGrantedNs => (long)espGrantedNs;
+
+        public long MachineTimeNs => (long)(MachineNs() - machineAtAttachNs);
+
+        public long LongestTickNs { get; private set; }
 
         public long ControlLines => Interlocked.Read(ref controlLines);
 
@@ -353,7 +363,7 @@ namespace Antmicro.Renode.Peripherals.SPI
                 if(quantumNs > 0 && espWaiting.IsSet)
                 {
                     ExtraGrants++;
-                    Grant();
+                    Grant(quantumNs);
                 }
                 if(DateTime.UtcNow > deadline)
                 {
@@ -370,21 +380,35 @@ namespace Antmicro.Renode.Peripherals.SPI
         }
 
         // The end of a quantum of this machine's virtual time: wait for the
-        // ESP to have used up its own, then let it run the next.
+        // ESP to have used up its own, then let it run the next. LongestTickNs
+        // records the longest stretch of this machine's time between two of
+        // these (measured: exactly one quantum, so the timer is never late).
         private void OnQuantum()
         {
             if(!espWaiting.Wait(ReplyTimeoutMs))
             {
                 this.Log(LogLevel.Warning, "esp-emu has not reached the end of its quantum after {0} ms", ReplyTimeoutMs);
             }
-            Grant();
+            var now = MachineNs() - machineAtAttachNs;
+            if((long)(now - lastTickNs) > LongestTickNs)
+            {
+                LongestTickNs = (long)(now - lastTickNs);
+            }
+            lastTickNs = now;
+            Grant(quantumNs);
         }
 
-        private void Grant()
+        private void Grant(ulong ns)
         {
             espWaiting.Reset();
-            Send(Msg(m => Ld(m, Proto.TimeGrant, Msg(g => Varint(g, Proto.TimeGrantAdvanceNs, quantumNs)))));
+            Send(Msg(m => Ld(m, Proto.TimeGrant, Msg(g => Varint(g, Proto.TimeGrantAdvanceNs, ns)))));
+            espGrantedNs += ns;
             QuantaGranted++;
+        }
+
+        private ulong MachineNs()
+        {
+            return (ulong)(machine.ElapsedVirtualTime.TimeElapsed.TotalMicroseconds * 1000);
         }
 
         private void UartReadLoop(IUART uart)
@@ -709,5 +733,8 @@ namespace Antmicro.Renode.Peripherals.SPI
         private long nextId;
         private long espTimeNs;
         private long controlLines;
+        private ulong machineAtAttachNs;
+        private ulong espGrantedNs;
+        private ulong lastTickNs;
     }
 }

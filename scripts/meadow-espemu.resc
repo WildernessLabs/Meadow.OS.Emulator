@@ -10,7 +10,8 @@
 ## run.sh --esp-emu starts esp-emu before Renode:
 ##   esp-emu --chip esp32s3 --firmware build-esp32s3/merged_flash.bin \
 ##       --cosim-tcp 127.0.0.1:5590 --uart-tcp 127.0.0.1:$espemu_uart_port
-## The co-simulation port (5590) is set in platforms/meadow-f7-espemu.repl.
+## The bridge (co-simulation port 5590, CS pin, clock quantum) is in
+## build/legacy/espemu-bridge.repl, written by run.sh.
 
 $espemu_uart_port?=5591
 
@@ -27,6 +28,7 @@ mach create "meadow-legacy"
 # Loading the platform connects to esp-emu (which must already be running),
 # holds the ESP in reset and, with quantumUs, holds its clock to this machine's.
 machine LoadPlatformDescription @platforms/meadow-f7-espemu.repl
+machine LoadPlatformDescription @build/legacy/espemu-bridge.repl
 
 # RCC peripheral with proper clock ready bit handling
 machine LoadPlatformDescriptionFromString "rcc: Miscellaneous.STM32F7_RCC_Custom @ sysbus 0x40023800"

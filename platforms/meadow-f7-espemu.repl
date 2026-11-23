@@ -19,16 +19,7 @@ qspiFlashMem: Memory.MappedMemory @ sysbus 0x90000000
 w25q: SPI.Winbond_W25QXXXJV @ quadspi
     underlyingMemory: qspiFlashMem
 
-// The ESP in esp-emu (started by run.sh first, --cosim-tcp 127.0.0.1:5590).
-// csPin is the chip select of the S3 build (Meadow-ESP32 Gpio.hpp). quantumUs
-// holds the ESP's clock to this machine's, 100 us at a time.
-espEmu: SPI.EspEmuBridge @ spi2
-    port: 5590
-    csPin: 10
-    quantumUs: 100
-
-// PF7 drives the ESP's EN on the board (MEADOW_ESP32_ONBOARD_RESET_PIN_OUTPUT,
-// open drain, low holds the ESP in reset). syscfg#5@7 is the EXTI line from
-// stm32f777.repl, kept.
-gpioPortF:
-    7 -> syscfg#5@7 | espEmu@1
+// The bridge to esp-emu (SPI.EspEmuBridge on spi2, and PF7 to the ESP's EN) is
+// in build/legacy/espemu-bridge.repl, which run.sh writes on every run so the
+// clock quantum (ESPEMU_QUANTUM_US) can change; scripts/meadow-espemu.resc loads
+// it straight after this file.

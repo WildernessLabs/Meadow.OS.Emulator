@@ -210,6 +210,12 @@ ESP's `+++SIR` before each exchange, as the OS's SPI lock does on a board (the
 shared Legacy hooks skip that lock for the EspcpStub). Meadow.CLI `device info`
 reports the coprocessor's firmware version.
 
+Clock: the ESP's clock is held to the STM32's in steps of `ESPEMU_QUANTUM_US`
+microseconds (default 100; 0 lets esp-emu run free). `run.sh` writes the
+bridge's settings to `build/legacy/espemu-bridge.repl` on each run. 100 and
+1000 us run a Wi-Fi workload in the same time, and free-running is about 15%
+slower (UseEspEmu.md, step 5).
+
 Wi-Fi: esp-emu provides a soft AP, `myssid` with password `mypassword`, on a
 user-mode (NAT) network, `10.0.2.0/24`, with no host setup. An app that calls
 `Connect("myssid", "mypassword")` joins it and reaches the internet through the
